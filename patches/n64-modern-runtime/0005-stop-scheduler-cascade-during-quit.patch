@@ -1,0 +1,23 @@
+diff --git a/ultramodern/src/threads.cpp b/ultramodern/src/threads.cpp
+--- a/ultramodern/src/threads.cpp
++++ b/ultramodern/src/threads.cpp
+@@ -22,6 +22,7 @@ thread_local bool is_entrypoint_thread = false;
+ // Whether this thread is part of the game (i.e. the start thread or one spawned by osCreateThread)
+ thread_local bool is_game_thread = false;
+ thread_local PTR(OSThread) thread_self = NULLPTR;
++extern std::atomic_bool exited;
+ 
+ void ultramodern::set_entrypoint_thread() {
+     ::is_game_thread = true;
+@@ -224,7 +225,9 @@ static void _thread_func(RDRAM_ARG PTR(OSThread) self_, PTR(thread_func_t) entryp
+     // Check if the thread hasn't been destroyed or replaced. If so, then the thread terminated or destroyed itself,
+     // so mark this thread as destroyed and run the next queued thread.
+     if (self->context == thread_context) {
+         self->context = nullptr;
+-        run_next_thread(PASS_RDRAM1);
++        if (!exited.load()) {
++            run_next_thread(PASS_RDRAM1);
++        }
+     }
+ 
+     // Dispose of this thread now that it's completed or terminated.

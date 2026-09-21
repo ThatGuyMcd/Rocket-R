@@ -1,0 +1,54 @@
+diff --git a/ultramodern/include/ultramodern/renderer_context.hpp b/ultramodern/include/ultramodern/renderer_context.hpp
+index 878926d..c0a066b 100644
+--- a/ultramodern/include/ultramodern/renderer_context.hpp
++++ b/ultramodern/include/ultramodern/renderer_context.hpp
+@@ -83,7 +83,7 @@ namespace ultramodern {
+                 virtual bool update_config(const GraphicsConfig& old_config, const GraphicsConfig& new_config) = 0;
+ 
+                 virtual void enable_instant_present() = 0;
+-                virtual void send_dl(const OSTask* task) = 0;
++                virtual void send_dl(const OSTask* task, uint8_t* rdram_snapshot) = 0;
+                 virtual void update_screen() = 0;
+                 virtual void shutdown() = 0;
+                 virtual uint32_t get_display_framerate() const = 0;
+diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
+index 3f440af..4dd83f8 100644
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -6,6 +6,7 @@
+ #include <unordered_map>
+ #include <utility>
+ #include <mutex>
++#include <memory>
+ #include <queue>
+ #include <cstring>
+ 
+@@ -26,6 +27,7 @@ void ultramodern::events::set_callbacks(const ultramodern::events::callbacks_t&
+ 
+ struct SpTaskAction {
+     OSTask task;
++    std::unique_ptr<uint8_t[]> rdram_snapshot;
+ };
+ 
+ struct ScreenUpdateAction {
+@@ -364,7 +366,7 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+                 ultramodern::extensions::on_displaylist_submitted(displaylist);
+ 
+                 [[maybe_unused]] auto renderer_start = std::chrono::high_resolution_clock::now();
+-                renderer_context->send_dl(&task_action->task);
++                renderer_context->send_dl(&task_action->task, task_action->rdram_snapshot.get());
+                 [[maybe_unused]] auto renderer_end = std::chrono::high_resolution_clock::now();
+ 
+                 // DKR's custom RSP DMA lists may be reused by the CPU as soon as
+@@ -557,7 +559,10 @@ void ultramodern::submit_rsp_task(RDRAM_ARG PTR(OSTask) task_) {
+ 
+     // Send gfx tasks to the graphics action queue
+     if (task->t.type == M_GFXTASK) {
+-        events_context.action_queue.enqueue(SpTaskAction{ *task });
++        constexpr size_t RDRAMSnapshotSize = 0x800000;
++        auto rdram_snapshot = std::make_unique<uint8_t[]>(RDRAMSnapshotSize);
++        std::memcpy(rdram_snapshot.get(), rdram, RDRAMSnapshotSize);
++        events_context.action_queue.enqueue(SpTaskAction{ *task, std::move(rdram_snapshot) });
+     }
+     // Set all other tasks as the RSP task
+     else {

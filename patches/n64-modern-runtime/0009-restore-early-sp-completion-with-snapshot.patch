@@ -1,0 +1,29 @@
+diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -367,19 +367,20 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+                     enabled_instant_present = true;
+                 }
+                 ultramodern::measure_input_latency();
++                // The queued task owns an immutable RDRAM snapshot, so the CPU
++                // can safely recycle its live display-list buffers as soon as
++                // the emulated RSP completes. Deliver this edge before parsing
++                // to keep SP and DP interrupts from racing back-to-back through
++                // games such as DKR that schedule their next task on SP.
++                sp_complete();
+ 
+                 PTR(u64) displaylist = task_action->task.t.data_ptr;
+                 ultramodern::extensions::on_displaylist_submitted(displaylist);
+ 
+                 [[maybe_unused]] auto renderer_start = std::chrono::high_resolution_clock::now();
+                 renderer_context->send_dl(&task_action->task, task_action->rdram_snapshot.get());
+                 [[maybe_unused]] auto renderer_end = std::chrono::high_resolution_clock::now();
+ 
+-                // DKR's custom RSP DMA lists may be reused by the CPU as soon as
+-                // the SP interrupt fires. Keep them alive until the renderer has
+-                // parsed the task, matching the original RSP's DMA guarantee.
+-                sp_complete();
+-
+                 dp_complete();
+                 // TODO hook the parsed event up to the actual parsing point when a callback is added to RT64.
+                 ultramodern::extensions::on_displaylist_parsed(displaylist);

@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "dependencies": [
+    {
+      "name": "N64ModernRuntime",
+      "repositoryPath": "extern/n64-modern-runtime",
+      "expectedCommit": "ae1ffbb909d9f93c88c41830deb539f7feef5ed2",
+      "patches": [
+        {
+          "path": "patches/n64-modern-runtime/0001-use-msvc-compatible-warning-options.patch",
+          "purpose": "Use warning options that are valid under MSVC/clang-cl builds of ultramodern.",
+          "sha256": "74921669a551fef00747294ec37ce3b2db21fde86339acf36d104e988616048a"
+        },
+        {
+          "path": "patches/n64-modern-runtime/0002-use-msvc-compatible-librecomp-warning-options.patch",
+          "purpose": "Use warning options that are valid under MSVC/clang-cl builds of librecomp.",
+          "sha256": "db5f5f9d7c718944ea3f6a02663c985968f1ccb711625f0c48a0155195ec9a38"
+        },
+        {
+          "path": "patches/n64-modern-runtime/0003-ignore-unregistered-external-event-queues.patch",
+          "purpose": "Ignore unregistered/null hardware event queues during early Rocket startup.",
+          "sha256": "d9021b50be95b93e27bda9fa5db60ba89ff2b3c6443992b12044852be784a9db"
+        },
+        {
+          "path": "patches/n64-modern-runtime/0004-wake-game-thread-on-runtime-quit.patch",
+          "purpose": "Wake blocked external-message waiters when the host runtime quits.",
+          "sha256": "cab0a2690b575dbf0a15fa0df4b5635a6643a846b31d7f8f22338a5b66ee441a"
+        },
+        {
+          "path": "patches/n64-modern-runtime/0005-stop-scheduler-cascade-during-quit.patch",
+          "purpose": "Prevent the emulated scheduler from cascading into another guest thread after shutdown begins.",
+          "sha256": "26d9adf778012a5ea5a1ee1ab143c0f632b60420f30ca65d828c318cc8737ac3"
+        },
+        {
+          "path": "patches/n64-modern-runtime/0006-delay-sp-completion-until-display-list-parsed.patch",
+          "purpose": "Delay graphics SP completion until the renderer has consumed task inputs; superseded safely by the following RDRAM snapshot patch.",
+          "sha256": "2c71800f68aef0be6c90879f522661e48b2fd2203b516cc0c13d4aec23b9a79a"
+        },
+        {
+          "path": "patches/n64-modern-runtime/0007-snapshot-rdram-for-queued-graphics-tasks.patch",
+          "purpose": "Snapshot 8 MiB RDRAM for queued graphics tasks so RT64 parses immutable task data.",
+          "sha256": "6bf9370037645dcb5c1df8104b935d51e994bb805ed250a0cc7f3d50a8399379"
+        },
+        {
+          "path": "patches/n64-modern-runtime/0008-coalesce-pending-screen-updates.patch",
+          "purpose": "Coalesce pending VI screen updates so graphics tasks are not starved by stale presents.",
+          "sha256": "b6b079767743a677aac08defce487bd0c7682c7202f37ea8cbf6f2edabf07a47"
+        },
+        {
+          "path": "patches/n64-modern-runtime/0009-restore-early-sp-completion-with-snapshot.patch",
+          "purpose": "Restore original early SP completion now that graphics tasks own immutable RDRAM snapshots.",
+          "sha256": "041d0d9f22e2b416d094f87ee332fd49cc359d4d50261fa5602a725265d925b5"
+        },
+        {
+          "path": "patches/n64-modern-runtime/0010-yield-between-sp-and-dp-completion.patch",
+          "purpose": "Yield between SP and DP completion to preserve independent hardware-event ordering.",
+          "sha256": "45b7ad5708249e9c8f92fc6598b1d45d8ae5aea0790a2ad4fed1d608d6e6d066"
+        },
+        {
+          "path": "patches/n64-modern-runtime/0011-emulate-audio-ai-status.patch",
+          "purpose": "Expose host-modelled N64 AI DMA busy/full status so Rocket's original n_audio manager preserves hardware FIFO pacing.",
+          "sha256": "c37f1eb7ad38edbeaf81d2db5909fb113e850aed2499ae689961b994465abef0"
+        },
+        {
+          "path": "patches/n64-modern-runtime/0012-enable-android-thread-naming.patch",
+          "purpose": "Use the Linux prctl thread-name path on Android/Bionic so ultramodern links on ARM64 Android.",
+          "sha256": "4a528dd6003c589a0cc7eb86fe17e36ee72453788f6960bfdcfebc39c3ea9029"
+        }
+      ]
+    },
+    {
+      "name": "N64Recomp",
+      "repositoryPath": "extern/n64-modern-runtime/N64Recomp",
+      "expectedCommit": "81213c1831fab2521a6a5459c67b63437d67e253",
+      "patches": [
+        {
+          "path": "patches/n64recomp/0001-fix-high-vram-entrypoint-comparison.patch",
+          "purpose": "Recognize KSEG0 entrypoints, apply configured entry-function sizes before renaming, preserve real ELF sizes, and keep the configured VRAM authoritative over the ROM-0x1000 fallback.",
+          "sha256": "c48199031485212e2f58ae8bb7da2a9cbe5c058391456e82b5d9ecad8c32f2b4"
+        }
+      ]
+    },
+    {
+      "name": "RT64",
+      "repositoryPath": "extern/rt64",
+      "expectedCommit": "6f1c2d99a4ea571c139f449c326fd176ba8f3496",
+      "patches": [
+        {
+          "path": "patches/rt64/0002-dkrr-allow-skip-buffering-interpolation-targets.patch",
+          "purpose": "Carry DKR-R's RT64 interpolation-target approval for freshly modified framebuffers.",
+          "sha256": "89e478b301bd1b827f1761b3c5e5a6ef8978e3aec3994aa9b567fbedce47e367"
+        },
+        {
+          "path": "patches/rt64/0003-dkrr-count-interpolated-presentations.patch",
+          "purpose": "Expose a monotonic count of successful interpolated presentations for runtime validation.",
+          "sha256": "525ac0f8c7977c9baced1cc5e1292baaa3513be89c07dcf7471b2278a6ef2311"
+        },
+        {
+          "path": "patches/rt64/0004-dkrr-bind-presents-to-workload-framebuffers.patch",
+          "purpose": "Bind early presents to the exact workload framebuffer set so alternating Rocket buffers cannot race interpolation selection.",
+          "sha256": "75f3debe4d07950aac138dcd41774264f156846a1848732c0626231617cd3f4d"
+        },
+        {
+          "path": "patches/rt64/0005-dkrr-preapprove-exact-early-present-target.patch",
+          "purpose": "Preapprove the exact PresentEarly framebuffer before asynchronous RT64 workload rendering.",
+          "sha256": "3b81609a61c031dc363bf4e21a950a33616af18e2a337189fe267c2cebcc8140"
+        },
+        {
+          "path": "patches/rt64/0006-dkrr-allow-preapproved-workload-target-creation.patch",
+          "purpose": "Allow the approved interpolation target to be created by the same workload instead of requiring a stale prior framebuffer.",
+          "sha256": "1b2b2cf41d0529a81f4ad8760b7c6ad5ac543011c18b56f6b9e6b19800434632"
+        },
+        {
+          "path": "patches/rt64/0001-zoom-rocket-authored-safe-area-at-presentation.patch",
+          "purpose": "Zoom Rocket's authored 18x14 overscan-safe border out only at final VI presentation so 4:3 and Expand fill their intended viewport without changing guest rendering or timing.",
+          "sha256": "d92507f83c050893aac3873706b8943faa4f08ee831fda319c602e92e75ba583"
+        },
+        {
+          "path": "patches/rt64/0007-cross-platform-linux-arm64-and-android.patch",
+          "purpose": "Keep shader embedding tools on the build host during cross-compilation, wire SDL2/Plume for Android, stub unused RT64 native file dialogs on Android, and use SDL_Vulkan_GetDrawableSize for Ubuntu 22.04 SDL2 compatibility.",
+          "sha256": "1a3b3bac11ef88b766446075590f819cb5d473199a8faec1e298d48d233e3ac8"
+        }
+      ]
+    }
+  ]
+}

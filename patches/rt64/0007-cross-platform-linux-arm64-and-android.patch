@@ -1,0 +1,271 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -38,4 +38,11 @@
+-if (WIN32)
++# DXC is a build-host tool even when RT64 is cross-compiled. Android and
++# Linux ARM64 cross builds must therefore select the executable for the host,
++# not CMAKE_SYSTEM_PROCESSOR (which describes the target).
++if (ANDROID AND CMAKE_HOST_WIN32)
++    set (DXC "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxc.exe")
++elseif (ANDROID AND CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
++    set (DXC "LD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/src/contrib/dxc/lib/x64" "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxc-linux")
++elseif (WIN32)
+     set (DXC "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxc.exe")
+     add_compile_definitions(
+         NOMINMAX
+@@ -60,5 +67,7 @@
+ else()
+-    if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
++    if (CMAKE_CROSSCOMPILING AND CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
++        set (DXC "LD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/src/contrib/dxc/lib/x64" "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxc-linux")
++    elseif (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
+         set (DXC "LD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/src/contrib/dxc/lib/x64" "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxc-linux")
+     else()
+         set (DXC "LD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/src/contrib/dxc/lib/arm64" "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/arm64/dxc-linux")
+@@ -69,7 +78,17 @@
+ set(ZSTD_BUILD_STATIC ON)
+ set(ZSTD_BUILD_SHARED OFF)
+ 
+-add_subdirectory(src/tools/file_to_c)
++if (CMAKE_CROSSCOMPILING)
++    find_package(Python3 REQUIRED COMPONENTS Interpreter)
++    set(FILE_TO_C_COMMAND ${Python3_EXECUTABLE} "${PROJECT_SOURCE_DIR}/src/tools/file_to_c/file_to_c.py")
++    set(FILE_TO_C_DEPENDS "${PROJECT_SOURCE_DIR}/src/tools/file_to_c/file_to_c.py")
++else()
++    add_subdirectory(src/tools/file_to_c)
++    set(FILE_TO_C_COMMAND file_to_c)
++    set(FILE_TO_C_DEPENDS file_to_c)
++endif()
+ add_subdirectory(src/contrib/re-spirv)
+-add_subdirectory(src/contrib/nativefiledialog-extended)
++if (NOT ANDROID)
++    add_subdirectory(src/contrib/nativefiledialog-extended)
++endif()
+ add_subdirectory(src/contrib/zstd/build/cmake)
+@@ -83,3 +102,6 @@
+ add_subdirectory(src/contrib/plume)
++if (ANDROID)
++    target_link_libraries(plume PRIVATE android log)
++endif()
+ 
+ if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+@@ -120,4 +142,4 @@
+     add_custom_command(OUTPUT ${OUTNAME}.spirv.c
+-        COMMAND file_to_c ${OUTNAME}.spv ${TARGET_NAME}BlobSPIRV ${OUTNAME}.spirv.c ${OUTNAME}.spirv.h
+-        DEPENDS ${OUTNAME}.spv file_to_c
++        COMMAND ${FILE_TO_C_COMMAND} ${OUTNAME}.spv ${TARGET_NAME}BlobSPIRV ${OUTNAME}.spirv.c ${OUTNAME}.spirv.h
++        DEPENDS ${OUTNAME}.spv ${FILE_TO_C_DEPENDS}
+         BYPRODUCTS ${OUTNAME}.spirv.h)
+@@ -131,4 +153,4 @@
+     add_custom_command(OUTPUT ${OUTNAME}.dxil.c
+-        COMMAND file_to_c ${OUTNAME}.dxil ${TARGET_NAME}BlobDXIL ${OUTNAME}.dxil.c ${OUTNAME}.dxil.h
+-        DEPENDS ${OUTNAME}.dxil file_to_c
++        COMMAND ${FILE_TO_C_COMMAND} ${OUTNAME}.dxil ${TARGET_NAME}BlobDXIL ${OUTNAME}.dxil.c ${OUTNAME}.dxil.h
++        DEPENDS ${OUTNAME}.dxil ${FILE_TO_C_DEPENDS}
+         BYPRODUCTS ${OUTNAME}.dxil.h)
+@@ -151,4 +173,4 @@
+     add_custom_command(OUTPUT ${OUTNAME}.metal.c
+-            COMMAND file_to_c ${OUTNAME}.metallib ${TARGET_NAME}BlobMSL ${OUTNAME}.metal.c ${OUTNAME}.metal.h
+-            DEPENDS ${OUTNAME}.metallib file_to_c
++            COMMAND ${FILE_TO_C_COMMAND} ${OUTNAME}.metallib ${TARGET_NAME}BlobMSL ${OUTNAME}.metal.c ${OUTNAME}.metal.h
++            DEPENDS ${OUTNAME}.metallib ${FILE_TO_C_DEPENDS}
+             BYPRODUCTS ${OUTNAME}.metal.h)
+@@ -245,4 +267,4 @@
+     add_custom_command(OUTPUT ${OUTNAME}.rw.c
+-        COMMAND file_to_c ${OUTNAME}.rw ${TARGET_NAME}Text ${OUTNAME}.rw.c ${OUTNAME}.rw.h
+-        DEPENDS ${OUTNAME}.rw file_to_c
++        COMMAND ${FILE_TO_C_COMMAND} ${OUTNAME}.rw ${TARGET_NAME}Text ${OUTNAME}.rw.c ${OUTNAME}.rw.h
++        DEPENDS ${OUTNAME}.rw ${FILE_TO_C_DEPENDS}
+         BYPRODUCTS ${OUTNAME}.rw.h)
+@@ -289,6 +311,11 @@
+     set(SDL2_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/include")
+     set(SDL2_LIBRARIES "SDL2" "SDL2main")
+     link_directories("${PROJECT_SOURCE_DIR}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/lib/x64")
++elseif(ANDROID)
++    if (NOT TARGET SDL2)
++        message(FATAL_ERROR "RT64 Android builds require an existing SDL2 target")
++    endif()
++    set(SDL2_LIBRARIES SDL2)
+ else()
+     find_package(SDL2 REQUIRED)
+ endif()
+@@ -442,5 +469,7 @@
+ # Add common libraries.
+ target_link_libraries(rt64 re-spirv)
+-target_link_libraries(rt64 nfd)
++if (NOT ANDROID)
++    target_link_libraries(rt64 nfd)
++endif()
+ target_link_libraries(rt64 libzstd_static)
+ target_link_libraries(rt64 plume)
+@@ -480,7 +509,5 @@
+ target_link_directories(rt64 PRIVATE ${PROJECT_SOURCE_DIR}/src/contrib/dxc)
+ 
+-if (NOT ANDROID)
+-    target_link_libraries(rt64 ${SDL2_LIBRARIES})
+-endif()
++target_link_libraries(rt64 ${SDL2_LIBRARIES})
+ 
+ if (CMAKE_SYSTEM_NAME MATCHES "Linux")
+--- a/src/hle/rt64_application_window.cpp
++++ b/src/hle/rt64_application_window.cpp
+@@ -14,6 +14,8 @@
+ #   if !defined(RT64_SDL_WINDOW_VULKAN)
+ #      include <X11/extensions/Xrandr.h>
+ #   endif
++#elif defined(__ANDROID__)
++#   include <pthread.h>
+ #elif defined(__APPLE__)
+ #   include "rt64_application.h"
+ #   include "apple/rt64_apple.h"
+@@ -104,7 +106,19 @@
+         bounds.width = rect.right - rect.left;
+         bounds.height = rect.bottom - rect.top;
+ #   elif defined(__ANDROID__)
+-        static_assert(false && "Android unimplemented");
++        if (SDL_VideoInit(nullptr) != 0) {
++            printf("Failed to init SDL2 video: %s\n", SDL_GetError());
++            return;
++        }
++        SDL_DisplayMode dm{};
++        if (SDL_GetDesktopDisplayMode(0, &dm) != 0) {
++            printf("Failed to get SDL2 desktop display mode: %s\n", SDL_GetError());
++            return;
++        }
++        bounds.left = 0;
++        bounds.top = 0;
++        bounds.width = dm.w > 0 ? uint32_t(dm.w) : uint32_t(Width);
++        bounds.height = dm.h > 0 ? uint32_t(dm.h) : uint32_t(Height);
+ #   elif defined(__linux__) || defined(__APPLE__)
+         if (SDL_VideoInit(nullptr) != 0) {
+             printf("Failed to init SDL2 video: %s\n", SDL_GetError());
+@@ -135,7 +149,7 @@
+         uint32_t flags = SDL_WINDOW_RESIZABLE;
+         # if defined(__APPLE__)
+         flags |= SDL_WINDOW_METAL;
+-        # elif defined(RT64_SDL_WINDOW_VULKAN)
++        # elif defined(RT64_SDL_WINDOW_VULKAN) || defined(__ANDROID__)
+         flags |= SDL_WINDOW_VULKAN;
+         #endif
+         sdlWindow = SDL_CreateWindow(windowTitle, bounds.left, bounds.top, bounds.width, bounds.height, flags);
+@@ -150,7 +164,11 @@
+ #   elif defined(RT64_SDL_WINDOW_VULKAN)
+         windowHandle = sdlWindow;
+ #   elif defined(__ANDROID__)
+-        static_assert(false && "Android unimplemented");
++        if (wmInfo.subsystem != SDL_SYSWM_ANDROID || wmInfo.info.android.window == nullptr) {
++            fprintf(stderr, "SDL_GetWindowWMInfo did not return an Android ANativeWindow.\n");
++            return;
++        }
++        windowHandle = wmInfo.info.android.window;
+ #   elif defined(__linux__)
+         windowHandle.display = wmInfo.info.x11.display;
+         windowHandle.window = wmInfo.info.x11.window;
+@@ -285,6 +303,8 @@
+         }
+ 
+         refreshRate = displayMode.refresh_rate;
++#   elif defined(__ANDROID__)
++        refreshRate = 60;
+ #   elif defined(__linux__)
+         // Sourced from: https://stackoverflow.com/a/66865623
+         XRRScreenResources *screenResources = XRRGetScreenResources(windowHandle.display, windowHandle.window);
+--- a/src/gui/rt64_file_dialog.cpp
++++ b/src/gui/rt64_file_dialog.cpp
+@@ -6,13 +6,22 @@
+ 
+ #include <cassert>
+ 
++#if !defined(__ANDROID__)
+ #include <nfd.h>
++#endif
+ 
+ namespace RT64 {
+     // FileDialog
+ 
+     std::atomic<bool> FileDialog::isOpen = false;
+ 
++#if defined(__ANDROID__)
++    void FileDialog::initialize() {}
++    void FileDialog::finish() {}
++    std::filesystem::path FileDialog::getDirectoryPath() { return {}; }
++    std::filesystem::path FileDialog::getOpenFilename(const std::vector<FileFilter>&) { return {}; }
++    std::filesystem::path FileDialog::getSaveFilename(const std::vector<FileFilter>&) { return {}; }
++#else
+     void FileDialog::initialize() {
+         NFD_Init();
+     }
+@@ -76,4 +85,5 @@
+         isOpen = false;
+         return path;
+     }
+-};
+\ No newline at end of file
++#endif
++};
+\ No newline at end of file
+--- /dev/null
++++ b/src/tools/file_to_c/file_to_c.py
+@@ -0,0 +1,51 @@
++#!/usr/bin/env python3
++from __future__ import annotations
++
++import pathlib
++import sys
++
++
++def main() -> int:
++    if len(sys.argv) != 5:
++        print(f"Usage: {sys.argv[0]} [input file] [array name] [output C file] [output C header]")
++        return 0
++    input_path = pathlib.Path(sys.argv[1])
++    array_name = sys.argv[2]
++    output_c = pathlib.Path(sys.argv[3])
++    output_h = pathlib.Path(sys.argv[4])
++    data = input_path.read_bytes()
++    if not data:
++        print(f"Failed to open file {input_path}! (Or it's empty)", file=sys.stderr)
++        return 1
++    output_c.parent.mkdir(parents=True, exist_ok=True)
++    output_h.parent.mkdir(parents=True, exist_ok=True)
++    # file_to_c.cpp writes the values through a signed char on the supported
++    # desktop hosts. Preserve that exact representation for generated shaders.
++    values = ", ".join(str(b if b < 128 else b - 256) for b in data) + ", "
++    output_c.write_text(
++        "#include <stddef.h>\n"
++        f"extern const char {array_name}[{len(data)}];\n"
++        f"const char {array_name}[{len(data)}] = {{{values}}};\n"
++        f"extern const size_t {array_name}_size;\n"
++        f"const size_t {array_name}_size = sizeof({array_name}) / sizeof({array_name}[0]);\n",
++        encoding="utf-8",
++        newline="\n",
++    )
++    output_h.write_text(
++        "#ifdef __cplusplus\n"
++        "  extern \"C\" {\n"
++        "#endif\n"
++        "#include <stddef.h>\n"
++        f"extern const char {array_name}[{len(data)}];\n"
++        f"extern const size_t {array_name}_size;\n"
++        "#ifdef __cplusplus\n"
++        "  }\n"
++        "#endif\n",
++        encoding="utf-8",
++        newline="\n",
++    )
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+--- a/src/contrib/plume/plume_vulkan.cpp
++++ b/src/contrib/plume/plume_vulkan.cpp
+@@ -2464,7 +2464,7 @@
+         dstWidth = rect.right - rect.left;
+         dstHeight = rect.bottom - rect.top;
+ #   elif defined(PLUME_SDL_VULKAN_ENABLED)
+-        SDL_GetWindowSizeInPixels(desc.renderWindow, (int *)(&dstWidth), (int *)(&dstHeight));
++        SDL_Vulkan_GetDrawableSize(desc.renderWindow, (int *)(&dstWidth), (int *)(&dstHeight));
+ #   elif defined(__ANDROID__)
+         dstWidth = ANativeWindow_getWidth(desc.renderWindow);
+         dstHeight = ANativeWindow_getHeight(desc.renderWindow);

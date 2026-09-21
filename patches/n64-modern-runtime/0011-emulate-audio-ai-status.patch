@@ -1,0 +1,42 @@
+--- a/ultramodern/include/ultramodern/ultramodern.hpp
++++ b/ultramodern/include/ultramodern/ultramodern.hpp
+@@ -7,14 +7,17 @@
+ void set_audio_frequency(uint32_t freq);
+ void queue_audio_buffer(RDRAM_ARG PTR(s16) audio_data, uint32_t byte_count);
+ uint32_t get_remaining_audio_bytes();
++uint32_t get_audio_status();
+ 
+ struct audio_callbacks_t {
+     using queue_samples_t = void(int16_t*, size_t);
+     using get_samples_remaining_t = size_t();
+     using set_frequency_t = void(uint32_t);
++    using get_status_t = uint32_t();
+     queue_samples_t* queue_samples;
+     get_samples_remaining_t* get_frames_remaining;
+     set_frequency_t* set_frequency;
++    get_status_t* get_status;
+ };
+ 
+ // TODO: Most of the members of this struct are not used by ultramodern. Should we move them to librecomp instead?
+--- a/ultramodern/src/audio.cpp
++++ b/ultramodern/src/audio.cpp
+@@ -65,3 +65,10 @@
+     }
+     return buffered_byte_count;
+ }
++
++uint32_t ultramodern::get_audio_status() {
++    if (audio_callbacks.get_status != nullptr) {
++        return audio_callbacks.get_status();
++    }
++    return 0;
++}
+--- a/librecomp/src/ai.cpp
++++ b/librecomp/src/ai.cpp
+@@ -25,5 +25,5 @@
+ }
+ 
+ extern "C" void osAiGetStatus_recomp(uint8_t* rdram, recomp_context* ctx) {
+-    ctx->r2 = 0x00000000; // Pretend the audio DMAs finish instantly
++    ctx->r2 = ultramodern::get_audio_status();
+ }

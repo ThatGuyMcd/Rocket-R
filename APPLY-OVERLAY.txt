@@ -1,0 +1,7 @@
+Rocket-R FIXED31 cumulative repair overlay
+
+This overlay is safe to place over a FIXED27, FIXED28, FIXED29 or FIXED30 Rocket-R source tree.
+Allow every file to be replaced, then run ONE-CLICK-BUILD.cmd.
+
+Recommended if there is any doubt about the existing folder: use the complete FIXED31 source ZIP in a new empty folder instead.
+No ROM is included.

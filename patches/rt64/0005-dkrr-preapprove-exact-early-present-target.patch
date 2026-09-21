@@ -1,0 +1,108 @@
+diff --git a/src/hle/rt64_workload.h b/src/hle/rt64_workload.h
+index 0f4a64d..2430c68 100644
+--- a/src/hle/rt64_workload.h
++++ b/src/hle/rt64_workload.h
+@@ -232,6 +232,8 @@ namespace RT64 {
+         std::multimap<uint32_t, uint32_t> physicalAddressTransformMap;
+         std::vector<uint32_t> transformIgnoredIds;
+         uint64_t workloadId = 0;
++        uint32_t earlyPresentColorAddress = 0;
++        bool earlyPresentApproved = false;
+         uint64_t presentId = 0;
+         bool paused = false;
+ 
+diff --git a/src/hle/rt64_workload.cpp b/src/hle/rt64_workload.cpp
+index b474e71..f6ed72b 100644
+--- a/src/hle/rt64_workload.cpp
++++ b/src/hle/rt64_workload.cpp
+@@ -20,6 +20,8 @@ namespace RT64 {
+         gameCallCount = 0;
+         viOriginalRate = 0;
+         workloadId = 0;
++        earlyPresentColorAddress = 0;
++        earlyPresentApproved = false;
+         extended.testZIndexCount = 0;
+         extended.ditherNoiseStrength = 1.0f;
+ 
+diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
+index 66a7049..8ee7f33 100644
+--- a/src/hle/rt64_state.cpp
++++ b/src/hle/rt64_state.cpp
+@@ -1774,6 +1774,47 @@ namespace RT64 {
+             }
+         }
+         
++        // Resolve the exact framebuffer that this workload will present before
++        // publishing the workload to the asynchronous render queue. Games that
++        // alternate color buffers cannot safely infer this from the framebuffer
++        // approved by a previous present event.
++        const bool presentEarly = !ext.presentQueue->viewRDRAM && (ext.enhancementConfig->presentation.mode == EnhancementConfiguration::Presentation::Mode::PresentEarly);
++        workload.earlyPresentApproved = false;
++        workload.earlyPresentColorAddress = 0;
++        if (presentEarly && (workload.fbPairCount > 0)) {
++            thread_local std::unordered_set<uint32_t> approvalColorImageAddressSet;
++            approvalColorImageAddressSet.clear();
++
++            for (int32_t f = workload.fbPairCount - 1; (f >= 0) && !workload.earlyPresentApproved; f--) {
++                const FramebufferPair &fbPair = workload.fbPairs[f];
++                const auto &colorImg = fbPair.colorImage;
++                if (approvalColorImageAddressSet.find(colorImg.address) != approvalColorImageAddressSet.end()) {
++                    continue;
++                }
++                else {
++                    approvalColorImageAddressSet.insert(colorImg.address);
++                }
++
++                if (!fbPair.earlyPresentCandidate()) {
++                    continue;
++                }
++
++                for (size_t h = 0; (h < viHistory.history.size()) && !workload.earlyPresentApproved; h++) {
++                    const VIHistory::Present &entry = viHistory.history[h];
++                    const uint32_t fbAddress = entry.vi.fbAddress();
++                    const hlslpp::uint2 fbSize = entry.vi.fbSize();
++                    const uint8_t fbSiz = entry.vi.fbSiz();
++                    if ((colorImg.address == fbAddress) &&
++                        (colorImg.width == fbSize.x) &&
++                        (colorImg.siz == fbSiz))
++                    {
++                        workload.earlyPresentColorAddress = colorImg.address;
++                        workload.earlyPresentApproved = true;
++                    }
++                }
++            }
++        }
++
+         // Advance the workload queue at the end of a full synchronization.
+         advanceWorkload(workload, false);
+         ext.workloadQueue->advanceToNextWorkload();
+@@ -1783,7 +1824,6 @@ namespace RT64 {
+         dlCpuProfiler.start();
+         
+         // Submit a presentation event instantly if applicable.
+-        const bool presentEarly = !ext.presentQueue->viewRDRAM && (ext.enhancementConfig->presentation.mode == EnhancementConfiguration::Presentation::Mode::PresentEarly);
+         if (presentEarly && (workload.fbPairCount > 0)) {
+             thread_local std::unordered_set<uint32_t> colorImageAddressSet;
+             colorImageAddressSet.clear();
+diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
+index 61cedd5..3b5c6a4 100644
+--- a/src/hle/rt64_workload_queue.cpp
++++ b/src/hle/rt64_workload_queue.cpp
+@@ -963,10 +963,15 @@ namespace RT64 {
+                         }
+ 
+                         Framebuffer *interpolationFb = fbManager.find(colorImg.address);
++                        // Prefer the exact early-present decision captured by
++                        // this workload before it entered the render queue. The
++                        // framebuffer flag describes a prior asynchronous
++                        // present and is not sufficient for alternating buffers.
++                        const bool workloadApproved = workload.earlyPresentApproved &&
++                            (workload.earlyPresentColorAddress == colorImg.address);
+                         // SkipBuffering deliberately selects a freshly modified framebuffer
+                         // from VI history instead of the buffer currently being scanned out.
+-                        const bool interpolationApproved = workloadConfig.skipBuffering ||
+-                            ((interpolationFb != nullptr) && interpolationFb->interpolationEnabled);
++                        const bool interpolationApproved = workloadApproved || ((interpolationFb != nullptr) && interpolationFb->interpolationEnabled);
+                         if ((interpolationFb != nullptr) && interpolationApproved) {
+                             interpolationTargetKey.fbType = Framebuffer::Type::Color;
+                             interpolationTargetKey.address = fbPair.colorImage.address;

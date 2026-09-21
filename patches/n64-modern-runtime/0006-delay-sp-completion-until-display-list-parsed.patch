@@ -1,0 +1,27 @@
+diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
+index 6076f68..7f9454a 100644
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -349,11 +349,6 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+                     renderer_context->enable_instant_present();
+                     enabled_instant_present = true;
+                 }
+-                // Tell the game that the RSP completed instantly. This will allow it to queue other task types, but it won't
+-                // start another graphics task until the RDP is also complete. Games usually preserve the RSP inputs until the RDP
+-                // is finished as well, so sending this early shouldn't be an issue in most cases.
+-                // If this causes issues then the logic can be replaced with responding to yield requests.
+-                sp_complete();
+                 ultramodern::measure_input_latency();
+ 
+                 PTR(u64) displaylist = task_action->task.t.data_ptr;
+@@ -365,5 +360,10 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+                 [[maybe_unused]] auto renderer_end = std::chrono::high_resolution_clock::now();
+ 
++                // DKR's custom RSP DMA lists may be reused by the CPU as soon as
++                // the SP interrupt fires. Keep them alive until the renderer has
++                // parsed the task, matching the original RSP's DMA guarantee.
++                sp_complete();
++
+                 dp_complete();
+                 // TODO hook the parsed event up to the actual parsing point when a callback is added to RT64.
+                 ultramodern::extensions::on_displaylist_parsed(displaylist);

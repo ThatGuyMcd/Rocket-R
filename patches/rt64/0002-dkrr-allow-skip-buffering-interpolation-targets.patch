@@ -1,0 +1,37 @@
+diff --git a/src/hle/rt64_workload_queue.h b/src/hle/rt64_workload_queue.h
+--- a/src/hle/rt64_workload_queue.h
++++ b/src/hle/rt64_workload_queue.h
+@@ -56,6 +56,7 @@ namespace RT64 {
+             float aspectRatioScale = 1.0f;
+             float extAspectPercentage = 1.0f;
+             uint32_t targetRate = 0;
++            bool skipBuffering = false;
+             bool postBlendNoise = false;
+             bool postBlendNoiseNegative = false;
+         };
+diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
+--- a/src/hle/rt64_workload_queue.cpp
++++ b/src/hle/rt64_workload_queue.cpp
+@@ -232,6 +232,9 @@ namespace RT64 {
+         // Store the rate that was chosen for the configuration.
+         ext.sharedResources->targetRate = workloadConfig.targetRate;
+ 
++        workloadConfig.skipBuffering = ext.sharedResources->enhancementConfig.presentation.mode ==
++            EnhancementConfiguration::Presentation::Mode::SkipBuffering;
++
+ #   if RT_ENABLED
+         workloadConfig.raytracingEnabled = rtEnabled;
+ 
+@@ -960,7 +963,11 @@ namespace RT64 {
+                         }
+ 
+                         Framebuffer *interpolationFb = fbManager.find(colorImg.address);
+-                        if ((interpolationFb != nullptr) && interpolationFb->interpolationEnabled) {
++                        // SkipBuffering deliberately selects a freshly modified framebuffer
++                        // from VI history instead of the buffer currently being scanned out.
++                        const bool interpolationApproved = workloadConfig.skipBuffering ||
++                            ((interpolationFb != nullptr) && interpolationFb->interpolationEnabled);
++                        if ((interpolationFb != nullptr) && interpolationApproved) {
+                             interpolationTargetKey.fbType = Framebuffer::Type::Color;
+                             interpolationTargetKey.address = fbPair.colorImage.address;
+                             interpolationTargetKey.siz = fbPair.colorImage.siz;

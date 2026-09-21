@@ -1,0 +1,53 @@
+diff --git a/src/elf.cpp b/src/elf.cpp
+index 42b89a7..e837fa2 100644
+--- a/src/elf.cpp
++++ b/src/elf.cpp
+@@ -61,15 +61,28 @@ bool read_symbols(N64Recomp::Context& context, const ELFIO::elfio& elf_file, EL
+ 
+         if (section_index < context.sections.size()) {
+             // Check if this symbol is the entrypoint
+-            // TODO this never fires, the check is broken due to signedness
+-            if (elf_config.has_entrypoint && value == elf_config.entrypoint_address && type == ELFIO::STT_FUNC) {
++            // Configured N64 VRAM addresses are stored in a signed int32_t. Compare their
++            // 32-bit bit pattern with the ELF address so KSEG0 functions are recognized.
++            const auto entrypoint_address = static_cast<ELFIO::Elf64_Addr>(static_cast<uint32_t>(elf_config.entrypoint_address));
++            if (elf_config.has_entrypoint && value == entrypoint_address && type == ELFIO::STT_FUNC) {
+                 if (found_entrypoint_func) {
+                     fmt::print(stderr, "Ambiguous entrypoint: {}\n", name);
+                     return false;
+                 }
+                 found_entrypoint_func = true;
+                 fmt::print("Found entrypoint, original name: {}\n", name);
+-                size = 0x50; // dummy size for entrypoints, should cover them all
++                // Apply a configured size while the original ELF symbol name is still
++                // available. EntryPoint is a zero-sized ELF FUNC in Rocket, but the
++                // pinned NSUE layout proves its exact startup segment is 0x100 bytes.
++                auto configured_entry_size = elf_config.manually_sized_funcs.find(name);
++                if (configured_entry_size != elf_config.manually_sized_funcs.end()) {
++                    size = configured_entry_size->second;
++                }
++                // Preserve a real ELF function size. Only use the historical bootstrap
++                // fallback size when neither ELF metadata nor policy supplies one.
++                else if (size == 0) {
++                    size = 0x50;
++                }
+                 name = "recomp_entrypoint";
+             }
+ 
+@@ -114,8 +127,14 @@ bool read_symbols(N64Recomp::Context& context, const ELFIO::elfio& elf_file, EL
+                     section.function_addrs.push_back(vram);
+                     context.functions_by_vram[vram].push_back(context.functions.size());
+ 
+-                    // Find the entrypoint by rom address in case it doesn't have vram as its value
+-                    if (elf_config.has_entrypoint && rom_address == 0x1000 && type == ELFIO::STT_FUNC) {
++                    // Older N64Recomp treated any function at ROM offset 0x1000 as the
++                    // entrypoint before the configured VRAM symbol had necessarily been
++                    // encountered. Rocket has a real bootstrap FUNC at 0x80000400 and a
++                    // separate game_init FUNC at 0x80000E64, so that behavior falsely
++                    // reports an ambiguous entrypoint. The configured VRAM is authoritative.
++                    if (elf_config.has_entrypoint && !found_entrypoint_func &&
++                        rom_address == 0x1000 && type == ELFIO::STT_FUNC &&
++                        value == entrypoint_address) {
+                         vram = elf_config.entrypoint_address;
+                         found_entrypoint_func = true;
+                         name = "recomp_entrypoint";

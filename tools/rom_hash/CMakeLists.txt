@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.20)
+project(RocketRomHash LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+if(NOT DEFINED RUNTIME_DIR)
+    message(FATAL_ERROR "Pass -DRUNTIME_DIR=<N64ModernRuntime checkout>")
+endif()
+add_executable(RocketRomHash main.cpp)
+target_include_directories(RocketRomHash PRIVATE "${RUNTIME_DIR}/thirdparty")

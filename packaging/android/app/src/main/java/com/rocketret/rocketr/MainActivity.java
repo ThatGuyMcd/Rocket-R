@@ -1,0 +1,104 @@
+package com.rocketret.rocketr;
+
+import android.app.Activity;
+import android.content.Intent;
+import android.graphics.Typeface;
+import android.net.Uri;
+import android.os.Bundle;
+import android.provider.OpenableColumns;
+import android.view.Gravity;
+import android.view.View;
+import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+
+public final class MainActivity extends Activity {
+    private static final int PICK_ROM = 1001;
+    private File privateRom;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        privateRom = new File(getFilesDir(), "rocket.us.z64");
+        showLauncher();
+    }
+
+    private void showLauncher() {
+        final LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setGravity(Gravity.CENTER);
+        final int pad = (int)(24.0f * getResources().getDisplayMetrics().density);
+        root.setPadding(pad, pad, pad, pad);
+
+        TextView title = new TextView(this);
+        title.setText("Rocket-R\nRocket: Robot on Wheels Recompiled");
+        title.setTextSize(34.0f);
+        title.setTypeface(Typeface.create("Comic Sans MS", Typeface.BOLD));
+        title.setGravity(Gravity.CENTER);
+        root.addView(title);
+
+        TextView note = new TextView(this);
+        note.setText("Select your own unmodified Rocket: Robot on Wheels (USA) ROM. The ROM is copied only into this app's private storage and is never included in Rocket-R builds.");
+        note.setTextSize(20.0f);
+        note.setTypeface(Typeface.create("Comic Sans MS", Typeface.NORMAL));
+        note.setGravity(Gravity.CENTER);
+        note.setPadding(0, pad, 0, pad);
+        root.addView(note);
+
+        if (privateRom.isFile() && privateRom.length() > 0) {
+            Button play = new Button(this);
+            play.setText("Play Rocket-R");
+            play.setTextSize(20.0f);
+            play.setTypeface(Typeface.create("Comic Sans MS", Typeface.BOLD));
+            play.setOnClickListener(v -> launchGame());
+            root.addView(play);
+        }
+
+        Button choose = new Button(this);
+        choose.setText(privateRom.isFile() ? "Choose / Replace ROM" : "Choose Rocket USA ROM");
+        choose.setTextSize(20.0f);
+        choose.setTypeface(Typeface.create("Comic Sans MS", Typeface.BOLD));
+        choose.setOnClickListener(v -> chooseRom());
+        root.addView(choose);
+        setContentView(root);
+    }
+
+    private void chooseRom() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        startActivityForResult(intent, PICK_ROM);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != PICK_ROM || resultCode != RESULT_OK || data == null || data.getData() == null) {
+            return;
+        }
+        Uri uri = data.getData();
+        try (InputStream input = getContentResolver().openInputStream(uri);
+             FileOutputStream output = new FileOutputStream(privateRom, false)) {
+            if (input == null) throw new IllegalStateException("Android could not open the selected file");
+            byte[] buffer = new byte[1024 * 1024];
+            int read;
+            while ((read = input.read(buffer)) > 0) output.write(buffer, 0, read);
+            output.flush();
+            launchGame();
+        } catch (Exception ex) {
+            privateRom.delete();
+            Toast.makeText(this, "Could not import ROM: " + ex.getMessage(), Toast.LENGTH_LONG).show();
+            showLauncher();
+        }
+    }
+
+    private void launchGame() {
+        Intent intent = new Intent(this, RocketActivity.class);
+        startActivity(intent);
+    }
+}

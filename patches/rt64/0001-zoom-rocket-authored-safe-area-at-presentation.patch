@@ -1,0 +1,32 @@
+diff --git a/src/hle/rt64_vi.cpp b/src/hle/rt64_vi.cpp
+--- a/src/hle/rt64_vi.cpp
++++ b/src/hle/rt64_vi.cpp
+@@ -13,7 +13,28 @@ namespace RT64 {
+     // VI
+     
+     hlslpp::float4 VI::viewRectangle() const {
++#if defined(RT64_ROCKET_SAFE_AREA_CROP)
++        // Rocket: Robot on Wheels intentionally renders its active scene into
++        // x=18..301 and y=14..225 of the 320x240 framebuffer. On CRT hardware
++        // those pixels were an overscan-safe border; in a native window they
++        // become the large black frame around the entire game.
++        //
++        // Keep the game/RDP viewport untouched and zoom only the final VI
++        // presentation. That preserves depth, HUD and timing behaviour while
++        // mapping the authored 284x212 active area exactly onto RT64's chosen
++        // 4:3 or expanded output viewport. cropRectangle() remains full-size,
++        // so the enlarged viewport is clipped to the normal output bounds.
++        constexpr float Left = 18.0f / 320.0f;
++        constexpr float Right = 18.0f / 320.0f;
++        constexpr float Top = 14.0f / 240.0f;
++        constexpr float Bottom = 14.0f / 240.0f;
++        constexpr float ActiveWidth = 1.0f - Left - Right;
++        constexpr float ActiveHeight = 1.0f - Top - Bottom;
++        return { -Left / ActiveWidth, -Top / ActiveHeight,
++                 1.0f / ActiveWidth, 1.0f / ActiveHeight };
++#else
+         return { 0.0f, 0.0f, 1.0f, 1.0f };
++#endif
+     }
+ 
+     hlslpp::float4 VI::cropRectangle() const {

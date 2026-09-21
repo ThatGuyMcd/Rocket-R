@@ -1,0 +1,6 @@
+Rocket-R FIXED30 cumulative repair overlay
+===========================================
+
+Extract this at the ROOT of an existing FIXED27, FIXED28, or FIXED29 Rocket-R folder and replace all files.
+It contains the missing FIXED28 interpolation-identity source/CMake wiring plus the corrected FIXED29 RT64 patches and FIXED30 preflight diagnostics.
+The gameplay/interpolation algorithm is unchanged from FIXED29.

@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "dependencies": [
+    {
+      "name": "rocket-decomp",
+      "repository": "https://github.com/RocketRet/Rocket-Robot-On-Wheels.git",
+      "commit": "cd1fc6d3f575841a240373d7b8a2baf532da2f9f",
+      "destination": "extern/rocket-decomp",
+      "recursive": true,
+      "purpose": "Matching Rocket: Robot on Wheels US source/ELF baseline"
+    },
+    {
+      "name": "n64-modern-runtime",
+      "repository": "https://github.com/N64Recomp/N64ModernRuntime.git",
+      "commit": "ae1ffbb909d9f93c88c41830deb539f7feef5ed2",
+      "destination": "extern/n64-modern-runtime",
+      "recursive": true,
+      "purpose": "Same N64ModernRuntime baseline used by DKR-R"
+    },
+    {
+      "name": "n64recomp",
+      "repository": "https://github.com/N64Recomp/N64Recomp.git",
+      "commit": "81213c1831fab2521a6a5459c67b63437d67e253",
+      "destination": "extern/n64-modern-runtime/N64Recomp",
+      "managedBy": "n64-modern-runtime git submodule",
+      "purpose": "Same N64Recomp baseline used by DKR-R"
+    },
+    {
+      "name": "rt64",
+      "repository": "https://github.com/rt64/rt64.git",
+      "commit": "6f1c2d99a4ea571c139f449c326fd176ba8f3496",
+      "destination": "extern/rt64",
+      "recursive": true,
+      "purpose": "Same RT64 baseline used by DKR-R"
+    },
+    {
+      "name": "sdl2",
+      "repository": "https://github.com/libsdl-org/SDL.git",
+      "commit": "adf31f6ec0be0f9ba562889398f71172c7941023",
+      "destination": "extern/sdl2",
+      "recursive": false,
+      "purpose": "SDL 2.26.3 Android activity and native runtime source for the ARM64 APK build"
+    }
+  ]
+}

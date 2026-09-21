@@ -1,0 +1,19 @@
+# Rocket: Robot on Wheels NTSC-US n_audio microcode.
+# ROM boundaries come directly from RocketRet's matching NSUE.00.yaml:
+# n_aspMain code begins at 0x2160 and F3DEX2 begins at 0x2DC0.
+text_offset = 0x00002160
+text_size = 0x00000C60
+text_address = 0x04001080
+rom_file_path = "../../build/private/rocket.us.z64"
+output_file_path = "../RecompiledRSP/n_aspMain.cpp"
+output_function_name = "rocketAspMain"
+
+# n_audio 0xC60 dispatcher targets shared by multiple independently working
+# N64Recomp ports using the same 0x1080/0xC60 ABI layout (Harvest Moon 64,
+# Mario Party 3 and Buck Bumble). Runtime dispatch still checks Rocket's exact ucode address before entering this translation.
+extra_indirect_branch_targets = [
+    0x10EC, 0x139C, 0x119C, 0x1A64,
+    0x11C8, 0x17EC, 0x1208, 0x127C,
+    0x1348, 0x1248, 0x1C84, 0x12D4,
+    0x12B0, 0x1384
+]

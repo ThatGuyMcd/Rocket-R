@@ -1,0 +1,138 @@
+{
+  "schemaVersion": 1,
+  "functionSizes": [
+    {
+      "name": "bzero",
+      "size": "0x000000A0",
+      "reason": "Rocket's NSUE layout places asm lib/codeseg1/bzero at ROM 0x004CB0 and the next segment at 0x004D50. The ELF exports bzero as FUNC with size 0, so N64Recomp otherwise drops it from direct JAL resolution."
+    },
+    {
+      "name": "osWritebackDCache",
+      "size": "0x00000080",
+      "reason": "Assembly-only libultra routine spans NSUE ROM 0x0050B0-0x005130; ELF function size is zero."
+    },
+    {
+      "name": "osInvalDCache",
+      "size": "0x000000B0",
+      "reason": "Assembly-only libultra routine spans NSUE ROM 0x0089D0-0x008A80; ELF function size is zero."
+    },
+    {
+      "name": "osWritebackDCacheAll",
+      "size": "0x00000030",
+      "reason": "Assembly-only libultra routine spans NSUE ROM 0x00B340-0x00B370; ELF function size is zero."
+    },
+    {
+      "name": "osSetIntMask",
+      "size": "0x000000A0",
+      "reason": "Assembly-only libultra routine spans NSUE ROM 0x00B950-0x00B9F0; ELF function size is zero."
+    },
+    {
+      "name": "__osDisableInt",
+      "size": "0x00000020",
+      "reason": "First function in the NSUE 0x00BE20-0x00BE60 interrupt assembly block; ELF symbols place __osDisableInt at 0x8000B220 and __osRestoreInt at 0x8000B240."
+    },
+    {
+      "name": "__osRestoreInt",
+      "size": "0x00000020",
+      "reason": "Second function in the NSUE 0x00BE20-0x00BE60 interrupt assembly block; next code segment begins at ROM 0x00BE60."
+    },
+    {
+      "name": "__osExceptionPreamble",
+      "size": "0x00000010",
+      "reason": "First function in Rocket's NSUE exceptasm block; ELF address 0x8000B2A0 to __osException at 0x8000B2B0."
+    },
+    {
+      "name": "__osException",
+      "size": "0x00000564",
+      "reason": "Rocket's exceptasm entry runs from 0x8000B2B0 to the named send_mesg helper at 0x8000B814; intermediate .L symbols are internal labels, not separate functions."
+    },
+    {
+      "name": "send_mesg",
+      "size": "0x000000F0",
+      "reason": "Named helper in Rocket's exceptasm block spans 0x8000B814-0x8000B904."
+    },
+    {
+      "name": "__osEnqueueAndYield",
+      "size": "0x00000108",
+      "reason": "Named helper in Rocket's exceptasm block spans 0x8000B904-0x8000BA0C."
+    },
+    {
+      "name": "__osEnqueueThread",
+      "size": "0x00000048",
+      "reason": "Named helper in Rocket's exceptasm block spans 0x8000BA0C-0x8000BA54."
+    },
+    {
+      "name": "__osPopThread",
+      "size": "0x00000010",
+      "reason": "Named helper in Rocket's exceptasm block spans 0x8000BA54-0x8000BA64."
+    },
+    {
+      "name": "__osDispatchThread",
+      "size": "0x0000017C",
+      "reason": "Named helper in Rocket's exceptasm block spans 0x8000BA64-0x8000BBE0."
+    },
+    {
+      "name": "__osCleanupThread",
+      "size": "0x00000010",
+      "reason": "Final helper in Rocket's NSUE exceptasm block spans 0x8000BBE0-0x8000BBF0, exactly the next YAML segment boundary."
+    },
+    {
+      "name": "__osGetSR",
+      "size": "0x00000010",
+      "reason": "Assembly-only libultra routine spans NSUE ROM 0x00E530-0x00E540; ELF function size is zero."
+    },
+    {
+      "name": "__osSetSR",
+      "size": "0x00000010",
+      "reason": "Assembly-only libultra routine spans NSUE ROM 0x00E540-0x00E550; ELF function size is zero."
+    },
+    {
+      "name": "__osSetFpcCsr",
+      "size": "0x00000010",
+      "reason": "Assembly-only libultra routine spans NSUE ROM 0x00E550-0x00E560; ELF function size is zero."
+    },
+    {
+      "name": "osInvalICache",
+      "size": "0x00000080",
+      "reason": "Assembly-only libultra routine spans NSUE ROM 0x00E660-0x00E6E0; ELF function size is zero."
+    },
+    {
+      "name": "osMapTLBRdb",
+      "size": "0x00000060",
+      "reason": "Assembly-only libultra routine spans NSUE ROM 0x00E6E0-0x00E740; ELF function size is zero."
+    },
+    {
+      "name": "osGetCount",
+      "size": "0x00000010",
+      "reason": "Assembly-only libultra routine spans NSUE ROM 0x00E7E0-0x00E7F0; ELF function size is zero."
+    },
+    {
+      "name": "bcopy",
+      "size": "0x00000320",
+      "reason": "Assembly-only libultra routine spans NSUE ROM 0x0107A0-0x010AC0; ELF function size is zero."
+    },
+    {
+      "name": "__osProbeTLB",
+      "size": "0x000000C0",
+      "reason": "Assembly-only libultra routine spans NSUE ROM 0x015460-0x015520; ELF function size is zero."
+    },
+    {
+      "name": "__osSetCompare",
+      "size": "0x00000010",
+      "reason": "Assembly-only libultra routine spans NSUE ROM 0x015540-0x015550; ELF function size is zero."
+    }
+  ],
+  "manualFunctions": [],
+  "functionHooks": [
+    {
+      "function": "frustum_test",
+      "beforeVram": "0x8003C764",
+      "text": "extern void rocket_widescreen_frustum_begin(uint8_t*, recomp_context*); rocket_widescreen_frustum_begin(rdram, ctx);",
+      "reason": "Expand-to-window widens RT64's projection after Rocket has already performed its CPU object-frustum test. Widen only the guest camera's two horizontal side planes immediately before the retail frustum_test body so objects that are genuinely visible outside the authored 4:3 view are retained, while Original 4:3 and render-distance logic remain unchanged."
+    }
+  ],
+  "instructionPatches": [],
+  "stubs": [],
+  "renamed": [],
+  "ignored": []
+}

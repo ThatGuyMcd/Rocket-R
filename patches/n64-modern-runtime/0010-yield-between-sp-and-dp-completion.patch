@@ -1,0 +1,14 @@
+diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -373,6 +373,10 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+                 // to keep SP and DP interrupts from racing back-to-back through
+                 // games such as DKR that schedule their next task on SP.
+                 sp_complete();
++                // RSP and RDP are independent engines on the original hardware.
++                // Give the emulated scheduler a chance to consume the SP edge
++                // before this worker can publish the later DP completion.
++                std::this_thread::yield();
+ 
+                 PTR(u64) displaylist = task_action->task.t.data_ptr;
+                 ultramodern::extensions::on_displaylist_submitted(displaylist);

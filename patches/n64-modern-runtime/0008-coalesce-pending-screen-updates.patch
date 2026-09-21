@@ -1,0 +1,33 @@
+diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
+index 4dd83f8..ea93443 100644
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -21,5 +21,6 @@
+ 
+ static ultramodern::events::callbacks_t events_callbacks{};
++static std::atomic_bool screen_update_action_pending = false;
+ 
+ void ultramodern::events::set_callbacks(const ultramodern::events::callbacks_t& callbacks) {
+     events_callbacks = callbacks;
+@@ -220,7 +221,12 @@ void vi_thread_func() {
+ 
+         // Queue a screen update for the graphics thread with the current VI register state.
+         // Doing this before the VI update is equivalent to updating the screen after the previous frame's scanout finished.
+-        events_context.action_queue.enqueue(ScreenUpdateAction{ events_context.vi.regs });
++        // A 30 Hz renderer does not need an unbounded queue of identical 60 Hz
++        // presents. Keep at most one pending update so graphics tasks cannot
++        // age behind stale screen-update work.
++        if (!screen_update_action_pending.exchange(true)) {
++            events_context.action_queue.enqueue(ScreenUpdateAction{ events_context.vi.regs });
++        }
+ 
+         // Update VI registers and swap VI modes.
+         events_context.vi.update_vi();
+@@ -382,6 +389,7 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+             }
+             else if (const auto* screen_update_action = std::get_if<ScreenUpdateAction>(&action)) {
+                 events_context.vi.update_screen_regs = screen_update_action->regs;
++                screen_update_action_pending.store(false);
+                 renderer_context->update_screen();
+                 display_refresh_rate = renderer_context->get_display_framerate();
+                 resolution_scale = renderer_context->get_resolution_scale();

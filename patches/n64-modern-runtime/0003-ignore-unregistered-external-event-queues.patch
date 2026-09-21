@@ -1,0 +1,20 @@
+diff --git a/ultramodern/src/mesgqueue.cpp b/ultramodern/src/mesgqueue.cpp
+--- a/ultramodern/src/mesgqueue.cpp
++++ b/ultramodern/src/mesgqueue.cpp
+@@ -28,10 +28,16 @@ void ultramodern::set_message_queue_control(const ultramodern::MessageQueueContro
+ }
+ 
+ void ultramodern::enqueue_external_message_src(PTR(OSMesgQueue) mq, OSMesg msg, bool jam, EventMessageSource src) {
++    if (mq == NULLPTR) {
++        return;
++    }
+     external_messages.enqueue({mq, msg, jam, requeue_enabled[static_cast<int>(src)]});
+ }
+ 
+ void ultramodern::enqueue_external_message(PTR(OSMesgQueue) mq, OSMesg msg, bool jam, bool requeue_if_blocked) {
++    if (mq == NULLPTR) {
++        return;
++    }
+     external_messages.enqueue({mq, msg, jam, requeue_if_blocked});
+ }
+ 

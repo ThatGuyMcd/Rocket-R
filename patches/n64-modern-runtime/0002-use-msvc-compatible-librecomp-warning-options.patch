@@ -1,0 +1,25 @@
+diff --git a/librecomp/CMakeLists.txt b/librecomp/CMakeLists.txt
+index 07cbe4e..5a22531 100644
+--- a/librecomp/CMakeLists.txt
++++ b/librecomp/CMakeLists.txt
+@@ -43,11 +43,15 @@ target_include_directories(librecomp PRIVATE
+     "${CMAKE_CURRENT_SOURCE_DIR}/include/librecomp"
+ )
+ 
+-target_compile_options(librecomp PRIVATE
+-#    -Wall
+-#    -Wextra
+-    -Wno-unused-parameter
+-)
++if (MSVC)
++    target_compile_options(librecomp PRIVATE /wd4100)
++else()
++    target_compile_options(librecomp PRIVATE
++    #    -Wall
++    #    -Wextra
++        -Wno-unused-parameter
++    )
++endif()
+ 
+ if (WIN32)
+     add_compile_definitions(NOMINMAX)

@@ -1,0 +1,33 @@
+diff --git a/src/hle/rt64_shared_queue_resources.h b/src/hle/rt64_shared_queue_resources.h
+--- a/src/hle/rt64_shared_queue_resources.h
++++ b/src/hle/rt64_shared_queue_resources.h
+@@ -4,6 +4,7 @@
+ 
+ #pragma once
+ 
++#include <atomic>
+ #include <mutex>
+ 
+ #include "common/rt64_common.h"
+@@ -54,6 +55,7 @@ namespace RT64 {
+         std::vector<std::unique_ptr<RenderTarget>> interpolatedColorTargets;
+         InterpolatedFrameCounters interpolatedFrames[2];
+         uint32_t interpolatedFramesIndex = 0;
++        std::atomic<uint64_t> totalInterpolatedPresentations{ 0 };
+         std::mutex interpolatedMutex;
+         std::condition_variable interpolatedCondition;
+         std::mutex workloadMutex;
+diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
+--- a/src/hle/rt64_present_queue.cpp
++++ b/src/hle/rt64_present_queue.cpp
+@@ -402,6 +402,10 @@ namespace RT64 {
+                 presentTimestamp = Timer::current();
+                 swapChainValid = ext.swapChain->present(swapChainIndex, &waitSemaphore, 1);
+                 presentProfiler.logAndRestart();
++                if (swapChainValid && (framesToPresent > 1) && ((i + 1) < framesToPresent)) {
++                    ext.sharedResources->totalInterpolatedPresentations.fetch_add(
++                        1, std::memory_order_relaxed);
++                }
+             }
+         }
+     }

@@ -1,0 +1,14 @@
+Rocket-R FIXED21 overlay
+========================
+
+Extract this ZIP directly into your existing D:\Rocket-R folder and overwrite
+matching files. Do not delete build\private\rocket.us.z64 or your ROM.
+
+Then run:
+  D:\Rocket-R\ONE-CLICK-BUILD.cmd
+
+FIXED21 intentionally regenerates stage 7. It keeps 0x80000400 as the initial
+ROM load/DMA address, recompiles game_init (0x80000E64) as the callable host
+entry, and recreates the useful retail bootstrap state (BSS clear + stack)
+before game_init runs. This avoids the retail stub's intentional BREAK at
+0x80000438 after game_init returns under N64ModernRuntime.

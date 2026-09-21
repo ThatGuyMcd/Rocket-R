@@ -1,0 +1,15 @@
+diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
+index 3b5c6a4..29ee70c 100644
+--- a/src/hle/rt64_workload_queue.cpp
++++ b/src/hle/rt64_workload_queue.cpp
+@@ -974,6 +974,9 @@ namespace RT64 {
+                         // from VI history instead of the buffer currently being scanned out.
+                         const bool interpolationApproved = workloadApproved || ((interpolationFb != nullptr) && interpolationFb->interpolationEnabled);
+-                        if ((interpolationFb != nullptr) && interpolationApproved) {
++                        // An exact workload approval does not require the framebuffer to
++                        // exist yet: this workload creates it. The legacy approval branch
++                        // above still requires an existing, interpolation-enabled buffer.
++                        if (interpolationApproved) {
+                             interpolationTargetKey.fbType = Framebuffer::Type::Color;
+                             interpolationTargetKey.address = fbPair.colorImage.address;
+                             interpolationTargetKey.siz = fbPair.colorImage.siz;

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Rocket-R
+Comment=Rocket: Robot on Wheels Recompiled
+Exec=Rocket-R
+Icon=rocket-r
+Categories=Game;
+Terminal=false

@@ -1,0 +1,68 @@
+diff --git a/src/hle/rt64_present.h b/src/hle/rt64_present.h
+index bda5ad6..dd86b54 100644
+--- a/src/hle/rt64_present.h
++++ b/src/hle/rt64_present.h
+@@ -19,6 +19,7 @@ namespace RT64 {
+         VI screenVI;
+         std::vector<uint8_t> storage;
+         std::vector<FramebufferOperation> fbOperations;
++        std::vector<uint32_t> colorImageAddresses;
+         DebuggerFramebuffer debuggerFramebuffer;
+         bool paused = false;
+         uint64_t presentId = 0;
+diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
+index 450d446..32456d5 100644
+--- a/src/hle/rt64_present_queue.cpp
++++ b/src/hle/rt64_present_queue.cpp
+@@ -155,7 +155,11 @@ namespace RT64 {
+             }
+             
+             if ((presentFb != nullptr) && (viFb != nullptr)) {
+-                for (uint32_t colorAddress : ext.sharedResources->colorImageAddressVector) {
++                // Early presents own the color-image set from the workload that
++                // created them. The shared vector can already describe a newer
++                // workload by the time this thread consumes the present event.
++                const std::vector<uint32_t> &colorImageAddresses = present.colorImageAddresses.empty() ? ext.sharedResources->colorImageAddressVector : present.colorImageAddresses;
++                for (uint32_t colorAddress : colorImageAddresses) {
+                     Framebuffer *colorFb = fbManager.find(colorAddress);
+                     if (colorFb == nullptr) {
+                         continue;
+diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
+index e48c91f..66a7049 100644
+--- a/src/hle/rt64_state.cpp
++++ b/src/hle/rt64_state.cpp
+@@ -1865,6 +1865,7 @@ namespace RT64 {
+         Present &present = ext.presentQueue->presents[presentCursor];
+         present.fbOperations.clear();
+         present.storage.clear();
++        present.colorImageAddresses.clear();
+ 
+         const bool presentEarly = !ext.presentQueue->viewRDRAM && (ext.enhancementConfig->presentation.mode == EnhancementConfiguration::Presentation::Mode::PresentEarly);
+         const uint32_t screenFbAddress = newVI.fbAddress();
+@@ -1872,6 +1873,26 @@ namespace RT64 {
+         const uint8_t screenFbSiz = newVI.fbSiz();
+         const bool viVisible = newVI.visible();
+         bool viDifferent = false;
++        if (fromEarlyPresent) {
++            // Bind the presentation decision to the exact workload that
++            // produced this early-present event. A global latest-workload
++            // vector races with the asynchronous present queue in games that
++            // alternate color buffers every rendered frame.
++            const Workload &presentWorkload = ext.workloadQueue->workloads[lastWorkloadIndex];
++            for (int32_t f = presentWorkload.fbPairCount - 1; f >= 0; f--) {
++                const FramebufferPair &fbPair = presentWorkload.fbPairs[f];
++                const auto &colorImg = fbPair.colorImage;
++                if (fbPair.earlyPresentCandidate() &&
++                    (colorImg.address == screenFbAddress) &&
++                    (colorImg.width == screenFbSize.x) &&
++                    (colorImg.siz == screenFbSiz))
++                {
++                    present.colorImageAddresses.emplace_back(colorImg.address);
++                    break;
++                }
++            }
++        }
++
+         if (!fromEarlyPresent) {
+             // Keep last known screen VI updated.
+             viDifferent = (newVI != lastScreenVI);
