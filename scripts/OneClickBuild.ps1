@@ -53,8 +53,8 @@ function Select-BuildPlatforms([string[]]$RequestedPlatforms) {
         Write-Host ''
         Write-Host 'Which platform builds would you like to produce?' -ForegroundColor Cyan
         Write-Host '  [1] Windows x64 (.zip)'
-        Write-Host '  [2] Linux x86-64 / x64 / AMD64 (.AppImage)'
-        Write-Host '  [3] Linux ARM64 / aarch64 (.AppImage)'
+        Write-Host '  [2] Linux x86-64 / x64 / AMD64 (.AppImage - Steam Deck / PC)'
+        Write-Host '  [3] Linux ARM64 / aarch64 (.AppImage - ARM devices; NOT Steam Deck)'
         Write-Host '  [4] Android ARM64 / arm64-v8a (.APK)'
         Write-Host '  [A] All four platforms'
         Write-Host ''
@@ -1182,6 +1182,10 @@ inline constexpr std::uint32_t kBootstrapBssEnd = $($RocketBootstrap.BssEnd)U;
         $LinuxX64Artifact = Join-Path $Dist "Rocket-R-$Version-Linux-x86_64.AppImage"
         if (-not (Test-Path $LinuxX64Artifact)) { throw "Linux x86_64 build completed but $LinuxX64Artifact was not produced." }
         $BuiltArtifacts.Add($LinuxX64Artifact)
+        $LinuxX64Portable = Join-Path $Dist "Rocket-R-$Version-Linux-x86_64-Portable.tar.gz"
+        if (Test-Path $LinuxX64Portable) { $BuiltArtifacts.Add($LinuxX64Portable) }
+        $LinuxX64SteamDeck = Join-Path $Dist "Rocket-R-$Version-Linux-x86_64-SteamDeck.tar.gz"
+        if (Test-Path $LinuxX64SteamDeck) { $BuiltArtifacts.Add($LinuxX64SteamDeck) }
     }
 
     if ($BuildLinuxArm64) {
@@ -1194,6 +1198,8 @@ inline constexpr std::uint32_t kBootstrapBssEnd = $($RocketBootstrap.BssEnd)U;
         $LinuxArmArtifact = Join-Path $Dist "Rocket-R-$Version-Linux-aarch64.AppImage"
         if (-not (Test-Path $LinuxArmArtifact)) { throw "Linux ARM64 build completed but $LinuxArmArtifact was not produced." }
         $BuiltArtifacts.Add($LinuxArmArtifact)
+        $LinuxArmPortable = Join-Path $Dist "Rocket-R-$Version-Linux-aarch64-Portable.tar.gz"
+        if (Test-Path $LinuxArmPortable) { $BuiltArtifacts.Add($LinuxArmPortable) }
     }
 
     if ($BuildAndroidArm64) {

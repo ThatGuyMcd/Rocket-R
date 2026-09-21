@@ -155,8 +155,26 @@ int rocket_main(int argc, char** argv) {
         return 5;
     }
 
-    const auto startup = rocket::ui::run_launcher(
+    rocket::ui::StartupResult startup{};
+#if defined(__ANDROID__)
+    if (options.rom.empty()) {
+        std::fprintf(stderr, "[android] no private ROM path was supplied by RocketActivity\n");
+        rocket::platform::shutdown();
+        return 5;
+    }
+    std::string android_rom_error;
+    if (!rocket::select_rom(options.rom, android_rom_error)) {
+        std::fprintf(stderr, "[android] private ROM validation failed: %s\n", android_rom_error.c_str());
+        rocket::platform::shutdown();
+        return 5;
+    }
+    startup.launch = true;
+    startup.rom_path = options.rom;
+    std::fprintf(stderr, "[android] private ROM verified; bypassing desktop launcher and starting Rocket directly\n");
+#else
+    startup = rocket::ui::run_launcher(
         rocket::platform::sdl_window(), options.rom);
+#endif
     if (!startup.launch || startup.exit_requested) {
         rocket::platform::shutdown();
         return startup.exit_requested ? 0 : 5;

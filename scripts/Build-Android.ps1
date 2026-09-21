@@ -12,7 +12,7 @@ $Version = (Get-Content (Join-Path $ProjectRoot 'VERSION') -Raw).Trim()
 $BuildRoot = Join-Path $ProjectRoot 'build'
 $AndroidProject = Join-Path $BuildRoot 'android-project'
 $ToolRoot = Join-Path $BuildRoot 'tools'
-Write-Host 'Android build helper: FIXED34 robust-native v14' -ForegroundColor DarkGray
+Write-Host 'Android build helper: FIXED34 robust-native v18' -ForegroundColor DarkGray
 $SdkRoot = if ($env:ANDROID_SDK_ROOT) { $env:ANDROID_SDK_ROOT } elseif ($env:ANDROID_HOME) { $env:ANDROID_HOME } elseif ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Android\Sdk' } else { Join-Path $ToolRoot 'android-sdk' }
 
 function Refresh-Path {
@@ -57,34 +57,42 @@ function Invoke-GradleStable {
         [Parameter(Mandatory = $true)][string]$BuildRootPath
     )
 
-    # Do not stream Gradle/CMake through nested PowerShell native-command
-    # pipelines. The v13 failure terminated the nested PowerShell host during
-    # configureCMake without returning a Gradle error or running cleanup.
-    # Execute Gradle through an isolated cmd.exe, capture both streams to disk,
-    # then replay them after the process exits. This keeps the builder alive
-    # even if Java/CMake/Ninja itself crashes.
+    # Run Gradle from a tiny batch file, but launch that batch by *relative name*
+    # from AndroidProject. v14-v16 wrapped the absolute runner path in nested
+    # quotes for cmd.exe; on Windows PowerShell 5.1 that left a stray quote and
+    # Gradle received no task arguments, so it silently ran the default `help`
+    # task. Keep the runner filename simple and pass the version through the
+    # standard ORG_GRADLE_PROJECT_ environment convention instead of -P quoting.
     $logRoot = Join-Path $BuildRootPath 'logs'
     New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $stdoutPath = Join-Path $logRoot ("gradle-android-" + $stamp + "-stdout.log")
     $stderrPath = Join-Path $logRoot ("gradle-android-" + $stamp + "-stderr.log")
-    $runnerPath = Join-Path $WorkingDirectory 'rocket-gradle-runner.cmd'
+    $runnerName = 'rocket-gradle-runner.cmd'
+    $runnerPath = Join-Path $WorkingDirectory $runnerName
 
     $runner = @(
         '@echo off',
         'setlocal',
         'set "CMAKE_BUILD_PARALLEL_LEVEL=4"',
-        'call "' + $GradlePath + '" --no-daemon --no-watch-fs --stacktrace --max-workers=4 -PROCKET_VERSION=' + $VersionText + ' :app:assembleRelease',
-        'exit /b %ERRORLEVEL%'
+        ('set "ORG_GRADLE_PROJECT_ROCKET_VERSION=' + $VersionText + '"'),
+        'echo [ROCKET-GRADLE] task=:app:assembleRelease version=%ORG_GRADLE_PROJECT_ROCKET_VERSION%',
+        ('call "' + $GradlePath + '" --no-daemon --no-watch-fs --stacktrace --max-workers=4 :app:assembleRelease'),
+        'set "ROCKET_GRADLE_EXIT=%ERRORLEVEL%"',
+        'echo [ROCKET-GRADLE] exit=%ROCKET_GRADLE_EXIT%',
+        'exit /b %ROCKET_GRADLE_EXIT%'
     ) -join "`r`n"
-    [IO.File]::WriteAllText($runnerPath, $runner, (New-Object System.Text.ASCIIEncoding))
+    [IO.File]::WriteAllText($runnerPath, $runner + "`r`n", (New-Object System.Text.ASCIIEncoding))
 
     Write-Host "Gradle isolated stdout: $stdoutPath" -ForegroundColor DarkGray
     Write-Host "Gradle isolated stderr: $stderrPath" -ForegroundColor DarkGray
+    Write-Host 'Gradle task: :app:assembleRelease' -ForegroundColor DarkGray
 
     try {
+        # runnerName is deliberately relative to WorkingDirectory. This avoids
+        # cmd.exe's nested-quote edge case that produced: '"' is not recognized.
         $process = Start-Process -FilePath $env:ComSpec `
-            -ArgumentList @('/d','/c',"`"$runnerPath`"") `
+            -ArgumentList @('/d','/c',$runnerName) `
             -WorkingDirectory $WorkingDirectory `
             -NoNewWindow -Wait -PassThru `
             -RedirectStandardOutput $stdoutPath `
@@ -345,36 +353,20 @@ if ($patchedFileToC -eq $FileToCOriginal -or $patchedFileToC -match '(?m)^\s*new
 $FileToCPatched = $true
 Write-Host 'Android RT64 file_to_c compatibility: temporarily removed Python 3.10-only newline= arguments for Python 3.9.' -ForegroundColor DarkGray
 
-# Android Clang defines both __ANDROID__ and __linux__. The FIXED34 renderer
-# currently tests __linux__ before __ANDROID__, so Android incorrectly takes the
-# Linux SDL_Window branch and tries to assign SDL_Window* to RT64's ANativeWindow*.
-# Temporarily exclude Android from that Linux branch so the existing Android
-# native-window code immediately below it is actually reachable.
+# Repository-owned Android renderer handling is installed permanently by repair v15.
+# Build-Android only verifies it; it never rewrites src\rt64_renderer.cpp.
 $RocketRendererPath = Join-Path $ProjectRoot 'src\rt64_renderer.cpp'
 if (-not (Test-Path -LiteralPath $RocketRendererPath)) {
     throw "Rocket-R RT64 renderer source is missing: $RocketRendererPath"
 }
-$RocketRendererOriginal = [IO.File]::ReadAllText($RocketRendererPath)
-$RocketRendererPatched = $false
-$rocketLinuxPattern = '(?m)^#elif defined\(__linux__\)\s*$'
-$rocketLinuxMatches = ([regex]::Matches($RocketRendererOriginal, $rocketLinuxPattern)).Count
-if ($rocketLinuxMatches -ne 1) {
-    throw "Rocket-R rt64_renderer.cpp expected exactly 1 plain __linux__ branch; found $rocketLinuxMatches."
+$RocketRendererText = [IO.File]::ReadAllText($RocketRendererPath)
+if ($RocketRendererText -notmatch '(?m)^#elif defined\(__linux__\)[ \t]*&&[ \t]*!defined\(__ANDROID__\)[ \t]*\r?$' -or
+    $RocketRendererText -notmatch '(?m)^#elif defined\(__ANDROID__\)[ \t]*\r?$' -or
+    $RocketRendererText -notmatch 'android_native_window\(\)' -or
+    $RocketRendererText -notmatch 'app_config\.detectDataPath[ \t]*=[ \t]*false;') {
+    throw 'Rocket-R permanent Android renderer/data-path guards are missing. Re-run APPLY-Rocket-R-PLATFORM-REPAIR-v17.cmd.'
 }
-$patchedRocketRenderer = [regex]::Replace(
-    $RocketRendererOriginal,
-    $rocketLinuxPattern,
-    '#elif defined(__linux__) && !defined(__ANDROID__)',
-    1
-)
-if ($patchedRocketRenderer -eq $RocketRendererOriginal -or
-    $patchedRocketRenderer -notmatch '(?m)^#elif defined\(__ANDROID__\)\s*$' -or
-    $patchedRocketRenderer -notmatch 'android_native_window\(\)') {
-    throw 'Rocket-R Android native-window branch transformation verification failed.'
-}
-[IO.File]::WriteAllText($RocketRendererPath, $patchedRocketRenderer, $utf8NoBom)
-$RocketRendererPatched = $true
-Write-Host 'Android Rocket renderer compatibility: Linux branch no longer shadows the ANativeWindow branch.' -ForegroundColor DarkGray
+Write-Host 'Android Rocket renderer compatibility: permanent ANativeWindow/data-path guards verified.' -ForegroundColor DarkGray
 
 # FIXED34's RT64 Android patch added an Android ApplicationWindow path, but the
 # pinned RT64 source checks __linux__ first in several places. Android Clang
@@ -436,55 +428,20 @@ if ($patchedRt64WindowVulkanSafe -eq $patchedRt64Window -or
 $patchedRt64Window = $patchedRt64WindowVulkanSafe
 Write-Host "Android RT64 SDL/Vulkan compatibility: excluded Android from $rt64VulkanMatches generic SDL_Window branches." -ForegroundColor DarkGray
 
-# Android already has a Java ROM picker which copies the selected ROM into the
-# app's private storage and passes that exact path to SDLActivity. Running the
-# desktop ImGui launcher again creates and destroys an SDL_Renderer on the same
-# Vulkan-capable Android window immediately before RT64 takes ownership. Avoid
-# that unnecessary surface handoff: validate the --rom path and launch directly.
+# The Android direct-ROM handoff is installed permanently by repair v15.
+# Do not mutate src\main.cpp during builds: verify the guard and continue.
 $MainCppPath = Join-Path $ProjectRoot 'src\main.cpp'
 if (-not (Test-Path -LiteralPath $MainCppPath)) {
     throw "Rocket-R main source is missing: $MainCppPath"
 }
-$MainCppOriginal = [IO.File]::ReadAllText($MainCppPath)
-$MainCppPatched = $false
-$launcherNeedle = @'
-    const auto startup = rocket::ui::run_launcher(
-        rocket::platform::sdl_window(), options.rom);
-'@
-$launcherReplacement = @'
-    rocket::ui::StartupResult startup{};
-#if defined(__ANDROID__)
-    if (options.rom.empty()) {
-        std::fprintf(stderr, "[android] no private ROM path was supplied by RocketActivity\n");
-        rocket::platform::shutdown();
-        return 5;
-    }
-    std::string android_rom_error;
-    if (!rocket::select_rom(options.rom, android_rom_error)) {
-        std::fprintf(stderr, "[android] private ROM validation failed: %s\n", android_rom_error.c_str());
-        rocket::platform::shutdown();
-        return 5;
-    }
-    startup.launch = true;
-    startup.rom_path = options.rom;
-    std::fprintf(stderr, "[android] private ROM verified; bypassing desktop launcher and starting Rocket directly\n");
-#else
-    startup = rocket::ui::run_launcher(
-        rocket::platform::sdl_window(), options.rom);
-#endif
-'@
-if (-not $MainCppOriginal.Contains($launcherNeedle)) {
-    throw 'Rocket-R main.cpp no longer contains the expected launcher handoff block.'
+$MainCppText = [IO.File]::ReadAllText($MainCppPath)
+if ($MainCppText -notmatch 'bypassing desktop launcher and starting Rocket directly' -or
+    $MainCppText -notmatch 'rocket::select_rom\(options\.rom' -or
+    $MainCppText -notmatch '(?s)#if defined\(__ANDROID__\).*?#else.*?rocket::ui::run_launcher') {
+    throw 'Rocket-R permanent Android direct-ROM launcher guard is missing. Re-run APPLY-Rocket-R-PLATFORM-REPAIR-v17.cmd.'
 }
-$patchedMainCpp = $MainCppOriginal.Replace($launcherNeedle, $launcherReplacement)
-if ($patchedMainCpp -eq $MainCppOriginal -or
-    $patchedMainCpp -notmatch 'bypassing desktop launcher and starting Rocket directly' -or
-    $patchedMainCpp -notmatch 'rocket::select_rom\(options\.rom') {
-    throw 'Rocket-R Android direct-ROM launch transformation verification failed.'
-}
-[IO.File]::WriteAllText($MainCppPath, $patchedMainCpp, $utf8NoBom)
-$MainCppPatched = $true
-Write-Host 'Android launcher compatibility: private ROM is validated and launched directly without the second SDL/ImGui launcher.' -ForegroundColor DarkGray
+Write-Host 'Android launcher compatibility: permanent direct-ROM handoff verified; no build-time main.cpp rewrite required.' -ForegroundColor DarkGray
+
 Copy-Item (Join-Path $ProjectRoot 'packaging\android\app\src\main\AndroidManifest.xml') (Join-Path $AndroidProject 'app\src\main\AndroidManifest.xml') -Force
 Copy-Item (Join-Path $ProjectRoot 'packaging\android\app\src\main\res\values\strings.xml') (Join-Path $AndroidProject 'app\src\main\res\values\strings.xml') -Force
 Copy-Item (Join-Path $ProjectRoot 'packaging\android\app\src\main\java\com\rocketret\rocketr\*.java') (Join-Path $AndroidProject 'app\src\main\java\com\rocketret\rocketr') -Force
@@ -512,17 +469,9 @@ try {
 }
 finally {
     Pop-Location
-    if ($MainCppPatched) {
-        [IO.File]::WriteAllText($MainCppPath, $MainCppOriginal, $utf8NoBom)
-        Write-Host 'Android launcher compatibility: restored main source.' -ForegroundColor DarkGray
-    }
     if ($Rt64WindowPatched) {
         [IO.File]::WriteAllText($Rt64WindowPath, $Rt64WindowOriginal, $utf8NoBom)
         Write-Host 'Android RT64 window compatibility: restored pinned source.' -ForegroundColor DarkGray
-    }
-    if ($RocketRendererPatched) {
-        [IO.File]::WriteAllText($RocketRendererPath, $RocketRendererOriginal, $utf8NoBom)
-        Write-Host 'Android Rocket renderer compatibility: restored source.' -ForegroundColor DarkGray
     }
     if ($FileToCPatched) {
         [IO.File]::WriteAllText($FileToCPath, $FileToCOriginal, $utf8NoBom)
