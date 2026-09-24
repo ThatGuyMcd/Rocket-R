@@ -95,6 +95,7 @@ set(ROCKET_RUNTIME_SOURCES
     src/rt64_renderer.cpp
     src/renderer_snapshot.cpp
     src/presentation_identity.cpp
+    src/render_telemetry_compat.cpp
     src/widescreen_culling.cpp
     src/game_registration.cpp
     src/crash_handler.cpp

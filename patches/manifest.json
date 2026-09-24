@@ -122,8 +122,8 @@
         },
         {
           "path": "patches/rt64/0008-rocket-dkrr-semantic-presentation-identities.patch",
-          "purpose": "Rocket-R global interpolation stability v5: carry RenderEntry semantic owners only across adjacent authored frames with mutual unambiguous continuity, bind exact FIFO task sidecars, and explicitly use G_EX_ID_IGNORE for ambiguous, conflicting or unrecognised model matrices so RT64 never falls back to anonymous transform matching.",
-          "sha256": "b940f2b84e30f4b19d0592b9803846a9178d446141f5c733a717279fba34780e"
+          "purpose": "Rocket-R global interpolation stability v5: carry RenderEntry semantic owners only across adjacent authored frames with mutual unambiguous continuity, bind exact FIFO task sidecars, and explicitly use G_EX_ID_IGNORE for ambiguous, conflicting or unrecognised model matrices so RT64 never falls back to anonymous transform matching. Rocket-R v33 additionally gives only the pre-world sky/background display-list subtree a task-owned semantic interpolation group, including topology-safe dynamic vertex interpolation.",
+          "sha256": "b80afcdc6dc3d6b35d37fb3b0ca5bc104b699a73691bcc8b240c85e2be0ab7f4"
         },
         {
           "path": "patches/rt64/0009-rocket-configurable-n64-dithering.patch",

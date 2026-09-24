@@ -7,10 +7,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
-#include <cstddef>
 #include <cstdio>
-#include <cstdarg>
-#include <cstdlib>
 #include <cstdlib>
 #include <limits>
 #include <iterator>
@@ -29,22 +26,10 @@ constexpr std::uint32_t kCurGfxTaskAddress = 0x800A5DBCU;
 constexpr std::uint32_t kGfxTaskCtxSizeOffset = 0x004U;
 constexpr std::uint32_t kGfxTaskCtxDlStartOffset = 0x008U;
 constexpr std::uint32_t kGfxTaskDlStartOffset = 0x014U;
-// === ROCKET-R GRAPHICS V27 EXPANDED GFX ARENA BEGIN ===
-// Rocket hard-codes RAM_END=0x80400000 (4 MiB). N64ModernRuntime exposes 8 MiB,
-// so these two arenas live entirely in otherwise-unused Expansion Pak RAM.
-constexpr std::uint32_t kRocketV27Task0Address = 0x800C1460U;
-constexpr std::uint32_t kRocketV27Task1Address = 0x800C15E8U;
-constexpr std::uint32_t kRocketV27Arena0Address = 0x80600000U;
-constexpr std::uint32_t kRocketV27Arena1Address = 0x80680000U;
-constexpr std::uint32_t kRocketV27ArenaBytes = 0x00080000U;
-constexpr std::uint32_t kGfxContextAddress = 0x800A5DA8U;
-constexpr std::uint32_t kGfxTaskCtxDlHeadOffset = 0x00CU;
-constexpr std::uint32_t kGfxTaskCtxMtxHeadOffset = 0x010U;
-// === ROCKET-R GRAPHICS V27 EXPANDED GFX ARENA END ===
+constexpr std::uint32_t kGfxContextDlHeadAddress = 0x800A5DB0U; // v33 sky/background command-range capture
 constexpr std::uint32_t kMtxBytes = 0x40U;
 constexpr std::uint64_t kMaximumTrackAge = 1U;
 constexpr std::size_t kMaximumPendingTasks = 8U;
-constexpr std::size_t kGuestRenderQueueCapacity = 256U;
 // Rocket v4.2 allowed a previous owner to be selected from as far as 768 world
 // units away and from up to four authored frames ago. That is too permissive
 // for repeated scenery/render-entry keys: one bad association is enough for an
@@ -77,22 +62,7 @@ struct RecordedEntry {
     bool mtx1_position_valid = false;
     bool mtx2_position_valid = false;
     bool dynamic_gfx = false;
-    std::uint64_t owner_key = 0U;
-    bool owner_valid = false;
     std::uint32_t track_token = 0U;
-};
-
-struct OwnerTrack {
-    std::uint64_t key = 0U;
-    std::uint32_t token = 0U;
-    std::uint64_t last_frame = 0U;
-    bool claimed = false;
-};
-
-struct PendingModelOwner {
-    std::uint64_t key = 0U;
-    std::uint32_t gfx_physical = 0U;
-    bool valid = false;
 };
 
 struct Track {
@@ -145,18 +115,24 @@ struct BindingRecord {
 
 using MatrixMap = std::unordered_map<std::uint32_t, BindingRecord>;
 
+// ROCKET-R SKYBOX INTERPOLATION V33
+struct BackgroundCommandRange {
+    std::uint32_t begin = 0U;
+    std::uint32_t end = 0U;
+};
+
 struct SubmittedFrame {
     std::uint32_t display_list = 0U;
     std::uint32_t task_address = 0U;
     std::uint32_t context_dl_start = 0U;
     std::uint32_t context_size = 0U;
     std::uint64_t sequence = 0U;
+    std::vector<BackgroundCommandRange> background_ranges{};
     MatrixMap matrices{};
 };
 
 std::mutex g_mutex;
 std::vector<RecordedEntry> g_entries;
-std::vector<OwnerTrack> g_owner_tracks;
 std::vector<Track> g_tracks;
 std::vector<SharedMatrixTrack> g_shared_matrix_tracks;
 std::vector<SubmittedFrame> g_submitted;
@@ -165,17 +141,19 @@ std::uint64_t g_submission_sequence = 1U;
 std::uint32_t g_next_token = 1U;
 std::uint32_t g_empty_frames = 0U;
 std::unordered_map<std::uint64_t, std::uint32_t> g_key_ordinals;
+std::vector<BackgroundCommandRange> g_background_ranges;
+bool g_background_capture_active = false;
+std::uint32_t g_background_capture_begin = 0U;
 thread_local MatrixMap g_active_matrices;
-thread_local PendingModelOwner g_pending_model_owner{};
+thread_local std::vector<BackgroundCommandRange> g_active_background_ranges;
+thread_local std::uint32_t g_active_context_dl_start = 0U;
+thread_local std::uint32_t g_active_context_size = 0U;
 // While an RT64 Rocket task is being decoded, the semantic sidecar owns the
 // matching policy for every model matrix. Unknown matrices must therefore snap
 // instead of escaping back into RT64's anonymous automatic matcher.
 thread_local bool g_active_task_fail_closed = false;
 
-std::atomic<bool> g_logged_render_queue_pressure{false};
-std::atomic<bool> g_logged_render_queue_saturation{false};
 std::atomic<std::uint64_t> g_trace_entries{0U};
-std::atomic<std::uint64_t> g_trace_owned_entries{0U};
 std::atomic<std::uint64_t> g_trace_matches{0U};
 std::atomic<std::uint64_t> g_trace_new_tracks{0U};
 std::atomic<std::uint64_t> g_trace_conflicts{0U};
@@ -216,6 +194,35 @@ std::atomic<std::uint64_t> g_coverage_dynamic_vertex_bindings{0U};
 [[nodiscard]] std::uint32_t ReadU32(std::uint8_t* rdram,
                                     std::uint32_t address) {
     return static_cast<std::uint32_t>(MEM_W(0, RdramAddress(address)));
+}
+
+[[nodiscard]] bool ReadCurrentDlHeadPhysical(std::uint8_t* rdram,
+                                                   std::uint32_t& out) {
+    if (rdram == nullptr || !ValidRange(kGfxContextDlHeadAddress, 4U)) return false;
+    const std::uint32_t address = ReadU32(rdram, kGfxContextDlHeadAddress);
+    if (!ValidRange(address, 8U)) return false;
+    out = Physical(address);
+    return true;
+}
+
+[[nodiscard]] bool BackgroundRangeContains(std::uint32_t address) {
+    const std::uint32_t physical = Physical(address);
+    for (const BackgroundCommandRange& range : g_active_background_ranges) {
+        if (physical >= range.begin && physical < range.end) return true;
+    }
+    return false;
+}
+
+[[nodiscard]] std::uint32_t CanonicalActiveDlAddress(std::uint32_t address) {
+    const std::uint32_t physical = Physical(address);
+    if (g_active_context_size != 0U) {
+        const std::uint64_t begin = g_active_context_dl_start;
+        const std::uint64_t end = begin + static_cast<std::uint64_t>(g_active_context_size);
+        if (physical >= begin && static_cast<std::uint64_t>(physical) < end) {
+            return 0x80000000U | (physical - g_active_context_dl_start);
+        }
+    }
+    return physical;
 }
 
 [[nodiscard]] std::uint16_t ReadU16(std::uint8_t* rdram,
@@ -290,7 +297,7 @@ struct GfxSemanticRef {
     if (task == 0U || gfx == 0U) return result;
     const std::uint32_t buffer = ReadU32(rdram, task + kGfxTaskCtxDlStartOffset);
     const std::uint32_t bytes = ReadU32(rdram, task + kGfxTaskCtxSizeOffset);
-    if (!ValidRange(buffer, 8U) || bytes == 0U || bytes > kRocketV27ArenaBytes) return result;
+    if (!ValidRange(buffer, 8U) || bytes == 0U || bytes > 0x20000U) return result;
     const std::uint32_t p = Physical(gfx);
     const std::uint32_t begin = Physical(buffer);
     const std::uint32_t end = begin + bytes;
@@ -333,13 +340,6 @@ struct GfxSemanticRef {
     return id;
 }
 
-[[nodiscard]] std::uint32_t NextPresentationToken() {
-    for (;;) {
-        const std::uint32_t token = g_next_token++;
-        if (token != 0U && token != 0xFFFFFFFFU) return token;
-    }
-}
-
 [[nodiscard]] std::uint32_t MatrixIdentity(std::uint32_t token,
                                            std::uint32_t role) {
     return NormalizeIdentity((static_cast<std::uint64_t>(token) << 32U) |
@@ -379,9 +379,6 @@ void AddBinding(MatrixMap& map, std::unordered_set<std::uint32_t>& conflicts,
 }
 
 void ExpireTracks() {
-    std::erase_if(g_owner_tracks, [](const OwnerTrack& track) {
-        return g_frame > track.last_frame + kMaximumTrackAge;
-    });
     std::erase_if(g_tracks, [](const Track& track) {
         return g_frame > track.last_frame + kMaximumTrackAge;
     });
@@ -447,12 +444,10 @@ std::vector<SharedMatrixSample> BuildSharedMatrixSamples() {
     std::unordered_map<std::uint32_t, SharedMatrixAccumulator> accumulators;
     accumulators.reserve(g_entries.size() * 2U);
     for (const RecordedEntry& entry : g_entries) {
-        AddSharedOccurrence(accumulators, entry.mtx1, 1U,
-                            entry.owner_valid ? entry.owner_key : entry.key,
+        AddSharedOccurrence(accumulators, entry.mtx1, 1U, entry.key,
                             entry.mtx1_position, entry.mtx1_position_valid,
                             entry.dynamic_gfx);
-        AddSharedOccurrence(accumulators, entry.mtx2, 2U,
-                            entry.owner_valid ? entry.owner_key : entry.key,
+        AddSharedOccurrence(accumulators, entry.mtx2, 2U, entry.key,
                             entry.mtx2_position, entry.mtx2_position_valid,
                             entry.dynamic_gfx);
     }
@@ -562,7 +557,8 @@ void MatchSharedMatrixSamples(std::vector<SharedMatrixSample>& samples) {
     for (std::size_t si = 0; si < samples.size(); ++si) {
         SharedMatrixSample& sample = samples[si];
         if (!matched[si]) {
-            const std::uint32_t token = NextPresentationToken();
+            std::uint32_t token = g_next_token++;
+            if (token == 0U || token == 0xFFFFFFFFU) token = g_next_token++;
             sample.track_token = token;
             SharedMatrixTrack track{};
             track.signature = sample.signature;
@@ -593,45 +589,12 @@ void MatchSharedMatrixSamples(std::vector<SharedMatrixSample>& samples) {
 
 void FinalizeTracksAndBindings(MatrixMap& out) {
     ExpireTracks();
-    for (OwnerTrack& track : g_owner_tracks) track.claimed = false;
     for (Track& track : g_tracks) track.claimed = false;
-
-    // v26 durable owner path: model/submodel entries captured directly from
-    // func_8001ECEC never enter the positional/ordinal matcher. If the exact
-    // GameObject/submodel was present in the immediately previous authored
-    // frame it retains its token; otherwise it starts a fresh presentation
-    // lifetime and snaps to the current authored endpoint.
-    std::vector<bool> entry_claimed(g_entries.size(), false);
-    for (std::size_t ei = 0; ei < g_entries.size(); ++ei) {
-        RecordedEntry& entry = g_entries[ei];
-        if (!entry.owner_valid || entry.owner_key == 0U) continue;
-        auto found = std::find_if(g_owner_tracks.begin(), g_owner_tracks.end(),
-            [&](const OwnerTrack& track) {
-                return track.key == entry.owner_key && !track.claimed &&
-                       track.last_frame + 1U == g_frame;
-            });
-        if (found == g_owner_tracks.end()) {
-            OwnerTrack track{};
-            track.key = entry.owner_key;
-            track.token = NextPresentationToken();
-            track.last_frame = g_frame;
-            track.claimed = true;
-            entry.track_token = track.token;
-            g_owner_tracks.push_back(track);
-        } else {
-            entry.track_token = found->token;
-            found->last_frame = g_frame;
-            found->claimed = true;
-        }
-        entry_claimed[ei] = true;
-        g_trace_owned_entries.fetch_add(1U, std::memory_order_relaxed);
-    }
 
     std::vector<Candidate> candidates;
     candidates.reserve(g_entries.size() * 4U);
     for (std::size_t ei = 0; ei < g_entries.size(); ++ei) {
         const RecordedEntry& entry = g_entries[ei];
-        if (entry.owner_valid) continue;
         for (std::size_t ti = 0; ti < g_tracks.size(); ++ti) {
             const Track& track = g_tracks[ti];
             if (track.key != entry.key || track.claimed ||
@@ -707,6 +670,7 @@ void FinalizeTracksAndBindings(MatrixMap& out) {
         return second > best + required;
     };
 
+    std::vector<bool> entry_claimed(g_entries.size(), false);
     for (std::size_t ei = 0; ei < g_entries.size(); ++ei) {
         const std::size_t ti = entry_best_track[ei];
         if (ti == none || ti >= g_tracks.size()) continue;
@@ -729,7 +693,8 @@ void FinalizeTracksAndBindings(MatrixMap& out) {
     for (std::size_t ei = 0; ei < g_entries.size(); ++ei) {
         RecordedEntry& entry = g_entries[ei];
         if (!entry_claimed[ei]) {
-            const std::uint32_t token = NextPresentationToken();
+            std::uint32_t token = g_next_token++;
+            if (token == 0U || token == 0xFFFFFFFFU) token = g_next_token++;
             entry.track_token = token;
             Track track{};
             track.key = entry.key;
@@ -832,10 +797,9 @@ void FinalizeTracksAndBindings(MatrixMap& out) {
 void MaybeTraceSummary() {
     if (!TraceEnabled() || (g_frame % 120U) != 0U) return;
     std::fprintf(stderr,
-        "[rocket-presentation] frame=%llu entries=%llu owned=%llu matched=%llu new=%llu conflicts=%llu ambiguous=%llu shared=%llu shared-match=%llu shared-new=%llu shared-reject=%llu task-match=%llu task-miss=%llu sidecar-mismatch=%llu tracks=%zu shared-tracks=%zu pending=%zu\n",
+        "[rocket-presentation] frame=%llu entries=%llu matched=%llu new=%llu conflicts=%llu ambiguous=%llu shared=%llu shared-match=%llu shared-new=%llu shared-reject=%llu task-match=%llu task-miss=%llu sidecar-mismatch=%llu tracks=%zu shared-tracks=%zu pending=%zu\n",
         static_cast<unsigned long long>(g_frame),
         static_cast<unsigned long long>(g_trace_entries.exchange(0U)),
-        static_cast<unsigned long long>(g_trace_owned_entries.exchange(0U)),
         static_cast<unsigned long long>(g_trace_matches.exchange(0U)),
         static_cast<unsigned long long>(g_trace_new_tracks.exchange(0U)),
         static_cast<unsigned long long>(g_trace_conflicts.exchange(0U)),
@@ -874,6 +838,9 @@ rocket::presentation::CoverageStats rocket::presentation::coverage_stats() {
 rocket::presentation::TaskIdentityScope::TaskIdentityScope(
     std::uint8_t* rdram_snapshot, std::uint32_t display_list_address) {
     g_active_matrices.clear();
+    g_active_background_ranges.clear();
+    g_active_context_dl_start = 0U;
+    g_active_context_size = 0U;
     g_active_task_fail_closed = true;
     const std::uint32_t physical = Physical(display_list_address);
 
@@ -887,7 +854,8 @@ rocket::presentation::TaskIdentityScope::TaskIdentityScope(
             const std::uint32_t buffer = ReadU32(
                 rdram_snapshot, task + kGfxTaskCtxDlStartOffset);
             context_dl_start = ValidRange(buffer, 8U) ? Physical(buffer) : 0U;
-            context_size = ReadU32(rdram_snapshot, task + kGfxTaskCtxSizeOffset);
+            context_size = ReadU32(
+                rdram_snapshot, task + kGfxTaskCtxSizeOffset);
         }
     }
 
@@ -897,37 +865,48 @@ rocket::presentation::TaskIdentityScope::TaskIdentityScope(
         return;
     }
 
-    // DKR-style durable task ownership: the immutable OSTask display-list root
-    // is authoritative. Mutable task/context parity can already have flipped by
-    // decode time, so it is diagnostic only and must never invalidate a valid
-    // sidecar or clear good object identity history.
-    const auto matching = std::find_if(
-        g_submitted.begin(), g_submitted.end(),
-        [physical](const SubmittedFrame& candidate) {
-            return candidate.display_list == physical;
-        });
-    if (matching == g_submitted.end()) {
+    // The renderer queue is FIFO. Never scan forward for another sidecar with
+    // the same recycled display-list address: doing so can attach frame N+2's
+    // identities to frame N and produce exactly the one-frame geometry burst
+    // seen in the recording. The immutable snapshot must agree with the oldest
+    // submitted sidecar or this task is treated as untrusted.
+    SubmittedFrame& frame = g_submitted.front();
+    const bool match = frame.display_list == physical &&
+        (frame.task_address == 0U || task_address == 0U ||
+         frame.task_address == task_address) &&
+        (frame.context_dl_start == 0U || context_dl_start == 0U ||
+         frame.context_dl_start == context_dl_start) &&
+        (frame.context_size == 0U || context_size == 0U ||
+         frame.context_size == context_size);
+    if (!match) {
         g_trace_task_misses.fetch_add(1U, std::memory_order_relaxed);
         g_trace_sidecar_mismatches.fetch_add(1U, std::memory_order_relaxed);
         if (TraceEnabled()) {
-            const SubmittedFrame& expected = g_submitted.front();
             std::fprintf(stderr,
-                "[rocket-presentation] sidecar mismatch: expected dl=%06X task=%06X ctx=%06X/%u got dl=%06X task=%06X ctx=%06X/%u; interpolation disabled for this task\n",
-                expected.display_list, expected.task_address,
-                expected.context_dl_start, expected.context_size, physical,
-                task_address, context_dl_start, context_size);
+                "[rocket-presentation] sidecar mismatch: expected dl=%06X task=%06X ctx=%06X/%u got dl=%06X task=%06X ctx=%06X/%u; pending history reset\n",
+                frame.display_list, frame.task_address, frame.context_dl_start,
+                frame.context_size, physical, task_address, context_dl_start,
+                context_size);
         }
+        g_submitted.clear();
+        g_tracks.clear();
+        g_shared_matrix_tracks.clear();
         return;
     }
 
-    SubmittedFrame frame = std::move(*matching);
-    g_submitted.erase(g_submitted.begin(), std::next(matching));
     g_active_matrices = std::move(frame.matrices);
+    g_active_background_ranges = std::move(frame.background_ranges);
+    g_active_context_dl_start = frame.context_dl_start;
+    g_active_context_size = frame.context_size;
+    g_submitted.erase(g_submitted.begin());
     g_trace_task_matches.fetch_add(1U, std::memory_order_relaxed);
 }
 
 rocket::presentation::TaskIdentityScope::~TaskIdentityScope() {
     g_active_matrices.clear();
+    g_active_background_ranges.clear();
+    g_active_context_dl_start = 0U;
+    g_active_context_size = 0U;
     g_active_task_fail_closed = false;
 }
 
@@ -975,223 +954,61 @@ extern "C" bool rocket_presentation_matrix_binding(
     return true;
 }
 
+// ROCKET-R SKYBOX INTERPOLATION V33
+extern "C" bool rocket_presentation_background_display_list(
+    std::uint32_t physical_command_address,
+    std::uint32_t physical_target_address,
+    std::uint32_t* out_identity) {
+    if (out_identity == nullptr || !g_active_task_fail_closed) return false;
+    if (!BackgroundRangeContains(physical_command_address)) return false;
 
-// === ROCKET-R GRAPHICS V27 EXPANDED GFX ARENA RUNTIME BEGIN ===
-extern "C" void rocket_graphics_arena_v27(std::uint8_t* rdram, recomp_context*) {
-    if (rdram == nullptr) return;
-    const std::uint32_t task = ReadU32(rdram, kCurGfxTaskAddress);
-    std::uint32_t arena = 0U;
-    if (task == kRocketV27Task0Address) arena = kRocketV27Arena0Address;
-    else if (task == kRocketV27Task1Address) arena = kRocketV27Arena1Address;
-    else return;
-
-    const std::uint32_t arena_end = arena + kRocketV27ArenaBytes;
-    if (!ValidRange(arena, kRocketV27ArenaBytes) ||
-        !ValidRange(task, kGfxTaskCtxMtxHeadOffset + 4U) ||
-        !ValidRange(kGfxContextAddress, 0x10U)) return;
-
-    const auto write_u32 = [&](std::uint32_t address, std::uint32_t value) {
-        MEM_W(0, RdramAddress(address)) = value;
-    };
-
-    // Persist the expanded template for this alternating task.
-    write_u32(task + kGfxTaskCtxSizeOffset, kRocketV27ArenaBytes);
-    write_u32(task + kGfxTaskCtxDlStartOffset, arena);
-    write_u32(task + kGfxTaskCtxDlHeadOffset, arena);
-    write_u32(task + kGfxTaskCtxMtxHeadOffset, arena_end);
-
-    // update_gfx_context already copied the retail context this frame, so redirect
-    // the active global context before func_80046D58 emits any frame commands.
-    write_u32(kGfxContextAddress + 0x00U, kRocketV27ArenaBytes);
-    write_u32(kGfxContextAddress + 0x04U, arena);
-    write_u32(kGfxContextAddress + 0x08U, arena);
-    write_u32(kGfxContextAddress + 0x0CU, arena_end);
-
-    static std::atomic<bool> logged{false};
-    if (!logged.exchange(true, std::memory_order_relaxed)) {
-        std::fprintf(stderr, "[graphics] v27 GfxTask arena expansion active: 512 KiB x2.\n");
-    }
-}
-// === ROCKET-R GRAPHICS V27 EXPANDED GFX ARENA RUNTIME END ===
-
-// v20: direct pop-in telemetry. This does not reorder, replay, expand or replace
-// Rocket's renderer. It only observes add_render_entry before the retail 256
-// capacity gate and writes a dedicated diagnostic file.
-std::atomic<std::uint64_t> g_popdiag_frustum_calls{0U};
-std::atomic<std::uint64_t> g_popdiag_visible_attempts{0U};
-std::atomic<std::uint64_t> g_popdiag_rejected_at_capacity{0U};
-std::atomic<std::uint32_t> g_popdiag_max_guest_entries{0U};
-std::atomic<std::uint64_t> g_popdiag_frame_serial{0U};
-
-static void RocketPopDiagAppendToPath(const char* path, const char* line) {
-    if (path == nullptr || line == nullptr) return;
-    std::FILE* file = std::fopen(path, "ab");
-    if (file == nullptr) return;
-    std::fputs(line, file);
-    std::fflush(file);
-    std::fclose(file);
-}
-
-static void RocketPopDiagWrite(const char* format, ...) {
-    char line[1024]{};
-    va_list args;
-    va_start(args, format);
-    std::vsnprintf(line, sizeof(line), format, args);
-    va_end(args);
-
-    // Always write a copy in the process working directory.
-    RocketPopDiagAppendToPath("Rocket-R-popin-diagnostics.log", line);
-
-    // Also write a predictable TEMP copy so the log is easy to find on Windows.
-    const char* temp = std::getenv("TEMP");
-    if (temp == nullptr || *temp == '\0') {
-        temp = std::getenv("TMPDIR");
-    }
-    if (temp != nullptr && *temp != '\0') {
-        char path[1024]{};
-#ifdef _WIN32
-        std::snprintf(path, sizeof(path), "%s\\Rocket-R-popin-diagnostics.log", temp);
-#else
-        std::snprintf(path, sizeof(path), "%s/Rocket-R-popin-diagnostics.log", temp);
-#endif
-        RocketPopDiagAppendToPath(path, line);
-    }
-}
-
-static void RocketPopDiagAtomicMax(std::atomic<std::uint32_t>& target,
-                                   std::uint32_t value) {
-    std::uint32_t current = target.load(std::memory_order_relaxed);
-    while (current < value &&
-           !target.compare_exchange_weak(current, value,
-                                         std::memory_order_relaxed,
-                                         std::memory_order_relaxed)) {
-    }
-}
-
-extern "C" void rocket_popdiag_frustum_call(void) {
-    g_popdiag_frustum_calls.fetch_add(1U, std::memory_order_relaxed);
-}
-
-extern "C" void rocket_popdiag_add_render_entry_attempt(std::uint8_t* rdram,
-                                                            recomp_context* context) {
-    if (rdram == nullptr || context == nullptr) return;
-    const std::uint8_t alpha = static_cast<std::uint8_t>(
-        MEM_W(0x14, context->r29) & 0xFF);
-    if (alpha == 0U) return;
-
-    g_popdiag_visible_attempts.fetch_add(1U, std::memory_order_relaxed);
-
-    constexpr std::uint32_t kQueueBase = 0x800ADB00U;
-    constexpr std::uint32_t kQueueEndPointerAddress = 0x800AF300U;
-    constexpr std::uint32_t kEntryBytes = 24U;
-    constexpr std::uint32_t kCapacity = 256U;
-    const gpr end_pointer_address = static_cast<gpr>(
-        static_cast<std::int32_t>(kQueueEndPointerAddress));
-    const std::uint32_t end_pointer = static_cast<std::uint32_t>(
-        MEM_W(0, end_pointer_address));
-
-    if (end_pointer >= kQueueBase) {
-        const std::uint32_t delta = end_pointer - kQueueBase;
-        if ((delta % kEntryBytes) == 0U) {
-            const std::uint32_t entries = delta / kEntryBytes;
-            RocketPopDiagAtomicMax(g_popdiag_max_guest_entries,
-                                   std::min(entries, kCapacity));
-            if (entries >= kCapacity) {
-                g_popdiag_rejected_at_capacity.fetch_add(
-                    1U, std::memory_order_relaxed);
-            }
-        }
-    }
-}
-
-static void RocketPopDiagFlushPreviousFrame(void) {
-    const std::uint64_t frame =
-        g_popdiag_frame_serial.fetch_add(1U, std::memory_order_relaxed) + 1U;
-    const std::uint64_t frustum =
-        g_popdiag_frustum_calls.exchange(0U, std::memory_order_relaxed);
-    const std::uint64_t attempts =
-        g_popdiag_visible_attempts.exchange(0U, std::memory_order_relaxed);
-    const std::uint64_t rejected =
-        g_popdiag_rejected_at_capacity.exchange(0U, std::memory_order_relaxed);
-    const std::uint32_t max_entries =
-        g_popdiag_max_guest_entries.exchange(0U, std::memory_order_relaxed);
-
-    if (frame == 1U) {
-        RocketPopDiagWrite(
-            "=== Rocket-R v27 EXPANDED-GFX-ARENA + DURABLE-OWNERSHIP diagnostic session ===\n"
-            "mode=normal-v17.1-renderer side-plane-cpu-cull=V17.1-VIEWPORT-GUARD authored-submodel-mask=RETAIL pre-render-object-gate=RETAIL presentation-identity=DURABLE-OWNER-V26 gfx-arena=512Kx2-V27 "
-            "draw-distance=r7-preserved retail-distance-fade=preserved queue-overflow=RECOVERED-V21\n"
-            "fields: frame frustum_calls visible_add_attempts max_guest_queue "
-            "would_drop_at_256_recovered\n");
-    }
-
-    // One compact line per authored frame. This remains small enough for a
-    // short reproduction and makes camera-angle transitions easy to correlate.
-    RocketPopDiagWrite(
-        "frame=%llu frustum_calls=%llu visible_add_attempts=%llu "
-        "max_guest_queue=%u would_drop_at_256_recovered=%llu\n",
-        static_cast<unsigned long long>(frame),
-        static_cast<unsigned long long>(frustum),
-        static_cast<unsigned long long>(attempts),
-        max_entries,
-        static_cast<unsigned long long>(rejected));
+    const std::uint32_t command_key =
+        CanonicalActiveDlAddress(physical_command_address);
+    const std::uint32_t target_key =
+        CanonicalActiveDlAddress(physical_target_address);
+    std::uint64_t key = Mix64(0x524F434B4554534BULL ^
+                              static_cast<std::uint64_t>(command_key));
+    key = Mix64(key ^ (static_cast<std::uint64_t>(target_key) << 32U));
+    const std::uint32_t identity = NormalizeIdentity(key);
+    *out_identity = identity;
+    return identity != 0U && identity != 0xFFFFFFFFU;
 }
 
 extern "C" void rocket_presentation_frame_begin(std::uint8_t*,
                                                   recomp_context*) {
-    g_pending_model_owner = {};
     std::scoped_lock lock(g_mutex);
-    RocketPopDiagFlushPreviousFrame();
-    const std::size_t visible_attempts = static_cast<std::size_t>(
-        std::count_if(g_entries.begin(), g_entries.end(),
-                      [](const RecordedEntry& entry) { return entry.alpha != 0U; }));
-    if (visible_attempts >= 240U &&
-        !g_logged_render_queue_pressure.exchange(true, std::memory_order_relaxed)) {
-        std::fprintf(stderr,
-            "[render-queue] PRESSURE: previous authored frame attempted %zu/%zu visible entries. "
-            "Dense widescreen views are close to Rocket's original render-list ceiling.\n",
-            visible_attempts, kGuestRenderQueueCapacity);
-    }
-    if (visible_attempts > kGuestRenderQueueCapacity &&
-        !g_logged_render_queue_saturation.exchange(true, std::memory_order_relaxed)) {
-        std::fprintf(stderr,
-            "[render-queue] SATURATION: previous authored frame attempted %zu visible entries, "
-            "and Rocket's retail staging list holds %zu. v21 recovers %zu overflow entries "
-            "inside the same renderer invocation.\n",
-            visible_attempts, kGuestRenderQueueCapacity,
-            visible_attempts - kGuestRenderQueueCapacity);
-    }
+    g_background_ranges.clear();
+    g_background_capture_active = false;
+    g_background_capture_begin = 0U;
     ++g_frame;
     g_entries.clear();
     g_key_ordinals.clear();
     MaybeTraceSummary();
 }
 
-extern "C" void rocket_presentation_model_entry_owner(std::uint8_t* rdram,
-                                                       recomp_context* context) {
-    g_pending_model_owner = {};
-    if (rdram == nullptr || context == nullptr) return;
-    const std::uint32_t object = static_cast<std::uint32_t>(context->r19);
-    const std::uint32_t submodel = static_cast<std::uint32_t>(context->r16);
-    if (!ValidRange(object, 0xFCU) || !ValidRange(submodel, 0x28U)) return;
-    const std::uint32_t submodels = ReadU32(rdram, object + 0xF4U);
-    const std::uint32_t count = ReadU32(rdram, object + 0xF8U);
-    if (count == 0U || count > 512U || !ValidRange(submodels, count * 0x28U) ||
-        submodel < submodels) return;
-    const std::uint32_t delta = submodel - submodels;
-    if ((delta % 0x28U) != 0U) return;
-    const std::uint32_t index = delta / 0x28U;
-    if (index >= count) return;
+extern "C" void rocket_presentation_background_begin(std::uint8_t* rdram,
+                                                       recomp_context*) {
+    std::uint32_t head = 0U;
+    if (!ReadCurrentDlHeadPhysical(rdram, head)) return;
+    std::scoped_lock lock(g_mutex);
+    g_background_capture_active = true;
+    g_background_capture_begin = head;
+}
 
-    const std::uint32_t gfx = static_cast<std::uint32_t>(context->r4);
-    const GfxSemanticRef gfx_ref = CanonicalGfxRef(rdram, gfx);
-    const std::uint32_t object_class = ReadU32(rdram, object);
-    std::uint64_t key = Mix64(static_cast<std::uint64_t>(Physical(object)) |
-                              (static_cast<std::uint64_t>(index) << 32U));
-    key = Mix64(key ^ (static_cast<std::uint64_t>(Physical(object_class)) << 1U));
-    key = Mix64(key ^ (static_cast<std::uint64_t>(gfx_ref.key) << 17U));
-    if (key == 0U) key = 1U;
-    g_pending_model_owner = {key, Physical(gfx), true};
+extern "C" void rocket_presentation_background_end(std::uint8_t* rdram,
+                                                     recomp_context*) {
+    std::uint32_t head = 0U;
+    if (!ReadCurrentDlHeadPhysical(rdram, head)) return;
+    std::scoped_lock lock(g_mutex);
+    if (!g_background_capture_active) return;
+    const std::uint32_t begin = g_background_capture_begin;
+    g_background_capture_active = false;
+    g_background_capture_begin = 0U;
+    if (head <= begin) return;
+    // Rocket's authored command arena is small; reject a nonsensical wrap or
+    // stale pointer instead of classifying unrelated world/HUD commands.
+    if ((head - begin) > 0x00080000U) return;
+    g_background_ranges.push_back(BackgroundCommandRange{begin, head});
 }
 
 extern "C" void rocket_presentation_render_entry(std::uint8_t* rdram,
@@ -1204,13 +1021,6 @@ extern "C" void rocket_presentation_render_entry(std::uint8_t* rdram,
     entry.callsite = static_cast<std::uint32_t>(context->r31);
     entry.alpha = static_cast<std::uint8_t>(MEM_W(0x14, context->r29) & 0xFF);
     const GfxSemanticRef gfx_ref = CanonicalGfxRef(rdram, entry.gfx);
-    const PendingModelOwner pending_owner = std::exchange(
-        g_pending_model_owner, PendingModelOwner{});
-    if (pending_owner.valid &&
-        pending_owner.gfx_physical == Physical(entry.gfx)) {
-        entry.owner_key = pending_owner.key;
-        entry.owner_valid = true;
-    }
     entry.key = EntryKey(
         entry.callsite, gfx_ref.key, entry.mtx2 != 0U, entry.alpha);
 
@@ -1257,13 +1067,13 @@ extern "C" void rocket_presentation_task_submitted(std::uint8_t* rdram,
     frame.context_dl_start = ValidRange(context_buffer, 8U)
         ? Physical(context_buffer) : 0U;
     frame.context_size = ReadU32(rdram, task + kGfxTaskCtxSizeOffset);
+    frame.background_ranges = g_background_ranges;
     frame.sequence = g_submission_sequence++;
     FinalizeTracksAndBindings(frame.matrices);
 
     if (g_entries.empty()) {
         ++g_empty_frames;
         if (g_empty_frames >= 2U) {
-            g_owner_tracks.clear();
             g_tracks.clear();
             g_shared_matrix_tracks.clear();
         }
@@ -1275,7 +1085,6 @@ extern "C" void rocket_presentation_task_submitted(std::uint8_t* rdram,
         g_submitted.clear();
         // Never guess after queue ownership is lost. Current task is still
         // allowed to start a fresh FIFO; prior interpolation history is gone.
-        g_owner_tracks.clear();
         g_tracks.clear();
         g_shared_matrix_tracks.clear();
         if (TraceEnabled()) {
@@ -1284,332 +1093,9 @@ extern "C" void rocket_presentation_task_submitted(std::uint8_t* rdram,
         }
     }
     g_submitted.push_back(std::move(frame));
+    g_background_ranges.clear();
+    g_background_capture_active = false;
+    g_background_capture_begin = 0U;
     g_entries.clear();
     g_key_ordinals.clear();
 }
-
-// === ROCKET-R GRAPHICS V21 IN-FUNCTION RENDER QUEUE EXPANSION BEGIN ===
-// Recover submissions beyond Rocket's retail 256-entry queue without replacing
-// func_8008B694. Scene traversal occurs once; the original renderer remains in
-// control and draws globally preordered staging batches before its normal tail.
-namespace {
-
-constexpr std::uint32_t kRocketV21QueueBase = 0x800ADB00U;
-constexpr std::uint32_t kRocketV21QueueEndPointer = 0x800AF300U;
-constexpr std::uint32_t kRocketV21EntryBytes = 24U;
-constexpr std::size_t kRocketV21RetailBatchCapacity = 256U;
-// gGfxContext = 0x800A5DA8 in the pinned Rocket US build. dlHead and the
-// descending matrix cursor are +0x08/+0x0C respectively. This is telemetry
-// only: v21 never changes either pointer or truncates a recovered batch.
-constexpr std::uint32_t kRocketV21DlHeadAddress = 0x800A5DB0U;
-constexpr std::uint32_t kRocketV21MatrixHeadAddress = 0x800A5DB4U;
-
-struct RocketV21QueueEntry {
-    std::uint32_t gfx = 0U;
-    std::uint32_t mtx1 = 0U;
-    std::uint32_t mtx2 = 0U;
-    std::uint32_t depth_bits = 0U;
-    std::uint32_t render_params = 0U;
-    std::uint8_t alpha = 0U;
-};
-
-struct RocketV21QueueState {
-    std::vector<RocketV21QueueEntry> captured{};
-    std::vector<std::size_t> final_order{};
-    std::size_t cursor = 0U;
-    std::size_t batches_staged = 0U;
-    std::uint32_t min_dl_headroom_bytes = std::numeric_limits<std::uint32_t>::max();
-    bool capture_active = false;
-    bool expanded = false;
-    bool continuation = false;
-};
-
-thread_local RocketV21QueueState g_rocket_v21_queue{};
-std::atomic<bool> g_rocket_v21_logged_activation{false};
-std::atomic<bool> g_rocket_v21_logged_invalid_class{false};
-
-[[nodiscard]] gpr RocketV21GuestAddress(std::uint32_t address) {
-    return static_cast<gpr>(
-        static_cast<std::int64_t>(static_cast<std::int32_t>(address)));
-}
-
-[[nodiscard]] std::uint32_t RocketV21DisplayListHeadroomBytes(std::uint8_t* rdram) {
-    const std::uint32_t dl_head = static_cast<std::uint32_t>(
-        MEM_W(0, RocketV21GuestAddress(kRocketV21DlHeadAddress)));
-    const std::uint32_t matrix_head = static_cast<std::uint32_t>(
-        MEM_W(0, RocketV21GuestAddress(kRocketV21MatrixHeadAddress)));
-    if (matrix_head < dl_head) return 0U;
-    return matrix_head - dl_head;
-}
-
-void RocketV21ObserveDisplayListHeadroom(std::uint8_t* rdram) {
-    auto& state = g_rocket_v21_queue;
-    state.min_dl_headroom_bytes = std::min(
-        state.min_dl_headroom_bytes, RocketV21DisplayListHeadroomBytes(rdram));
-}
-
-[[nodiscard]] std::uint8_t RocketV21RenderClass(const RocketV21QueueEntry& entry) {
-    return static_cast<std::uint8_t>((entry.render_params >> 28U) & 0x0FU);
-}
-
-[[nodiscard]] float RocketV21Depth(const RocketV21QueueEntry& entry) {
-    return std::bit_cast<float>(entry.depth_bits);
-}
-
-[[nodiscard]] std::uint32_t RocketV21FinalRenderParams(std::uint32_t raw,
-                                                        std::uint8_t alpha) {
-    if (alpha >= 0xFFU) return raw;
-
-    // add_render_entry rewrites every faded entry to
-    // unk_make_RenderParams(2, 2, unk1, unk2==3 ? 5 : 4).
-    // RenderParams is four guest bytes: [unk0/cycle][unk1][unk2][renderMode].
-    const std::uint8_t unk1 = static_cast<std::uint8_t>((raw >> 16U) & 0xFFU);
-    std::uint8_t unk2 = static_cast<std::uint8_t>((raw >> 8U) & 0xFFU);
-    unk2 = (unk2 == 3U) ? 5U : 4U;
-    const std::uint8_t render_mode = (unk2 == 5U) ? 7U : 6U;
-    return (0x22U << 24U) |
-           (static_cast<std::uint32_t>(unk1) << 16U) |
-           (static_cast<std::uint32_t>(unk2) << 8U) |
-           static_cast<std::uint32_t>(render_mode);
-}
-
-void RocketV21HeapSortSegment(std::vector<std::size_t>& order,
-                              std::size_t begin,
-                              std::size_t length) {
-    if (length < 2U) return;
-
-    std::ptrdiff_t end = static_cast<std::ptrdiff_t>(length);
-    std::ptrdiff_t root = end / 2;
-    --end;
-
-    while (true) {
-        if (root > 0) {
-            --root;
-        } else {
-            std::swap(order[begin], order[begin + static_cast<std::size_t>(end)]);
-            --end;
-            if (!(end > 0)) break;
-        }
-
-        std::ptrdiff_t parent = root;
-        std::ptrdiff_t child = (parent * 2) + 1;
-        while (end >= child) {
-            if (child < end) {
-                const float left = RocketV21Depth(
-                    g_rocket_v21_queue.captured[order[begin + static_cast<std::size_t>(child)]]);
-                const float right = RocketV21Depth(
-                    g_rocket_v21_queue.captured[order[begin + static_cast<std::size_t>(child + 1)]]);
-                if (left < right) ++child;
-            }
-
-            const float parent_depth = RocketV21Depth(
-                g_rocket_v21_queue.captured[order[begin + static_cast<std::size_t>(parent)]]);
-            const float child_depth = RocketV21Depth(
-                g_rocket_v21_queue.captured[order[begin + static_cast<std::size_t>(child)]]);
-            if (!(parent_depth < child_depth)) break;
-
-            std::swap(order[begin + static_cast<std::size_t>(parent)],
-                      order[begin + static_cast<std::size_t>(child)]);
-            parent = child;
-            child += child + 1;
-        }
-    }
-}
-
-[[nodiscard]] bool RocketV21BuildGlobalOrder() {
-    auto& state = g_rocket_v21_queue;
-    const std::size_t count = state.captured.size();
-    state.final_order.resize(count);
-    for (std::size_t i = 0; i < count; ++i) state.final_order[i] = i;
-    if (count == 0U) return true;
-
-    for (const RocketV21QueueEntry& entry : state.captured) {
-        const std::uint8_t cls = RocketV21RenderClass(entry);
-        if (cls != 1U && cls != 2U) {
-            if (!g_rocket_v21_logged_invalid_class.exchange(true, std::memory_order_relaxed)) {
-                std::fprintf(stderr,
-                    "[render-queue] v21 expansion declined: encountered RenderParams class %u; "
-                    "retail 256-entry behaviour retained for safety.\n",
-                    static_cast<unsigned>(cls));
-            }
-            return false;
-        }
-    }
-
-    // Exact source-level reproduction of divide_opaque_and_transparent().
-    std::size_t opaque_end = 0U;
-    std::size_t transparent_start = count - 1U;
-    while (true) {
-        while (RocketV21RenderClass(state.captured[state.final_order[opaque_end]]) == 1U &&
-               opaque_end < transparent_start) {
-            ++opaque_end;
-        }
-        while (RocketV21RenderClass(state.captured[state.final_order[transparent_start]]) == 2U &&
-               opaque_end < transparent_start) {
-            --transparent_start;
-        }
-        if (opaque_end >= transparent_start) break;
-        std::swap(state.final_order[opaque_end], state.final_order[transparent_start]);
-        ++opaque_end;
-        --transparent_start;
-    }
-    if (RocketV21RenderClass(state.captured[state.final_order[opaque_end]]) == 1U) {
-        ++opaque_end;
-    }
-
-    // Exact source-level heap sort for each retail class.
-    RocketV21HeapSortSegment(state.final_order, 0U, opaque_end);
-    RocketV21HeapSortSegment(state.final_order, opaque_end, count - opaque_end);
-
-    // func_8008B694 draws opaque forward and transparent backward. Convert that
-    // to one explicit final draw order so arbitrary 256-entry staging boundaries
-    // can never perturb global transparency order.
-    std::vector<std::size_t> draw_order;
-    draw_order.reserve(count);
-    draw_order.insert(draw_order.end(), state.final_order.begin(),
-                      state.final_order.begin() + static_cast<std::ptrdiff_t>(opaque_end));
-    for (std::size_t i = count; i > opaque_end; --i) {
-        draw_order.push_back(state.final_order[i - 1U]);
-    }
-    state.final_order.swap(draw_order);
-    return true;
-}
-
-void RocketV21WriteEntry(std::uint8_t* rdram,
-                         std::size_t slot,
-                         const RocketV21QueueEntry& entry) {
-    (void)rdram;
-    const std::uint32_t guest = kRocketV21QueueBase +
-        static_cast<std::uint32_t>(slot * kRocketV21EntryBytes);
-    const gpr address = RocketV21GuestAddress(guest);
-    MEM_W(0x00, address) = entry.gfx;
-    MEM_W(0x04, address) = entry.mtx1;
-    MEM_W(0x08, address) = entry.mtx2;
-    MEM_W(0x0C, address) = entry.depth_bits;
-    MEM_W(0x10, address) = entry.render_params;
-    MEM_B(0x14, address) = entry.alpha;
-}
-
-[[nodiscard]] bool RocketV21StageNextBatch(std::uint8_t* rdram) {
-    auto& state = g_rocket_v21_queue;
-    if (!state.expanded || state.cursor >= state.final_order.size()) return false;
-
-    const std::size_t remaining = state.final_order.size() - state.cursor;
-    const std::size_t batch_count = std::min(kRocketV21RetailBatchCapacity, remaining);
-    for (std::size_t i = 0; i < batch_count; ++i) {
-        RocketV21WriteEntry(rdram, i,
-            state.captured[state.final_order[state.cursor + i]]);
-    }
-    state.cursor += batch_count;
-    ++state.batches_staged;
-    RocketV21ObserveDisplayListHeadroom(rdram);
-    MEM_W(0, RocketV21GuestAddress(kRocketV21QueueEndPointer)) =
-        kRocketV21QueueBase + static_cast<std::uint32_t>(batch_count * kRocketV21EntryBytes);
-    return true;
-}
-
-} // namespace
-
-extern "C" void rocket_render_queue_capture_begin(std::uint8_t*, recomp_context*) {
-    auto& state = g_rocket_v21_queue;
-    state.captured.clear();
-    state.final_order.clear();
-    state.cursor = 0U;
-    state.batches_staged = 0U;
-    state.min_dl_headroom_bytes = std::numeric_limits<std::uint32_t>::max();
-    state.capture_active = true;
-    state.expanded = false;
-    state.continuation = false;
-    if (state.captured.capacity() < 512U) state.captured.reserve(512U);
-}
-
-extern "C" void rocket_render_queue_capture_entry(std::uint8_t* rdram,
-                                                     recomp_context* context) {
-    if (rdram == nullptr || context == nullptr) return;
-    auto& state = g_rocket_v21_queue;
-    if (!state.capture_active) return;
-
-    const std::uint8_t alpha = static_cast<std::uint8_t>(
-        MEM_W(0x14, context->r29) & 0xFFU);
-    if (alpha == 0U) return;
-
-    RocketV21QueueEntry entry{};
-    entry.gfx = static_cast<std::uint32_t>(context->r4);
-    entry.mtx1 = static_cast<std::uint32_t>(context->r5);
-    entry.mtx2 = static_cast<std::uint32_t>(context->r6);
-    entry.depth_bits = static_cast<std::uint32_t>(context->r7);
-    const std::uint32_t raw_params = static_cast<std::uint32_t>(
-        MEM_W(0x10, context->r29));
-    entry.render_params = RocketV21FinalRenderParams(raw_params, alpha);
-    entry.alpha = alpha;
-    state.captured.push_back(entry);
-}
-
-extern "C" void rocket_render_queue_prepare_first_batch(std::uint8_t* rdram,
-                                                           recomp_context*) {
-    auto& state = g_rocket_v21_queue;
-    state.capture_active = false;
-    state.cursor = 0U;
-    state.continuation = false;
-
-    // Zero-overhead retail path: <=256 submissions are left completely alone.
-    if (state.captured.size() <= kRocketV21RetailBatchCapacity) {
-        state.expanded = false;
-        return;
-    }
-    if (!RocketV21BuildGlobalOrder()) {
-        state.expanded = false;
-        return;
-    }
-
-    state.expanded = true;
-    if (!RocketV21StageNextBatch(rdram)) {
-        state.expanded = false;
-        return;
-    }
-
-    if (!g_rocket_v21_logged_activation.exchange(true, std::memory_order_relaxed)) {
-        const std::size_t recovered = state.captured.size() - kRocketV21RetailBatchCapacity;
-        std::fprintf(stderr,
-            "[render-queue] v21 in-function expansion active: captured %zu entries; "
-            "%zu submissions beyond Rocket's retail 256-entry ceiling recovered.\n",
-            state.captured.size(), recovered);
-        RocketPopDiagWrite(
-            "[queue-v21] in-function expansion active captured=%zu recovered_beyond_256=%zu\n",
-            state.captured.size(), recovered);
-    }
-}
-
-extern "C" int rocket_render_queue_batch_preordered(void) {
-    return g_rocket_v21_queue.expanded ? 1 : 0;
-}
-
-extern "C" int rocket_render_queue_is_continuation(void) {
-    return (g_rocket_v21_queue.expanded && g_rocket_v21_queue.continuation) ? 1 : 0;
-}
-
-extern "C" int rocket_render_queue_prepare_next_batch(std::uint8_t* rdram,
-                                                         recomp_context*) {
-    auto& state = g_rocket_v21_queue;
-    if (state.expanded) RocketV21ObserveDisplayListHeadroom(rdram);
-    if (!state.expanded || state.cursor >= state.final_order.size()) {
-        if (state.expanded) {
-            const std::uint32_t headroom =
-                (state.min_dl_headroom_bytes == std::numeric_limits<std::uint32_t>::max())
-                    ? 0U : state.min_dl_headroom_bytes;
-            RocketPopDiagWrite(
-                "[queue-v21-frame] captured=%zu recovered_beyond_256=%zu batches=%zu "
-                "min_dl_headroom_bytes=%u min_dl_headroom_gfx=%u\n",
-                state.captured.size(),
-                state.captured.size() - kRocketV21RetailBatchCapacity,
-                state.batches_staged,
-                headroom, headroom / 8U);
-        }
-        state.continuation = false;
-        return 0;
-    }
-    state.continuation = true;
-    return RocketV21StageNextBatch(rdram) ? 1 : 0;
-}
-// === ROCKET-R GRAPHICS V21 IN-FUNCTION RENDER QUEUE EXPANSION END ===
-

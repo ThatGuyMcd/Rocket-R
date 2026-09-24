@@ -260,9 +260,8 @@ def main() -> int:
             "OneClickBuild.ps1 must preserve stage-7 N64Recomp/RSPRecomp diagnostics and validate the ELF context")
     require("static-recomp policy: game_init callable entry + 24 verified zero-size assembly routines" in builder,
             "OneClickBuild.ps1 must report the FIXED34 split load/call entry policy")
-    require("FIXED27 gameplay/interpolation baseline restored exactly" in builder and
-            "retail 30 Hz simulation + RT64 presentation interpolation + safe-area crop + widescreen CPU frustum" in builder,
-            "OneClickBuild.ps1 must report the FIXED34 rollback/runtime policy")
+    require("stable v5/v6 interpolation + retail Rocket renderer restored" in builder,
+            "OneClickBuild.ps1 must report the v29 render-recovery policy")
 
     n64_patch = (root / "patches/n64recomp/0001-fix-high-vram-entrypoint-comparison.patch").read_text(encoding="utf-8")
     require("value == entrypoint_address" in n64_patch and "configured_entry_size" in n64_patch and "else if (size == 0)" in n64_patch,
@@ -404,53 +403,30 @@ def main() -> int:
         'requested_horizontal_half', 'requested_vertical_half',
         'required_radius = std::max(required_radius, plane_distance)',
     ))
-    # v26: keep the proven v21 queue recovery and retail draw-distance path, but bind
-    # interpolated model/submodel presentation to the actual GameObject owner instead of
-    # post-hoc nearest-neighbour RenderEntry matching. The retired v23 mask bypass must be off.
-    _v26_root = __import__('pathlib').Path(__file__).resolve().parents[1]
-    _v26_culling = (_v26_root / 'src' / 'widescreen_culling.cpp').read_text(encoding='utf-8-sig')
-    _v26_graphics = (_v26_root / 'src' / 'graphics_enhancements.cpp').read_text(encoding='utf-8-sig')
-    _v26_presentation = (_v26_root / 'src' / 'presentation_identity.cpp').read_text(encoding='utf-8-sig')
-    _v26_header = (_v26_root / 'src' / 'presentation_identity.hpp').read_text(encoding='utf-8-sig')
-    _v26_oneclick = (_v26_root / 'scripts' / 'OneClickBuild.ps1').read_text(encoding='utf-8-sig')
-    _v26_policy = json.loads((_v26_root / 'runtime-recomp' / 'rocket.us.recomp-policy.json').read_text(encoding='utf-8-sig'))
-    _v26_queue_path = _v26_root / 'scripts' / 'patch_render_queue_expansion_v21_generated.py'
-    require(_v26_queue_path.is_file(), 'v21 generated queue patcher missing')
-    _v26_queue = _v26_queue_path.read_text(encoding='utf-8-sig')
-    _v26_hooks = _v26_policy.get('functionHooks', [])
-    _v26_owner_hooks = [h for h in _v26_hooks if h.get('function') == 'func_8001ECEC' and str(h.get('beforeVram','')).upper() == '0X8001F084' and 'rocket_presentation_model_entry_owner' in h.get('text','')]
-    _v26_required = (
-        'v16 viewport-locked FOV/aspect guard active' in _v26_culling and
-        'kDisableCpuSidePlanesBits = 0x7F7FFFFFU' not in _v26_culling and
-        'static_cast<std::uint32_t>(context->r7)' in _v26_graphics and
-        's.draw_distance_multiplier' in _v26_graphics and
-        'ROCKET-R GRAPHICS V21 IN-FUNCTION RENDER QUEUE EXPANSION BEGIN' in _v26_presentation and
-        'rocket_render_queue_prepare_first_batch' in _v26_presentation and
-        'rocket_render_queue_prepare_next_batch' in _v26_presentation and
-        'PendingModelOwner' in _v26_presentation and
-        'OwnerTrack' in _v26_presentation and
-        'owner_key' in _v26_presentation and
-        'DURABLE-OWNER-V26' in _v26_presentation and
-        'pre-render-object-gate=RETAIL' in _v26_presentation and
-        'rocket_presentation_model_entry_owner' in _v26_header and
-        len(_v26_owner_hooks) == 1 and
-        'patch_render_queue_expansion_v21_generated.py' in _v26_oneclick and
-        'patch_visibility_retention_v23_generated.py' not in _v26_oneclick and
-        'ROCKET_QUEUE_V21_PROCESS_BATCH' in _v26_queue
+    # v29 render recovery: retain the preserved v5/v6 presentation identity path,
+    # but restore Rocket's original generated RenderEntry/sort/draw renderer exactly.
+    _v29_root = __import__('pathlib').Path(__file__).resolve().parents[1]
+    _v29_presentation = (_v29_root / 'src' / 'presentation_identity.cpp').read_text(encoding='utf-8-sig')
+    _v29_oneclick = (_v29_root / 'scripts' / 'OneClickBuild.ps1').read_text(encoding='utf-8-sig')
+    _v29_cmake = (_v29_root / 'CMakeLists.txt').read_text(encoding='utf-8-sig')
+    _v29_compat = (_v29_root / 'src' / 'render_telemetry_compat.cpp').read_text(encoding='utf-8-sig')
+    _v29_required = (
+        'constexpr std::uint64_t kMaximumTrackAge = 1U;' in _v29_presentation and
+        'constexpr float kMaximumTrackDistance = 384.0F;' in _v29_presentation and
+        'BuildSharedMatrixSamples' in _v29_presentation and
+        'MatchSharedMatrixSamples' in _v29_presentation and
+        'SubmittedFrame& frame = g_submitted.front();' in _v29_presentation and
+        'g_active_task_fail_closed = true;' in _v29_presentation and
+        'PendingModelOwner' not in _v29_presentation and
+        'OwnerTrack' not in _v29_presentation and
+        'rocket_graphics_arena_v27' not in _v29_presentation and
+        'patch_render_queue_v28_generated.py' not in _v29_oneclick and
+        'src/render_queue_v28.cpp' not in _v29_cmake and
+        'src/render_telemetry_compat.cpp' in _v29_cmake and
+        'rocket_popdiag_frustum_call' in _v29_compat
     )
-    _v26_forbidden = any(token in (_v26_presentation + _v26_oneclick) for token in (
-        'authored-submodel-mask=RECOVERED-V23',
-        'ROCKET-R GRAPHICS V23 AUTHORED SUBMODEL VISIBILITY RETENTION BEGIN',
-        'ExpandedRenderEntry', 'RocketBuildGlobalRenderOrder',
-        'rocket_render_queue_begin_batch(', 'patch_render_queue_generated.py',
-        'rocket_original_func_8008B694', 'rocket_capture_func_8008B694',
-        'rocket_draw_func_8008B694', '[render-queue] GLOBAL',
-        'pre-render-object-gate=RECOVERED-V25', 'rocket_popdiag_object_gate_result',
-        'object_gate_recovered', 'patch_prerender_object_gate_v25_generated.py',
-        'ROCKET-R GRAPHICS V25 PRE-RENDER OBJECT GATE RETENTION BEGIN',
-    ))
-    if not (_v26_required and not _v26_forbidden):
-        raise SystemExit('SOURCE SELF-CHECK FAILED: v26 durable presentation ownership state missing')
+    if not _v29_required:
+        raise SystemExit('SOURCE SELF-CHECK FAILED: v29 render-recovery state missing')
     scan_checked_source(root)
     print(f"Rocket-R source self-check PASS ({version}).")
     print(f"Pinned dependencies: {len(deps)}; patch integrity: PASS; ROM-free source: PASS.")

@@ -26,6 +26,7 @@ constexpr std::uint32_t kCurGfxTaskAddress = 0x800A5DBCU;
 constexpr std::uint32_t kGfxTaskCtxSizeOffset = 0x004U;
 constexpr std::uint32_t kGfxTaskCtxDlStartOffset = 0x008U;
 constexpr std::uint32_t kGfxTaskDlStartOffset = 0x014U;
+constexpr std::uint32_t kGfxContextDlHeadAddress = 0x800A5DB0U; // v33 sky/background command-range capture
 constexpr std::uint32_t kMtxBytes = 0x40U;
 constexpr std::uint64_t kMaximumTrackAge = 1U;
 constexpr std::size_t kMaximumPendingTasks = 8U;
@@ -114,12 +115,19 @@ struct BindingRecord {
 
 using MatrixMap = std::unordered_map<std::uint32_t, BindingRecord>;
 
+// ROCKET-R SKYBOX INTERPOLATION V33
+struct BackgroundCommandRange {
+    std::uint32_t begin = 0U;
+    std::uint32_t end = 0U;
+};
+
 struct SubmittedFrame {
     std::uint32_t display_list = 0U;
     std::uint32_t task_address = 0U;
     std::uint32_t context_dl_start = 0U;
     std::uint32_t context_size = 0U;
     std::uint64_t sequence = 0U;
+    std::vector<BackgroundCommandRange> background_ranges{};
     MatrixMap matrices{};
 };
 
@@ -133,7 +141,13 @@ std::uint64_t g_submission_sequence = 1U;
 std::uint32_t g_next_token = 1U;
 std::uint32_t g_empty_frames = 0U;
 std::unordered_map<std::uint64_t, std::uint32_t> g_key_ordinals;
+std::vector<BackgroundCommandRange> g_background_ranges;
+bool g_background_capture_active = false;
+std::uint32_t g_background_capture_begin = 0U;
 thread_local MatrixMap g_active_matrices;
+thread_local std::vector<BackgroundCommandRange> g_active_background_ranges;
+thread_local std::uint32_t g_active_context_dl_start = 0U;
+thread_local std::uint32_t g_active_context_size = 0U;
 // While an RT64 Rocket task is being decoded, the semantic sidecar owns the
 // matching policy for every model matrix. Unknown matrices must therefore snap
 // instead of escaping back into RT64's anonymous automatic matcher.
@@ -180,6 +194,35 @@ std::atomic<std::uint64_t> g_coverage_dynamic_vertex_bindings{0U};
 [[nodiscard]] std::uint32_t ReadU32(std::uint8_t* rdram,
                                     std::uint32_t address) {
     return static_cast<std::uint32_t>(MEM_W(0, RdramAddress(address)));
+}
+
+[[nodiscard]] bool ReadCurrentDlHeadPhysical(std::uint8_t* rdram,
+                                                   std::uint32_t& out) {
+    if (rdram == nullptr || !ValidRange(kGfxContextDlHeadAddress, 4U)) return false;
+    const std::uint32_t address = ReadU32(rdram, kGfxContextDlHeadAddress);
+    if (!ValidRange(address, 8U)) return false;
+    out = Physical(address);
+    return true;
+}
+
+[[nodiscard]] bool BackgroundRangeContains(std::uint32_t address) {
+    const std::uint32_t physical = Physical(address);
+    for (const BackgroundCommandRange& range : g_active_background_ranges) {
+        if (physical >= range.begin && physical < range.end) return true;
+    }
+    return false;
+}
+
+[[nodiscard]] std::uint32_t CanonicalActiveDlAddress(std::uint32_t address) {
+    const std::uint32_t physical = Physical(address);
+    if (g_active_context_size != 0U) {
+        const std::uint64_t begin = g_active_context_dl_start;
+        const std::uint64_t end = begin + static_cast<std::uint64_t>(g_active_context_size);
+        if (physical >= begin && static_cast<std::uint64_t>(physical) < end) {
+            return 0x80000000U | (physical - g_active_context_dl_start);
+        }
+    }
+    return physical;
 }
 
 [[nodiscard]] std::uint16_t ReadU16(std::uint8_t* rdram,
@@ -795,6 +838,9 @@ rocket::presentation::CoverageStats rocket::presentation::coverage_stats() {
 rocket::presentation::TaskIdentityScope::TaskIdentityScope(
     std::uint8_t* rdram_snapshot, std::uint32_t display_list_address) {
     g_active_matrices.clear();
+    g_active_background_ranges.clear();
+    g_active_context_dl_start = 0U;
+    g_active_context_size = 0U;
     g_active_task_fail_closed = true;
     const std::uint32_t physical = Physical(display_list_address);
 
@@ -849,12 +895,18 @@ rocket::presentation::TaskIdentityScope::TaskIdentityScope(
     }
 
     g_active_matrices = std::move(frame.matrices);
+    g_active_background_ranges = std::move(frame.background_ranges);
+    g_active_context_dl_start = frame.context_dl_start;
+    g_active_context_size = frame.context_size;
     g_submitted.erase(g_submitted.begin());
     g_trace_task_matches.fetch_add(1U, std::memory_order_relaxed);
 }
 
 rocket::presentation::TaskIdentityScope::~TaskIdentityScope() {
     g_active_matrices.clear();
+    g_active_background_ranges.clear();
+    g_active_context_dl_start = 0U;
+    g_active_context_size = 0U;
     g_active_task_fail_closed = false;
 }
 
@@ -902,13 +954,61 @@ extern "C" bool rocket_presentation_matrix_binding(
     return true;
 }
 
+// ROCKET-R SKYBOX INTERPOLATION V33
+extern "C" bool rocket_presentation_background_display_list(
+    std::uint32_t physical_command_address,
+    std::uint32_t physical_target_address,
+    std::uint32_t* out_identity) {
+    if (out_identity == nullptr || !g_active_task_fail_closed) return false;
+    if (!BackgroundRangeContains(physical_command_address)) return false;
+
+    const std::uint32_t command_key =
+        CanonicalActiveDlAddress(physical_command_address);
+    const std::uint32_t target_key =
+        CanonicalActiveDlAddress(physical_target_address);
+    std::uint64_t key = Mix64(0x524F434B4554534BULL ^
+                              static_cast<std::uint64_t>(command_key));
+    key = Mix64(key ^ (static_cast<std::uint64_t>(target_key) << 32U));
+    const std::uint32_t identity = NormalizeIdentity(key);
+    *out_identity = identity;
+    return identity != 0U && identity != 0xFFFFFFFFU;
+}
+
 extern "C" void rocket_presentation_frame_begin(std::uint8_t*,
                                                   recomp_context*) {
     std::scoped_lock lock(g_mutex);
+    g_background_ranges.clear();
+    g_background_capture_active = false;
+    g_background_capture_begin = 0U;
     ++g_frame;
     g_entries.clear();
     g_key_ordinals.clear();
     MaybeTraceSummary();
+}
+
+extern "C" void rocket_presentation_background_begin(std::uint8_t* rdram,
+                                                       recomp_context*) {
+    std::uint32_t head = 0U;
+    if (!ReadCurrentDlHeadPhysical(rdram, head)) return;
+    std::scoped_lock lock(g_mutex);
+    g_background_capture_active = true;
+    g_background_capture_begin = head;
+}
+
+extern "C" void rocket_presentation_background_end(std::uint8_t* rdram,
+                                                     recomp_context*) {
+    std::uint32_t head = 0U;
+    if (!ReadCurrentDlHeadPhysical(rdram, head)) return;
+    std::scoped_lock lock(g_mutex);
+    if (!g_background_capture_active) return;
+    const std::uint32_t begin = g_background_capture_begin;
+    g_background_capture_active = false;
+    g_background_capture_begin = 0U;
+    if (head <= begin) return;
+    // Rocket's authored command arena is small; reject a nonsensical wrap or
+    // stale pointer instead of classifying unrelated world/HUD commands.
+    if ((head - begin) > 0x00080000U) return;
+    g_background_ranges.push_back(BackgroundCommandRange{begin, head});
 }
 
 extern "C" void rocket_presentation_render_entry(std::uint8_t* rdram,
@@ -967,6 +1067,7 @@ extern "C" void rocket_presentation_task_submitted(std::uint8_t* rdram,
     frame.context_dl_start = ValidRange(context_buffer, 8U)
         ? Physical(context_buffer) : 0U;
     frame.context_size = ReadU32(rdram, task + kGfxTaskCtxSizeOffset);
+    frame.background_ranges = g_background_ranges;
     frame.sequence = g_submission_sequence++;
     FinalizeTracksAndBindings(frame.matrices);
 
@@ -992,6 +1093,9 @@ extern "C" void rocket_presentation_task_submitted(std::uint8_t* rdram,
         }
     }
     g_submitted.push_back(std::move(frame));
+    g_background_ranges.clear();
+    g_background_capture_active = false;
+    g_background_capture_begin = 0U;
     g_entries.clear();
     g_key_ordinals.clear();
 }

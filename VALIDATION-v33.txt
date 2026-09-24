@@ -1,0 +1,52 @@
+Rocket-R Graphics v33 - Validation Summary
+==========================================
+
+Scope
+-----
+Skybox/background interpolation only. Dithering is intentionally unchanged.
+
+Locked v32 baseline
+-------------------
+Installer verifies and hashes these files before/after installation:
+  scripts/OneClickBuild.ps1
+  scripts/patch_render_capacity_v32_generated.py
+  CMakeLists.txt
+
+Synthetic v32 install test:
+  PASS - all three locked files remained byte-for-byte unchanged.
+
+Stable interpolation baseline
+-----------------------------
+PASS - retained v5/v6 markers:
+  kMaximumTrackAge = 1U
+  kMaximumTrackDistance = 384.0F
+  BuildSharedMatrixSamples
+  FIFO SubmittedFrame front matching
+
+v33 presentation path
+---------------------
+PASS - records only the command range authored by Rocket's pre-world/background
+pass and freezes it into the existing task-owned FIFO presentation sidecar.
+PASS - RT64 appendix applies a semantic transform group only when a nested
+DisplayList is entered from that captured range.
+PASS - world/HUD rendering paths are not explicitly classified by v33.
+
+Patch application
+-----------------
+PASS - RT64 appendix git-apply check on matching source-context fixture.
+PASS - full semantic patch + v33 appendix git-apply check.
+PASS - git diff --check.
+PASS - presentation_identity.cpp C++20 compile probe.
+PASS - RT64 runDl/endDl control-flow C++20 -Wall -Wextra -Werror probe.
+PASS - Python py_compile for installer, verifier and rollback.
+PASS - second v33 install is idempotent; no duplicate hooks or RT64 appendix.
+
+Rollback
+--------
+PASS - all pre-v33 modified files restored byte-for-byte in fixture test.
+
+Runtime note
+------------
+Visual skybox interpolation cannot be proven without running Rocket-R. Test the
+same vertical-motion scene used in Recording 2026-09-24 223451.mp4 and also
+spot-check the locked v32 3x-6x Draw Distance scene.

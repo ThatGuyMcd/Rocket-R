@@ -134,3 +134,120 @@ diff --git a/src/hle/rt64_game_frame.cpp b/src/hle/rt64_game_frame.cpp
 +            hashMap.emplace(hashFromCall(call, matrixIdHash), GameCallMap{ sceneProjIndex, c, doTransformMatching, doTileInterpolation, doTileMatching, doLookAtInterpolation });
          }
      }
+# ROCKET-R SKYBOX INTERPOLATION V33
+# The guest sidecar marks the exact pre-world/background display-list command
+# range produced by func_8008B594. When that range enters a nested display list,
+# give only that nested background/sky subtree a stable semantic presentation
+# group. World geometry, HUD and Rocket's v32 RenderEntry queue are untouched.
+diff --git a/src/gbi/rt64_gbi_f3d.cpp b/src/gbi/rt64_gbi_f3d.cpp
+index 05630cb..3e79fa5 100644
+--- a/src/gbi/rt64_gbi_f3d.cpp
++++ b/src/gbi/rt64_gbi_f3d.cpp
+@@ -12,6 +12,11 @@
+ #include "rt64_gbi_extended.h"
+ #include "rt64_gbi_rdp.h"
+ 
++extern "C" bool rocket_presentation_background_display_list(
++    uint32_t physical_command_address,
++    uint32_t physical_target_address,
++    uint32_t *out_identity);
++
+ namespace RT64 {
+     namespace GBI_F3D {
+         void matrix(State *state, DisplayList **dl) {
+@@ -33,15 +38,67 @@ namespace RT64 {
+         }
+ 
+         void runDl(State *state, DisplayList **dl) {
+-            if ((*dl)->p0(16, 1) == 0) {
++            const bool pushesReturn = ((*dl)->p0(16, 1) == 0);
++            const uint32_t sourcePhysical = uint32_t(
++                reinterpret_cast<uint8_t *>(*dl) - state->RDRAM) & 0x007FFFFFU;
++            const uint32_t rdramAddress = state->rsp->fromSegmentedMasked((*dl)->w1);
++            bool startedRocketBackgroundPresentation = false;
++
++            if (pushesReturn) {
++                // ROCKET-R SKYBOX INTERPOLATION V33: the guest sidecar knows
++                // the exact command range emitted by Rocket's pre-world
++                // background pass. Start a semantic group only when a nested
++                // display list is entered from that range. Nested calls inherit
++                // the group and carry a false stack marker of their own.
++                if (!state->rocketBackgroundPresentationActive) {
++                    uint32_t identity = 0;
++                    if (rocket_presentation_background_display_list(
++                            sourcePhysical, rdramAddress, &identity) &&
++                        identity != G_EX_ID_IGNORE && identity != G_EX_ID_AUTO) {
++                        state->rsp->matrixId(
++                            identity, true, false, false,
++                            G_EX_COMPONENT_INTERPOLATE,
++                            G_EX_COMPONENT_INTERPOLATE,
++                            G_EX_COMPONENT_SKIP,
++                            G_EX_COMPONENT_SKIP,
++                            G_EX_COMPONENT_INTERPOLATE,
++                            G_EX_COMPONENT_INTERPOLATE,
++                            G_EX_COMPONENT_AUTO,
++                            G_EX_COMPONENT_SKIP,
++                            G_EX_COMPONENT_SKIP,
++                            G_EX_ORDER_LINEAR,
++                            G_EX_ASPECT_AUTO,
++                            G_EX_EDIT_NONE,
++                            false, false);
++                        // A matrix-ID-only change must create a fresh transform
++                        // record even when the sky list reuses the current
++                        // model matrix. Otherwise the vertices retain group 0.
++                        state->rsp->setModelViewProjChanged(true);
++                        state->rocketBackgroundPresentationActive = true;
++                        startedRocketBackgroundPresentation = true;
++                    }
++                }
++
++                state->rocketBackgroundPresentationStack.push_back(
++                    startedRocketBackgroundPresentation ? 1U : 0U);
+                 state->pushReturnAddress(*dl);
+             }
+ 
+-            const uint32_t rdramAddress = state->rsp->fromSegmentedMasked((*dl)->w1);
+             *dl = reinterpret_cast<DisplayList *>(state->fromRDRAM(rdramAddress)) - 1;
+         }
+ 
+         void endDl(State *state, DisplayList **dl) {
++            if (!state->returnAddressStack.empty() &&
++                !state->rocketBackgroundPresentationStack.empty()) {
++                const bool startedRocketBackgroundPresentation =
++                    state->rocketBackgroundPresentationStack.back() != 0;
++                state->rocketBackgroundPresentationStack.pop_back();
++                if (startedRocketBackgroundPresentation) {
++                    state->rsp->popMatrixId(1, false);
++                    state->rsp->setModelViewProjChanged(true);
++                    state->rocketBackgroundPresentationActive = false;
++                }
++            }
+             *dl = state->popReturnAddress();
+         }
+ 
+diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
+index 33b0199..5616156 100644
+--- a/src/hle/rt64_state.cpp
++++ b/src/hle/rt64_state.cpp
+@@ -9,6 +9,8 @@ namespace RT64 {
+         lastWorkloadIndex = 0;
+         addLightsOnFlush = false;
+         activeSpriteCommand.replacementHash = 0;
++        rocketBackgroundPresentationStack.clear();
++        rocketBackgroundPresentationActive = false;
+ 
+         rsp->reset();
+         rdp->reset();
+diff --git a/src/hle/rt64_state.h b/src/hle/rt64_state.h
+index d1edbed..b4f7a71 100644
+--- a/src/hle/rt64_state.h
++++ b/src/hle/rt64_state.h
+@@ -3,6 +3,8 @@ namespace RT64 {
+         std::vector<FramebufferOperation> drawFbOperations;
+         std::vector<uint32_t> drawFbDiscards;
+         std::vector<DisplayList *> returnAddressStack;
++        std::vector<uint8_t> rocketBackgroundPresentationStack;
++        bool rocketBackgroundPresentationActive = false;
+         std::vector<Framebuffer *> differentFbs;
+         GameConfiguration gameConfig;
+         uint32_t displayListAddress;

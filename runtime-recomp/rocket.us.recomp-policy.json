@@ -155,10 +155,16 @@
       "reason": "Freeze the completed frame's semantic matrix sidecar at Rocket's graphics-task submission boundary and bind it to the task display-list root, matching DKR-R's FIFO task-owned identity architecture."
     },
     {
-      "function": "func_8001ECEC",
-      "beforeVram": "0x8001F084",
-      "text": "extern void rocket_presentation_model_entry_owner(uint8_t*, recomp_context*); rocket_presentation_model_entry_owner(rdram, ctx);",
-      "reason": "Capture the actual GameObject/submodel owner immediately before its add_render_entry call so visible model interpolation uses durable authored ownership instead of positional RenderEntry guessing."
+      "function": "func_8008B594",
+      "beforeVram": "0x8008B594",
+      "text": "extern void rocket_presentation_background_begin(uint8_t*, recomp_context*); rocket_presentation_background_begin(rdram, ctx);",
+      "reason": "Rocket-R v33: mark the start of the pre-world background/sky display-list command range without modifying the renderer or v32 live RenderEntry queue."
+    },
+    {
+      "function": "func_80046D58",
+      "beforeVram": "0x80046D58",
+      "text": "extern void rocket_presentation_background_end(uint8_t*, recomp_context*); rocket_presentation_background_end(rdram, ctx);",
+      "reason": "Rocket-R v33: close the background/sky command range immediately before the depth/world pass so RT64 can interpolate only that presentation subtree."
     }
   ],
   "instructionPatches": [],

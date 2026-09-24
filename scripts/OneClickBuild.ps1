@@ -846,7 +846,7 @@ try {
     $BuildAndroidArm64 = $SelectedPlatforms -contains 'Android-arm64'
     $NeedLinuxPackages = $BuildLinuxX64 -or $BuildLinuxArm64
     Write-Host ("Selected platforms: " + ($SelectedPlatforms -join ', ')) -ForegroundColor Green
-    Write-Host 'FIXED34 deliberately restores the complete FIXED27 interpolation/runtime baseline; platform support is layered around it.' -ForegroundColor Green
+    Write-Host 'FIXED34 gameplay timing retained; stable v5/v6 interpolation + retail Rocket renderer restored.' -ForegroundColor Green
 
     Banner '1/9 - Windows prerequisites + source integrity'
     Remove-StaleInterpolationExperimentFiles
@@ -976,7 +976,7 @@ try {
     Banner '3/9 - Pinned source dependencies'
     $DependencyLog = Join-Path $LogRoot "dependency-bootstrap-$Stamp.log"
     Write-Host "Dependency bootstrap detail log: $DependencyLog" -ForegroundColor DarkGreen
-    Write-Host 'FIXED34 prefers locally cached pinned Git commits, keeps the accepted FIXED27 renderer/interpolation patch set, and only fetches a dependency when its required object is missing.' -ForegroundColor DarkGreen
+    Write-Host 'FIXED34 keeps pinned dependencies; stable v5/v6 interpolation retained and retail Rocket renderer restored for render recovery.' -ForegroundColor DarkGreen
     $bootstrapArgs = @((Join-Path $Root 'scripts\bootstrap_dependencies.py'),'--root',$Root)
     if ($RepairDependencies) { $bootstrapArgs += '--repair' }
     Invoke-Python $bootstrapArgs $DependencyLog
@@ -1151,25 +1151,11 @@ inline constexpr std::uint32_t kBootstrapBssEnd = $($RocketBootstrap.BssEnd)U;
         throw "N64Recomp CPU generation failed (exit $recompExit). See $RecompLog for the exact function/instruction."
     }
 
-    # Graphics v20: diagnostic-only instrumentation. This adds one observation
-    # call at generated add_render_entry entry; it does not wrap or replace the renderer.
-    Invoke-Python @((Join-Path $Root 'scripts\patch_popin_diagnostics_generated.py'),'--root',$Root)
-
-    # Graphics v21: recover entries beyond Rocket's retail 256-slot list inside
-    # the same func_8008B694 invocation. The normal renderer/tail remain authoritative.
-    Invoke-Python @((Join-Path $Root 'scripts\patch_render_queue_expansion_v21_generated.py'),'--root',$Root)
-
-    # Graphics v27: expand only the GfxTask command/matrix arena in Expansion Pak RAM.
-    # Draw Distance, visibility and interpolation math are untouched.
-    Invoke-Python @((Join-Path $Root 'scripts\patch_graphics_arena_v27_generated.py'),'--root',$Root)
-
-
-
-
-
-
-    # Graphics v19: N64Recomp regenerates these files every build, so apply the
-    # global-order expanded render-queue wrapper immediately after CPU generation.
+    # Graphics v32: single authoritative live RenderEntry queue.
+    # func_8008B594 initializes it once; the main renderer continues the SAME list.
+    # No staging pool, no copying, no eviction, no second-pass reset.
+    Invoke-Python @((Join-Path $Root 'scripts\patch_render_capacity_v32_generated.py'),'--root',$Root)
+    Write-Host 'Graphics v32 single live RenderEntry queue: ENABLED (32768 entries; v29 interpolation untouched).'
 
     Push-Location (Join-Path $Root 'runtime-recomp\rsp')
     try {
@@ -1189,7 +1175,7 @@ inline constexpr std::uint32_t kBootstrapBssEnd = $($RocketBootstrap.BssEnd)U;
     $RocketExe = $null
     $RocketDir = $null
 
-    Write-Host 'Rocket runtime policy: FIXED27 gameplay/interpolation baseline restored exactly (retail 30 Hz simulation + RT64 presentation interpolation + safe-area crop + widescreen CPU frustum), with platform-only build/packaging changes layered around it.' -ForegroundColor DarkGreen
+    Write-Host 'Rocket runtime policy: retail 30 Hz simulation + stable v5/v6 RT64 semantic interpolation + original Rocket RenderEntry/sort/draw path + safe-area crop + widescreen CPU frustum.' -ForegroundColor DarkGreen
     Write-Host 'Attachment/skybox interpolation v6: ENABLED (shared-parent + dynamic GFX identities).' -ForegroundColor Green
     Write-Host 'N64 colour dithering v7: LAUNCHER TOGGLE (retail Bayer / disabled).' -ForegroundColor Green
     Write-Host 'Interpolation + presentation fix v3.1: ENABLED (centroid-stable small geometry + double-buffered RT64 presentation targets).' -ForegroundColor Green

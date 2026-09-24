@@ -54,12 +54,23 @@ bool matrix_binding(std::uint32_t physical_matrix_address,
 
 extern "C" void rocket_presentation_frame_begin(std::uint8_t* rdram,
                                                   recomp_context* context);
-extern "C" void rocket_presentation_model_entry_owner(std::uint8_t* rdram,
-                                                       recomp_context* context);
 extern "C" void rocket_presentation_render_entry(std::uint8_t* rdram,
                                                    recomp_context* context);
 extern "C" void rocket_presentation_task_submitted(std::uint8_t* rdram,
                                                      recomp_context* context);
+
+// ROCKET-R SKYBOX INTERPOLATION V33
+// The guest thread records the exact pre-world/background command range; the
+// RT64 decode thread uses this task-owned range to identify only the nested
+// sky/background display lists that need a semantic presentation group.
+extern "C" void rocket_presentation_background_begin(std::uint8_t* rdram,
+                                                       recomp_context* context);
+extern "C" void rocket_presentation_background_end(std::uint8_t* rdram,
+                                                     recomp_context* context);
+extern "C" bool rocket_presentation_background_display_list(
+    std::uint32_t physical_command_address,
+    std::uint32_t physical_target_address,
+    std::uint32_t* out_identity);
 
 // C ABI consumed by the pinned RT64 dependency. Physical matrix addresses are
 // lookup keys only. During a Rocket task the sidecar is authoritative for all
