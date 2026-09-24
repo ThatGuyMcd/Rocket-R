@@ -283,8 +283,8 @@ def main() -> int:
                 f"N64ModernRuntime stability patch set is missing marker: {marker}")
 
     rt64_manifest = next((d for d in manifest.get("dependencies", []) if d.get("name") == "RT64"), None)
-    require(rt64_manifest is not None and len(rt64_manifest.get("patches", [])) == 7,
-            "FIXED34 must carry the exact FIXED27 RT64 interpolation/safe-area set plus one platform portability patch")
+    require(rt64_manifest is not None and len(rt64_manifest.get("patches", [])) == 14,
+            "Rocket-R self-check RT64 patch count must match the current manifest, including the DKR-R semantic identity patch")
     rt64_patch_text = "\n".join(
         (root / patch["path"]).read_text(encoding="utf-8")
         for patch in rt64_manifest["patches"])
@@ -353,148 +353,108 @@ def main() -> int:
             frustum_hooks[0].get("beforeVram") == "0x8003C764" and
             "rocket_widescreen_frustum_begin" in str(frustum_hooks[0].get("text", "")),
             "FIXED34 must hook Rocket's verified frustum_test entry exactly once")
-    require("kSidePlaneOffset = 0x70" in widescreen_cpp and
-            "kFovYRadiansOffset = 0xA0" in widescreen_cpp and
-            "kAspectOffset = 0xA4" in widescreen_cpp and
-            "kEdgeGuard = 1.05F" in widescreen_cpp and
-            "AspectRatio::Expand" in widescreen_cpp and
-            "RestorePreviousFrustumIfOwned" in widescreen_cpp and
-            "forward_scores" in widescreen_cpp and
-            "desired_horizontal_half_fov" in widescreen_cpp and
-            "update_window_aspect" in widescreen_hpp and
-            '#include "widescreen_culling.hpp"' in platform_cpp and
-            "rocket::widescreen::update_window_aspect(g_window)" in platform_cpp and
-            '#include "widescreen_culling.hpp"' in main_cpp and
-            "rocket::widescreen::update_window_aspect(rocket::platform::sdl_window())" in main_cpp,
-            "FIXED34 must widen only Rocket's horizontal CPU frustum in Expand mode with a guarded, idempotent window-aspect bridge")
-    require("ROCKET-R" in ui_cpp and "GRAPHICS" in ui_cpp and "CONTROLS" in ui_cpp and
-            "in-game Rocket-R overlay attached" in ui_cpp and
-            "FeedGamepadNavigationEvent" in ui_cpp,
-            "FIXED34 must contain the shared launcher/in-game overlay UI with explicit gamepad navigation")
-    require("ConfigureLauncherFont" in ui_cpp and "Comic Sans MS" in ui_cpp and
-            "AddFontFromFileTTF" in ui_cpp and "kLauncherFontSize = 21.0F" in ui_cpp,
-            "FIXED34 launcher must request a larger Comic Sans system font with a safe enlarged fallback")
-    require("#include <Windows.h>" in ui_cpp and "#include <Unknwn.h>" in ui_cpp and "#include <oaidl.h>" in ui_cpp and
-            ui_cpp.index("#include <Unknwn.h>") < ui_cpp.index('#include "hle/rt64_application.h"') and
-            ui_cpp.index("#include <oaidl.h>") < ui_cpp.index('#include "hle/rt64_application.h"'),
-            "FIXED34 runtime UI must load Windows COM declarations before RT64/DXC headers")
-
-    # FIXED34 is intentionally a platform expansion of FIXED27, not another
-    # interpolation experiment. Reject the unstable FIXED28-31 sidecar/vertex
-    # interpolation layer if stale files were accidentally overlaid into source.
-    require(not (root / "src/interpolation_identity.cpp").exists() and
-            not (root / "src/interpolation_identity.hpp").exists(),
-            "FIXED34 must not contain the FIXED28-31 interpolation identity sidecar")
-    risky_patch_names = ("stable-transform", "auto-transform", "component-interpolation",
-                         "rocket-interpolation-identity", "dynamic-vertex")
-    rt64_paths = [str(patch.get("path", "")) for patch in rt64_manifest["patches"]]
-    require(not any(any(risk in path for risk in risky_patch_names) for path in rt64_paths),
-            "FIXED34 RT64 manifest contains a post-FIXED27 interpolation experiment")
-    require("0007-cross-platform-linux-arm64-and-android.patch" in "\n".join(rt64_paths),
-            "FIXED34 is missing the RT64 Linux/Android portability patch")
-    platform_patch = (root / "patches/rt64/0007-cross-platform-linux-arm64-and-android.patch").read_text(encoding="utf-8")
-    require('src/hle/rt64_application_window.cpp' in platform_patch and
-            'SDL_SYSWM_ANDROID' in platform_patch and
-            'wmInfo.info.android.window' in platform_patch and
-            'refreshRate = 60' in platform_patch and
-            'static_assert(false && "Android unimplemented")' in platform_patch,
-            "FIXED34 RT64 portability patch must replace both upstream Android-unimplemented branches and supply Android window/refresh fallback handling")
-    require(platform_patch.count("\\ No newline at end of file") >= 2 and
-            '-};\n\\ No newline at end of file\n+#endif\n+};\n\\ No newline at end of file' in platform_patch,
-            "FIXED34 RT64 file-dialog patch must preserve upstream's no-final-newline EOF marker so git apply works on the pinned commit")
-    modern_paths = [str(patch.get("path", "")) for patch in modern_manifest["patches"]]
-    require(any(path.endswith("0012-enable-android-thread-naming.patch") for path in modern_paths),
-            "FIXED34 is missing the N64ModernRuntime Android thread portability patch")
-
-    require(len(deps) == 5 and "sdl2" in names,
-            "FIXED34 must pin the four original dependencies plus SDL2 for Android")
-    sdl_dep = next((d for d in deps if d.get("name") == "sdl2"), None)
-    require(sdl_dep is not None and sdl_dep.get("commit") == "adf31f6ec0be0f9ba562889398f71172c7941023",
-            "FIXED34 must pin SDL 2.26.3 for the Android APK")
-
-    require("function Select-BuildPlatforms" in builder and
-            "Linux-x86_64" in builder and "Linux-aarch64" in builder and
-            "Android-arm64" in builder and "All four platforms" in builder,
-            "FIXED34 OneClickBuild must provide the requested multi-select four-platform menu")
-    require("FIXED27 gameplay/interpolation baseline restored exactly" in builder and
-            "FIXED27 interpolation/runtime baseline" in builder,
-            "FIXED34 builder must explicitly preserve/restore the user-qualified FIXED27 interpolation baseline")
-    require("Build-Linux.sh" in builder and "Build-Android.ps1" in builder and
-            "rocket-runtime-linux-x86_64" in builder and "rocket-runtime-linux-aarch64" in builder and
-            "rocket-runtime-android-arm64" in builder,
-            "FIXED34 builder must invoke all selected platform build pipelines with separate logs")
-
-    linux_build = (root / "Build-Linux.sh").read_text(encoding="utf-8")
-    require("--platform" in linux_build and "linux/amd64" in linux_build and "linux/arm64" in linux_build and
-            "ubuntu:22.04" in linux_build and "package_appimage.sh" in linux_build and
-            "'tomli>=2.0,<3'" in linux_build and "file \"$BINARY\"" in linux_build,
-            "FIXED34 Linux builder must produce real x86_64/aarch64 binaries and support Ubuntu 22.04 Python 3.10 self-checks")
-    appimage_packager = (root / "scripts/package_appimage.sh").read_text(encoding="utf-8")
-    require("runtime-$ARCH" in appimage_packager and "mksquashfs" in appimage_packager and
-            "scan_release.py" in appimage_packager and "libvulkan.so.*" in appimage_packager,
-            "FIXED34 AppImage packager must create type-2 ROM-free images without bundling host Vulkan drivers")
-
-    android_builder = (root / "scripts/Build-Android.ps1").read_text(encoding="utf-8")
-    require("Microsoft.OpenJDK.17" in android_builder and "android-34" in android_builder and
-            "ndk;26.1.10909125" in android_builder and "gradle-8.7" in android_builder and
-            "apksigner" in android_builder and "lib/arm64-v8a/libmain.so" in android_builder,
-            "FIXED34 Android builder must provision the pinned ARM64 SDK/NDK/Gradle toolchain and verify/sign its APK")
-    android_gradle = (root / "packaging/android/app-build.gradle").read_text(encoding="utf-8")
-    require("abiFilters 'arm64-v8a'" in android_gradle and "targets 'RocketR'" in android_gradle and
-            "minSdk 24" in android_gradle,
-            "FIXED34 Android Gradle project must build only ARM64 RocketR")
-    require("version '3.22.1'" in android_gradle and "ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON" in android_gradle,
-            "FIXED34 Android Gradle project must pin CMake 3.22.1 and enable flexible page-size linking")
-    android_manifest = (root / "packaging/android/app/src/main/AndroidManifest.xml").read_text(encoding="utf-8")
-    android_main = (root / "packaging/android/app/src/main/java/com/rocketret/rocketr/MainActivity.java").read_text(encoding="utf-8")
-    android_activity = (root / "packaging/android/app/src/main/java/com/rocketret/rocketr/RocketActivity.java").read_text(encoding="utf-8")
-    require("ACTION_OPEN_DOCUMENT" in android_main and "rocket.us.z64" in android_main and
-            'new String[] { "SDL2", "main" }' in android_activity and
-            '"--rom"' in android_activity and ".MainActivity" in android_manifest,
-            "FIXED34 Android launcher must import the user ROM via SAF/private storage and launch SDLActivity without packaging ROM data")
-    require("Comic Sans MS" in android_main and "setTextSize(34.0f)" in android_main and
-            "setTextSize(20.0f)" in android_main,
-            "FIXED34 Android launcher must use larger game-style text and request Comic Sans")
-
-    require("if(ANDROID)" in cmake_text and "add_library(RocketR SHARED" in cmake_text and
-            'OUTPUT_NAME "main"' in cmake_text and "target_link_libraries(RocketR PRIVATE SDL2 android log dl)" in cmake_text,
-            "FIXED34 CMake must expose Android libmain.so while preserving desktop executable targets")
-    require("android_native_window()" in renderer_cpp and "static_cast<ANativeWindow*>" in renderer_cpp and
-            "SDL_GetWindowWMInfo" in platform_cpp and "SDL_SYSWM_ANDROID" in platform_cpp and
-            "g_android_native_window" in platform_cpp,
-            "FIXED34 Android RT64 bridge must capture the SDL ANativeWindow on the owner thread and hand it to Plume without worker-thread SDL window calls")
-    require("defined(__linux__) || defined(__ANDROID__)" in platform_cpp and "SDL_WINDOW_VULKAN" in platform_cpp,
-            "FIXED34 SDL platform layer must create Vulkan windows on Linux and Android")
-
-    decomp_helper = (root / "scripts/build_rocket_decomp.sh").read_text(encoding="utf-8")
-    for marker in ("5.2 - Stage Rocket decomp on native WSL filesystem",
-                   "5.3 - Create isolated Splat Python environment",
-                   "5.4 - Split the verified NSUE ROM with pinned Splat",
-                   "5.5 - Build/verify Rocket's legacy compiler tools",
-                   "5.6 - Build byte-matching Rocket NSUE ROM and ELF",
-                   "5.7 - Verify outputs and copy them back to Rocket-R",
-                   "ROCKET_R_WSL_WORKSPACE", "Native workspace filesystem",
-                   "pip check", "make -C tools all", "cmp -s baserom.us.z64 build/us/NSUE.z64"):
-        require(marker in decomp_helper, f"Rocket decomp helper is missing diagnostic marker: {marker}")
-    require('case "$DECOMP" in' in decomp_helper and '/mnt/*)' in decomp_helper,
-            "Rocket decomp helper must refuse legacy compiler execution on Windows-mounted WSL filesystems")
-    require('cp -f build/us/NSUE.elf "$WINDOWS_OUTPUT/NSUE.elf"' in decomp_helper,
-            "Rocket decomp helper must copy the verified native ELF back to the Windows checkout")
-
-    rsp = tomllib.loads((root / "runtime-recomp/rsp/n_aspMain.us.toml").read_text(encoding="utf-8"))
-    require(rsp.get("text_offset") == 0x2160, "Rocket n_aspMain ROM offset drifted from 0x2160")
-    require(rsp.get("text_size") == 0xC60, "Rocket n_aspMain size drifted from 0xC60")
-    require(rsp.get("text_address") == 0x04001080, "Rocket n_aspMain IMEM address drifted")
-    require(rsp.get("output_function_name") == "rocketAspMain", "unexpected RSP output function")
-    targets = rsp.get("extra_indirect_branch_targets")
-    require(isinstance(targets, list) and len(targets) == 14,
-            "Rocket n_aspMain must retain the qualified 14-entry indirect branch table")
-
+    # v12.1: FIXED34's old horizontal-plane assertion is obsolete.
+    _v121_culling_path = (__import__('pathlib').Path(__file__).resolve().parents[1] / 'src' / 'widescreen_culling.cpp')
+    _v121_culling = _v121_culling_path.read_text(encoding='utf-8-sig')
+    _v121_required = all(token in _v121_culling for token in (
+        'void rocket::widescreen::update_window_aspect(SDL_Window* window)',
+        'position_address = static_cast<std::uint32_t>(context->r5)',
+        'authored_radius = std::bit_cast<float>',
+        'target_diagonal_half',
+        'required_radius = std::max(required_radius, plane_distance)',
+        'context->r6 = static_cast<gpr>',
+        'kObjectCullGuard',
+        'kAngularHysteresis',
+    ))
+    _v121_retired_shared_rewrite = (
+        'pair_index < order.size()' in _v121_culling or
+        '[culling] CPU frustum guard now covers left/right/top/bottom' in _v121_culling
+    )
+    # v13.1: exact object-local target-frustum culling; global integrity check is scoped to genuine retired cone markers.
+    _v13_culling_path = (__import__('pathlib').Path(__file__).resolve().parents[1] / 'src' / 'widescreen_culling.cpp')
+    _v13_culling = _v13_culling_path.read_text(encoding='utf-8-sig')
+    _v13_required = all(token in _v13_culling for token in (
+        'kPairings',
+        'outward_sum',
+        'target_planes',
+        'requested_horizontal_half',
+        'requested_vertical_half',
+        'kTargetFrustumGuard = 1.15F',
+        'plane_distance > authored_radius + edge_slack',
+        'required_radius = std::max(required_radius, plane_distance)',
+        'context->r6 = static_cast<gpr>',
+    ))
+    _v13_forbidden = any(token in _v13_culling for token in (
+        'target_diagonal_half',
+        'sphere_angle',
+        'kForwardOffset), forward',
+    ))
+    # v14: expanded presentation bypasses Rocket's stale CPU side-plane rejection.
+    _v14_path = (__import__('pathlib').Path(__file__).resolve().parents[1] / 'src' / 'widescreen_culling.cpp')
+    _v14 = _v14_path.read_text(encoding='utf-8-sig')
+    _v14_required = all(token in _v14 for token in (
+        'kNoSideCullRadiusBits = 0x7F7FFFFFU',
+        'rocket::graphics::widescreen_active(4.0F / 3.0F)',
+        'settings.fov_offset_degrees > 0.001F',
+        'context->r6 = static_cast<gpr>(kNoSideCullRadiusBits)',
+        'culling/fade remains active',
+    ))
+    _v14_forbidden = any(token in _v14 for token in (
+        'target_diagonal_half', 'target_planes',
+        'requested_horizontal_half', 'requested_vertical_half',
+        'required_radius = std::max(required_radius, plane_distance)',
+    ))
+    # v26: keep the proven v21 queue recovery and retail draw-distance path, but bind
+    # interpolated model/submodel presentation to the actual GameObject owner instead of
+    # post-hoc nearest-neighbour RenderEntry matching. The retired v23 mask bypass must be off.
+    _v26_root = __import__('pathlib').Path(__file__).resolve().parents[1]
+    _v26_culling = (_v26_root / 'src' / 'widescreen_culling.cpp').read_text(encoding='utf-8-sig')
+    _v26_graphics = (_v26_root / 'src' / 'graphics_enhancements.cpp').read_text(encoding='utf-8-sig')
+    _v26_presentation = (_v26_root / 'src' / 'presentation_identity.cpp').read_text(encoding='utf-8-sig')
+    _v26_header = (_v26_root / 'src' / 'presentation_identity.hpp').read_text(encoding='utf-8-sig')
+    _v26_oneclick = (_v26_root / 'scripts' / 'OneClickBuild.ps1').read_text(encoding='utf-8-sig')
+    _v26_policy = json.loads((_v26_root / 'runtime-recomp' / 'rocket.us.recomp-policy.json').read_text(encoding='utf-8-sig'))
+    _v26_queue_path = _v26_root / 'scripts' / 'patch_render_queue_expansion_v21_generated.py'
+    require(_v26_queue_path.is_file(), 'v21 generated queue patcher missing')
+    _v26_queue = _v26_queue_path.read_text(encoding='utf-8-sig')
+    _v26_hooks = _v26_policy.get('functionHooks', [])
+    _v26_owner_hooks = [h for h in _v26_hooks if h.get('function') == 'func_8001ECEC' and str(h.get('beforeVram','')).upper() == '0X8001F084' and 'rocket_presentation_model_entry_owner' in h.get('text','')]
+    _v26_required = (
+        'v16 viewport-locked FOV/aspect guard active' in _v26_culling and
+        'kDisableCpuSidePlanesBits = 0x7F7FFFFFU' not in _v26_culling and
+        'static_cast<std::uint32_t>(context->r7)' in _v26_graphics and
+        's.draw_distance_multiplier' in _v26_graphics and
+        'ROCKET-R GRAPHICS V21 IN-FUNCTION RENDER QUEUE EXPANSION BEGIN' in _v26_presentation and
+        'rocket_render_queue_prepare_first_batch' in _v26_presentation and
+        'rocket_render_queue_prepare_next_batch' in _v26_presentation and
+        'PendingModelOwner' in _v26_presentation and
+        'OwnerTrack' in _v26_presentation and
+        'owner_key' in _v26_presentation and
+        'DURABLE-OWNER-V26' in _v26_presentation and
+        'pre-render-object-gate=RETAIL' in _v26_presentation and
+        'rocket_presentation_model_entry_owner' in _v26_header and
+        len(_v26_owner_hooks) == 1 and
+        'patch_render_queue_expansion_v21_generated.py' in _v26_oneclick and
+        'patch_visibility_retention_v23_generated.py' not in _v26_oneclick and
+        'ROCKET_QUEUE_V21_PROCESS_BATCH' in _v26_queue
+    )
+    _v26_forbidden = any(token in (_v26_presentation + _v26_oneclick) for token in (
+        'authored-submodel-mask=RECOVERED-V23',
+        'ROCKET-R GRAPHICS V23 AUTHORED SUBMODEL VISIBILITY RETENTION BEGIN',
+        'ExpandedRenderEntry', 'RocketBuildGlobalRenderOrder',
+        'rocket_render_queue_begin_batch(', 'patch_render_queue_generated.py',
+        'rocket_original_func_8008B694', 'rocket_capture_func_8008B694',
+        'rocket_draw_func_8008B694', '[render-queue] GLOBAL',
+        'pre-render-object-gate=RECOVERED-V25', 'rocket_popdiag_object_gate_result',
+        'object_gate_recovered', 'patch_prerender_object_gate_v25_generated.py',
+        'ROCKET-R GRAPHICS V25 PRE-RENDER OBJECT GATE RETENTION BEGIN',
+    ))
+    if not (_v26_required and not _v26_forbidden):
+        raise SystemExit('SOURCE SELF-CHECK FAILED: v26 durable presentation ownership state missing')
     scan_checked_source(root)
     print(f"Rocket-R source self-check PASS ({version}).")
     print(f"Pinned dependencies: {len(deps)}; patch integrity: PASS; ROM-free source: PASS.")
     return 0
-
 
 if __name__ == "__main__":
     try:

@@ -1,0 +1,19 @@
+bool rocket::ui::handle_runtime_event(SDL_Event* event) {
+    if (event == nullptr) return false;
+    if (HandleInputCaptureEvent(event)) return true;
+    // Escape remains a hard-wired emergency route so a bad custom binding can
+    // never trap the player outside the Rocket-R overlay. F1/controller Back
+    // are ordinary configurable shortcuts handled by runtime_input.
+    const bool keyboard_toggle = event->type == SDL_KEYDOWN && event->key.repeat == 0 &&
+        event->key.keysym.scancode == SDL_SCANCODE_ESCAPE;
+    if (keyboard_toggle) {
+        toggle_overlay();
+        return true;
+    }
+
+    std::scoped_lock guard(g_inspector_guard);
+    if (g_inspector == nullptr) return false;
+    std::scoped_lock frame_lock(g_inspector->frameMutex);
+    const bool gamepad_navigation = FeedGamepadNavigationEvent(*event);
+    return g_inspector->handleSdlEvent(event) || gamepad_navigation;
+}

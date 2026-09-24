@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [switch]$RepairDependencies,
     [switch]$NoPackage,
@@ -956,7 +956,22 @@ try {
     if ($NeedLinuxPackages) {
         $WslPackages += ' rsync docker.io qemu-user-static binfmt-support'
     }
-    Invoke-WslBash "sudo -v && sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y $WslPackages"
+    # BUILDER v21.2: direct WSL package bootstrap helper
+    # Keep multi-line Bash out of PowerShell/native-process command strings.
+    # The helper owns the package list, sudo and all apt quoting.
+    $WslBootstrapWindows = Join-Path $Root 'scripts\bootstrap_wsl_packages.sh'
+    if (-not (Test-Path $WslBootstrapWindows)) {
+        throw "Missing WSL package bootstrap helper: $WslBootstrapWindows"
+    }
+    $WslBootstrapScript = "$WslRoot/scripts/bootstrap_wsl_packages.sh"
+    if ($NeedLinuxPackages) {
+        & wsl.exe -d $script:WslDistro -- bash $WslBootstrapScript --need-linux-packages
+    } else {
+        & wsl.exe -d $script:WslDistro -- bash $WslBootstrapScript
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "WSL package bootstrap helper failed with exit $LASTEXITCODE in $script:WslDistro."
+    }
 
     Banner '3/9 - Pinned source dependencies'
     $DependencyLog = Join-Path $LogRoot "dependency-bootstrap-$Stamp.log"
@@ -1136,6 +1151,26 @@ inline constexpr std::uint32_t kBootstrapBssEnd = $($RocketBootstrap.BssEnd)U;
         throw "N64Recomp CPU generation failed (exit $recompExit). See $RecompLog for the exact function/instruction."
     }
 
+    # Graphics v20: diagnostic-only instrumentation. This adds one observation
+    # call at generated add_render_entry entry; it does not wrap or replace the renderer.
+    Invoke-Python @((Join-Path $Root 'scripts\patch_popin_diagnostics_generated.py'),'--root',$Root)
+
+    # Graphics v21: recover entries beyond Rocket's retail 256-slot list inside
+    # the same func_8008B694 invocation. The normal renderer/tail remain authoritative.
+    Invoke-Python @((Join-Path $Root 'scripts\patch_render_queue_expansion_v21_generated.py'),'--root',$Root)
+
+    # Graphics v27: expand only the GfxTask command/matrix arena in Expansion Pak RAM.
+    # Draw Distance, visibility and interpolation math are untouched.
+    Invoke-Python @((Join-Path $Root 'scripts\patch_graphics_arena_v27_generated.py'),'--root',$Root)
+
+
+
+
+
+
+    # Graphics v19: N64Recomp regenerates these files every build, so apply the
+    # global-order expanded render-queue wrapper immediately after CPU generation.
+
     Push-Location (Join-Path $Root 'runtime-recomp\rsp')
     try {
         Write-Host 'Generating Rocket n_aspMain RSP recompilation...'
@@ -1155,6 +1190,9 @@ inline constexpr std::uint32_t kBootstrapBssEnd = $($RocketBootstrap.BssEnd)U;
     $RocketDir = $null
 
     Write-Host 'Rocket runtime policy: FIXED27 gameplay/interpolation baseline restored exactly (retail 30 Hz simulation + RT64 presentation interpolation + safe-area crop + widescreen CPU frustum), with platform-only build/packaging changes layered around it.' -ForegroundColor DarkGreen
+    Write-Host 'Attachment/skybox interpolation v6: ENABLED (shared-parent + dynamic GFX identities).' -ForegroundColor Green
+    Write-Host 'N64 colour dithering v7: LAUNCHER TOGGLE (retail Bayer / disabled).' -ForegroundColor Green
+    Write-Host 'Interpolation + presentation fix v3.1: ENABLED (centroid-stable small geometry + double-buffered RT64 presentation targets).' -ForegroundColor Green
 
     if ($BuildWindows) {
         Write-Host ''

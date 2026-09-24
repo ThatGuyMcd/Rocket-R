@@ -1,0 +1,141 @@
+diff --git a/src/render/rt64_shader_library.h b/src/render/rt64_shader_library.h
+--- a/src/render/rt64_shader_library.h
++++ b/src/render/rt64_shader_library.h
+@@ -55,6 +56,8 @@ namespace RT64 {
+         ShaderRecord videoInterfaceLinear;
+         ShaderRecord videoInterfaceNearest;
+         ShaderRecord videoInterfacePixel;
++        ShaderRecord videoInterfaceCustom;
++        bool videoInterfaceCustomValid = false;
+ 
+         ShaderLibrary(bool usesHDR, bool usesHardwareResolve);
+         ~ShaderLibrary();
+diff --git a/src/render/rt64_shader_library.cpp b/src/render/rt64_shader_library.cpp
+--- a/src/render/rt64_shader_library.cpp
++++ b/src/render/rt64_shader_library.cpp
+@@ -7,7 +7,12 @@
+ 
+ #include <algorithm>
+ #include <atomic>
++#include <exception>
++#include <filesystem>
++#include <fstream>
++#include <vector>
+ 
+ #include "common/rt64_common.h"
++#include "common/rt64_rocket_configuration.h"
+ #include "shared/rt64_render_target_copy.h"
+ #include "shared/rt64_rsp_vertex_test_z.h"
+@@ -390,6 +394,68 @@ namespace RT64 {
+             pipelineDesc.pixelShader = pixelShader.get();
+             pipelineDesc.pipelineLayout = videoInterfacePixel.pipelineLayout.get();
+             videoInterfacePixel.pipeline = device->createGraphicsPipeline(pipelineDesc);
++
++            // Rocket-R supports an optional precompiled final VI pixel shader.
++            // It deliberately uses RT64's existing fullscreen vertex shader,
++            // descriptor bindings and push-constant layout; no runtime source
++            // compiler is required on Linux/Android. The launcher supplies a
++            // base path and RT64 selects DXIL or SPIR-V for the active backend.
++            videoInterfaceCustomValid = false;
++            const std::string customBase = getRocketCustomShaderBasePath();
++            const char *customExtension = nullptr;
++            if (shaderFormat == RenderShaderFormat::DXIL) {
++                customExtension = ".dxil";
++            }
++            else if (shaderFormat == RenderShaderFormat::SPIRV) {
++                customExtension = ".spv";
++            }
++
++            if (!customBase.empty() && (customExtension != nullptr)) {
++                const std::filesystem::path customPath =
++                    std::filesystem::u8path(customBase + customExtension);
++                std::ifstream input(customPath, std::ios::binary | std::ios::ate);
++                if (input) {
++                    const std::streamsize byteCount = input.tellg();
++                    if (byteCount > 0) {
++                        std::vector<uint8_t> bytes(static_cast<size_t>(byteCount));
++                        input.seekg(0, std::ios::beg);
++                        if (input.read(reinterpret_cast<char *>(bytes.data()), byteCount)) {
++                            try {
++                                std::unique_ptr<RenderShader> customShader =
++                                    device->createShader(bytes.data(), bytes.size(),
++                                                         "PSMain", shaderFormat);
++                                if (customShader != nullptr) {
++                                    VideoInterfaceDescriptorSet customDescriptorSet(
++                                        samplerLibrary.linear.borderBorder.get());
++                                    layoutBuilder.begin();
++                                    layoutBuilder.addPushConstant(
++                                        0, 0, sizeof(interop::VideoInterfaceCB),
++                                        RenderShaderStageFlag::PIXEL);
++                                    layoutBuilder.addDescriptorSet(customDescriptorSet);
++                                    layoutBuilder.end();
++                                    videoInterfaceCustom.pipelineLayout =
++                                        layoutBuilder.create(device);
++
++                                    pipelineDesc.pixelShader = customShader.get();
++                                    pipelineDesc.pipelineLayout =
++                                        videoInterfaceCustom.pipelineLayout.get();
++                                    videoInterfaceCustom.pipeline =
++                                        device->createGraphicsPipeline(pipelineDesc);
++                                    videoInterfaceCustomValid =
++                                        videoInterfaceCustom.pipeline != nullptr;
++                                }
++                            }
++                            catch (const std::exception &e) {
++                                RT64_LOG_PRINTF("Rocket-R custom VI shader failed: %s\n", e.what());
++                            }
++                        }
++                    }
++                }
++                if (!videoInterfaceCustomValid) {
++                    RT64_LOG_PRINTF("Rocket-R custom VI shader unavailable: %s\n",
++                                    customPath.string().c_str());
++                }
++            }
+         }
+     }
+ 
+diff --git a/src/render/rt64_vi_renderer.cpp b/src/render/rt64_vi_renderer.cpp
+--- a/src/render/rt64_vi_renderer.cpp
++++ b/src/render/rt64_vi_renderer.cpp
+@@ -36,20 +36,27 @@ namespace RT64 {
+             (effectiveFiltering == UserConfiguration::Filtering::AntiAliasedPixelScaling)) {
+             effectiveFiltering = UserConfiguration::Filtering::Linear;
+         }
+-        switch (effectiveFiltering) {
+-        case UserConfiguration::Filtering::Nearest:
+-            shader = &p.shaderLibrary->videoInterfaceNearest;
+-            sampler = p.shaderLibrary->samplerLibrary.nearest.borderBorder.get();
+-            break;
+-        case UserConfiguration::Filtering::AntiAliasedPixelScaling:
+-            shader = &p.shaderLibrary->videoInterfacePixel;
++        if ((getRocketPostProcessMode() == 3U) &&
++            p.shaderLibrary->videoInterfaceCustomValid) {
++            shader = &p.shaderLibrary->videoInterfaceCustom;
+             sampler = p.shaderLibrary->samplerLibrary.linear.borderBorder.get();
+-            break;
+-        case UserConfiguration::Filtering::Linear:
+-        default:
+-            shader = &p.shaderLibrary->videoInterfaceLinear;
+-            sampler = p.shaderLibrary->samplerLibrary.linear.borderBorder.get();
+-            break;
++        }
++        else {
++            switch (effectiveFiltering) {
++            case UserConfiguration::Filtering::Nearest:
++                shader = &p.shaderLibrary->videoInterfaceNearest;
++                sampler = p.shaderLibrary->samplerLibrary.nearest.borderBorder.get();
++                break;
++            case UserConfiguration::Filtering::AntiAliasedPixelScaling:
++                shader = &p.shaderLibrary->videoInterfacePixel;
++                sampler = p.shaderLibrary->samplerLibrary.linear.borderBorder.get();
++                break;
++            case UserConfiguration::Filtering::Linear:
++            default:
++                shader = &p.shaderLibrary->videoInterfaceLinear;
++                sampler = p.shaderLibrary->samplerLibrary.linear.borderBorder.get();
++                break;
++            }
+         }
+ 
+         if ((descriptorSet == nullptr) || (descriptorSetSampler != sampler)) {

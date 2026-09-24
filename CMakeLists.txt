@@ -89,9 +89,12 @@ endif()
 set(ROCKET_RUNTIME_SOURCES
     src/main.cpp
     src/platform.cpp
+    src/runtime_input.cpp
+    src/graphics_enhancements.cpp
     src/runtime_ui.cpp
     src/rt64_renderer.cpp
     src/renderer_snapshot.cpp
+    src/presentation_identity.cpp
     src/widescreen_culling.cpp
     src/game_registration.cpp
     src/crash_handler.cpp

@@ -1,0 +1,1454 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 3b38c25..8e0b818 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -89,6 +89,7 @@ endif()
+ set(ROCKET_RUNTIME_SOURCES
+     src/main.cpp
+     src/platform.cpp
++    src/runtime_input.cpp
+     src/runtime_ui.cpp
+     src/rt64_renderer.cpp
+     src/renderer_snapshot.cpp
+diff --git a/src/platform.cpp b/src/platform.cpp
+index f1d070f..471b29e 100644
+--- a/src/platform.cpp
++++ b/src/platform.cpp
+@@ -1,5 +1,6 @@
+ #include "platform.hpp"
+ #include "runtime_ui.hpp"
++#include "runtime_input.hpp"
+ #include "widescreen_culling.hpp"
+ 
+ #define SDL_MAIN_HANDLED
+@@ -20,6 +21,7 @@
+ #include <deque>
+ #include <mutex>
+ #include <vector>
++#include <utility>
+ 
+ namespace {
+ 
+@@ -30,6 +32,8 @@ std::atomic<int> g_android_display_rate{60};
+ #endif
+ SDL_GameController* g_controller = nullptr;
+ std::atomic<bool> g_controller_connected{false};
++std::string g_preferred_controller_key;
++std::string g_active_controller_key;
+ std::mutex g_input_mutex;
+ std::uint16_t g_buttons = 0;
+ float g_stick_x = 0.0F;
+@@ -37,6 +41,7 @@ float g_stick_y = 0.0F;
+ std::atomic<bool> g_rumble_requested{false};
+ std::atomic<bool> g_rumble_dirty{false};
+ std::atomic<bool> g_rumble_enabled{true};
++std::atomic<float> g_rumble_strength{1.0F};
+ 
+ SDL_AudioDeviceID g_audio_device = 0;
+ std::mutex g_audio_mutex;
+@@ -58,28 +63,40 @@ std::vector<std::int16_t> g_audio_swap;
+ constexpr std::uint32_t AI_STATUS_FIFO_FULL = 0x80000000U;
+ constexpr std::uint32_t AI_STATUS_DMA_BUSY = 0x40000000U;
+ 
+-constexpr std::uint16_t N64_A = 0x8000;
+-constexpr std::uint16_t N64_B = 0x4000;
+-constexpr std::uint16_t N64_Z = 0x2000;
+-constexpr std::uint16_t N64_START = 0x1000;
+-constexpr std::uint16_t N64_DU = 0x0800;
+-constexpr std::uint16_t N64_DD = 0x0400;
+-constexpr std::uint16_t N64_DL = 0x0200;
+-constexpr std::uint16_t N64_DR = 0x0100;
+-constexpr std::uint16_t N64_L = 0x0020;
+-constexpr std::uint16_t N64_R = 0x0010;
+-constexpr std::uint16_t N64_CU = 0x0008;
+-constexpr std::uint16_t N64_CD = 0x0004;
+-constexpr std::uint16_t N64_CL = 0x0002;
+-constexpr std::uint16_t N64_CR = 0x0001;
+-
+-float normalize_axis(Sint16 value, Sint16 deadzone = 7000) {
+-    const int v = static_cast<int>(value);
+-    const int magnitude = std::abs(v);
+-    if (magnitude <= deadzone) return 0.0F;
+-    const float scaled = static_cast<float>(magnitude - deadzone) /
+-                         static_cast<float>(32767 - deadzone);
+-    return std::copysign(std::min(scaled, 1.0F), static_cast<float>(v));
++struct ControllerDeviceEntry {
++    int device_index = -1;
++    std::string key;
++    std::string name;
++};
++
++std::string GuidString(SDL_JoystickGUID guid) {
++    char text[33]{};
++    SDL_JoystickGetGUIDString(guid, text, static_cast<int>(sizeof(text)));
++    return text;
++}
++
++std::vector<ControllerDeviceEntry> EnumerateControllers() {
++    std::vector<ControllerDeviceEntry> result;
++    std::vector<std::pair<std::string, int>> occurrences;
++    for (int i = 0; i < SDL_NumJoysticks(); ++i) {
++        if (!SDL_IsGameController(i)) continue;
++        const std::string guid = GuidString(SDL_JoystickGetDeviceGUID(i));
++        int ordinal = 0;
++        auto it = std::find_if(occurrences.begin(), occurrences.end(),
++            [&](const auto& value) { return value.first == guid; });
++        if (it == occurrences.end()) {
++            occurrences.emplace_back(guid, 1);
++        } else {
++            ordinal = it->second;
++            ++it->second;
++        }
++        const char* raw_name = SDL_GameControllerNameForIndex(i);
++        std::string name = raw_name != nullptr && *raw_name != '\0'
++            ? raw_name : "SDL gamepad";
++        if (ordinal > 0) name += " #" + std::to_string(ordinal + 1);
++        result.push_back({i, guid + "#" + std::to_string(ordinal), std::move(name)});
++    }
++    return result;
+ }
+ 
+ void close_controller() {
+@@ -87,22 +104,30 @@ void close_controller() {
+         SDL_GameControllerClose(g_controller);
+         g_controller = nullptr;
+     }
++    g_active_controller_key.clear();
+     g_controller_connected.store(false, std::memory_order_release);
+ }
+ 
+ void open_first_controller() {
+-    if (g_controller != nullptr && SDL_GameControllerGetAttached(g_controller)) {
++    if (g_controller != nullptr && SDL_GameControllerGetAttached(g_controller) &&
++        (g_preferred_controller_key.empty() ||
++         g_active_controller_key == g_preferred_controller_key)) {
+         g_controller_connected.store(true, std::memory_order_release);
+         return;
+     }
+     close_controller();
+-    for (int i = 0; i < SDL_NumJoysticks(); ++i) {
+-        if (!SDL_IsGameController(i)) continue;
+-        g_controller = SDL_GameControllerOpen(i);
++    const auto devices = EnumerateControllers();
++    for (const auto& device : devices) {
++        if (!g_preferred_controller_key.empty() &&
++            device.key != g_preferred_controller_key) {
++            continue;
++        }
++        g_controller = SDL_GameControllerOpen(device.device_index);
+         if (g_controller != nullptr) {
++            g_active_controller_key = device.key;
+             g_controller_connected.store(true, std::memory_order_release);
+-            std::fprintf(stderr, "[input] controller: %s\n",
+-                         SDL_GameControllerName(g_controller));
++            std::fprintf(stderr, "[input] controller: %s (%s)\n",
++                         device.name.c_str(), device.key.c_str());
+             break;
+         }
+     }
+@@ -235,69 +260,14 @@ void apply_rumble_request() {
+     if (g_controller == nullptr || !SDL_GameControllerGetAttached(g_controller)) return;
+     const bool enabled = g_rumble_enabled.load(std::memory_order_acquire) &&
+                          g_rumble_requested.load(std::memory_order_acquire);
+-    SDL_GameControllerRumble(g_controller, enabled ? 0xFFFF : 0,
+-                             enabled ? 0xFFFF : 0, enabled ? 250 : 0);
+-}
+-
+-void keyboard_input(std::uint16_t& buttons, float& x, float& y) {
+-    const Uint8* keys = SDL_GetKeyboardState(nullptr);
+-    if (keys == nullptr) return;
+-    if (keys[SDL_SCANCODE_X] || keys[SDL_SCANCODE_SPACE]) buttons |= N64_A;
+-    if (keys[SDL_SCANCODE_Z] || keys[SDL_SCANCODE_LCTRL]) buttons |= N64_B;
+-    if (keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT]) buttons |= N64_Z;
+-    if (keys[SDL_SCANCODE_RETURN]) buttons |= N64_START;
+-    if (keys[SDL_SCANCODE_UP]) buttons |= N64_DU;
+-    if (keys[SDL_SCANCODE_DOWN]) buttons |= N64_DD;
+-    if (keys[SDL_SCANCODE_LEFT]) buttons |= N64_DL;
+-    if (keys[SDL_SCANCODE_RIGHT]) buttons |= N64_DR;
+-    if (keys[SDL_SCANCODE_Q]) buttons |= N64_L;
+-    if (keys[SDL_SCANCODE_E]) buttons |= N64_R;
+-    if (keys[SDL_SCANCODE_I]) buttons |= N64_CU;
+-    if (keys[SDL_SCANCODE_K]) buttons |= N64_CD;
+-    if (keys[SDL_SCANCODE_J]) buttons |= N64_CL;
+-    if (keys[SDL_SCANCODE_L]) buttons |= N64_CR;
+-
+-    x = (keys[SDL_SCANCODE_D] ? 1.0F : 0.0F) - (keys[SDL_SCANCODE_A] ? 1.0F : 0.0F);
+-    y = (keys[SDL_SCANCODE_W] ? 1.0F : 0.0F) - (keys[SDL_SCANCODE_S] ? 1.0F : 0.0F);
+-    if (x != 0.0F && y != 0.0F) {
+-        constexpr float kDiagonal = 0.70710678F;
+-        x *= kDiagonal;
+-        y *= kDiagonal;
+-    }
++    const float strength = std::clamp(
++        g_rumble_strength.load(std::memory_order_acquire), 0.0F, 1.0F);
++    const Uint16 magnitude = enabled
++        ? static_cast<Uint16>(std::lround(strength * 65535.0F)) : 0;
++    SDL_GameControllerRumble(g_controller, magnitude, magnitude,
++                             enabled ? 250 : 0);
+ }
+ 
+-void controller_input(SDL_GameController* controller, std::uint16_t& buttons,
+-                      float& x, float& y) {
+-    if (controller == nullptr || !SDL_GameControllerGetAttached(controller)) return;
+-    auto pressed = [controller](SDL_GameControllerButton button) {
+-        return SDL_GameControllerGetButton(controller, button) != 0;
+-    };
+-    if (pressed(SDL_CONTROLLER_BUTTON_A)) buttons |= N64_A;
+-    if (pressed(SDL_CONTROLLER_BUTTON_B)) buttons |= N64_B;
+-    if (pressed(SDL_CONTROLLER_BUTTON_START)) buttons |= N64_START;
+-    if (pressed(SDL_CONTROLLER_BUTTON_DPAD_UP)) buttons |= N64_DU;
+-    if (pressed(SDL_CONTROLLER_BUTTON_DPAD_DOWN)) buttons |= N64_DD;
+-    if (pressed(SDL_CONTROLLER_BUTTON_DPAD_LEFT)) buttons |= N64_DL;
+-    if (pressed(SDL_CONTROLLER_BUTTON_DPAD_RIGHT)) buttons |= N64_DR;
+-    if (pressed(SDL_CONTROLLER_BUTTON_LEFTSHOULDER)) buttons |= N64_L;
+-    if (pressed(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)) buttons |= N64_R;
+-    if (SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 12000) buttons |= N64_Z;
+-
+-    if (pressed(SDL_CONTROLLER_BUTTON_Y)) buttons |= N64_CU;
+-    if (pressed(SDL_CONTROLLER_BUTTON_X)) buttons |= N64_CL;
+-    if (pressed(SDL_CONTROLLER_BUTTON_RIGHTSTICK)) buttons |= N64_CD;
+-    const float rx = normalize_axis(SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTX), 12000);
+-    const float ry = normalize_axis(SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTY), 12000);
+-    if (rx < -0.45F) buttons |= N64_CL;
+-    if (rx > 0.45F) buttons |= N64_CR;
+-    if (ry < -0.45F) buttons |= N64_CU;
+-    if (ry > 0.45F) buttons |= N64_CD;
+-
+-    const float pad_x = normalize_axis(SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTX));
+-    const float pad_y = -normalize_axis(SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTY));
+-    if (std::abs(pad_x) > std::abs(x)) x = pad_x;
+-    if (std::abs(pad_y) > std::abs(y)) y = pad_y;
+-}
+ 
+ } // namespace
+ 
+@@ -435,16 +405,20 @@ int rocket::platform::android_display_refresh_rate() {
+ #endif
+ 
+ void rocket::platform::sample_input() {
+-    // This function must only run on the SDL/window owner thread.
+-    std::uint16_t buttons = 0;
+-    float x = 0.0F;
+-    float y = 0.0F;
+-    keyboard_input(buttons, x, y);
+-    controller_input(g_controller, buttons, x, y);
++    // This function must only run on the SDL/window owner thread. Gameplay
++    // sees a protected snapshot; rebinding and UI capture never run on the
++    // emulated game thread.
++    const bool focused = g_window == nullptr ||
++        (SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS) != 0;
++    const bool include_keyboard = focused;
++    const bool include_controller = focused || rocket::input::background_input_enabled();
++    const auto state = rocket::input::poll(
++        g_controller, include_keyboard, include_controller,
++        rocket::ui::overlay_visible(), !rocket::ui::input_capture_active());
+     std::lock_guard lock(g_input_mutex);
+-    g_buttons = buttons;
+-    g_stick_x = std::clamp(x, -1.0F, 1.0F);
+-    g_stick_y = std::clamp(y, -1.0F, 1.0F);
++    g_buttons = state.buttons;
++    g_stick_x = state.stick_x;
++    g_stick_y = state.stick_y;
+ }
+ 
+ void rocket::platform::pump_runtime_events() {
+@@ -460,9 +434,8 @@ void rocket::platform::pump_runtime_events() {
+             open_first_controller();
+         }
+         const bool fullscreen_shortcut = event.type == SDL_KEYDOWN && event.key.repeat == 0 &&
+-            (event.key.keysym.scancode == SDL_SCANCODE_F11 ||
+-             (event.key.keysym.scancode == SDL_SCANCODE_RETURN &&
+-              (event.key.keysym.mod & KMOD_ALT) != 0));
++            event.key.keysym.scancode == SDL_SCANCODE_RETURN &&
++            (event.key.keysym.mod & KMOD_ALT) != 0;
+         if (fullscreen_shortcut) {
+             toggle_fullscreen();
+             continue;
+@@ -472,6 +445,14 @@ void rocket::platform::pump_runtime_events() {
+         }
+     }
+     sample_input();
++    if (rocket::input::consume_shortcut_request(
++            rocket::input::ShortcutAction::ToggleOverlay)) {
++        rocket::ui::toggle_overlay();
++    }
++    if (rocket::input::consume_shortcut_request(
++            rocket::input::ShortcutAction::ToggleFullscreen)) {
++        toggle_fullscreen();
++    }
+     rocket::widescreen::update_window_aspect(g_window);
+     apply_rumble_request();
+ }
+@@ -490,6 +471,73 @@ void rocket::platform::toggle_fullscreen() {
+     ultramodern::renderer::set_graphics_config(graphics);
+ }
+ 
++bool rocket::platform::controller_connected() {
++    return g_controller_connected.load(std::memory_order_acquire);
++}
++
++std::string rocket::platform::controller_name() {
++    if (g_controller == nullptr || !SDL_GameControllerGetAttached(g_controller)) {
++        if (!g_preferred_controller_key.empty()) return "Selected gamepad is disconnected";
++        return "No gamepad connected";
++    }
++    const char* name = SDL_GameControllerName(g_controller);
++    return name != nullptr && *name != '\0' ? name : "SDL gamepad";
++}
++
++std::vector<rocket::platform::ControllerChoice> rocket::platform::controller_choices() {
++    std::vector<ControllerChoice> result;
++    for (const auto& device : EnumerateControllers()) {
++        result.push_back({device.key, device.name});
++    }
++    return result;
++}
++
++std::string rocket::platform::preferred_controller_key() {
++    return g_preferred_controller_key;
++}
++
++void rocket::platform::set_preferred_controller_key(const std::string& key) {
++    if (g_preferred_controller_key == key) return;
++    g_preferred_controller_key = key;
++    open_first_controller();
++}
++
++void rocket::platform::rescan_controller() {
++    if (g_controller != nullptr && !SDL_GameControllerGetAttached(g_controller)) {
++        close_controller();
++    }
++    open_first_controller();
++}
++
++bool rocket::platform::rumble_enabled() {
++    return g_rumble_enabled.load(std::memory_order_acquire);
++}
++
++void rocket::platform::set_rumble_enabled(bool enabled) {
++    g_rumble_enabled.store(enabled, std::memory_order_release);
++    g_rumble_dirty.store(true, std::memory_order_release);
++}
++
++float rocket::platform::rumble_strength() {
++    return g_rumble_strength.load(std::memory_order_acquire);
++}
++
++void rocket::platform::set_rumble_strength(float strength) {
++    g_rumble_strength.store(std::clamp(strength, 0.0F, 1.0F),
++                            std::memory_order_release);
++    g_rumble_dirty.store(true, std::memory_order_release);
++}
++
++void rocket::platform::test_rumble() {
++    if (g_controller == nullptr || !SDL_GameControllerGetAttached(g_controller) ||
++        !g_rumble_enabled.load(std::memory_order_acquire)) return;
++    const float strength = std::clamp(
++        g_rumble_strength.load(std::memory_order_acquire), 0.0F, 1.0F);
++    const Uint16 magnitude = static_cast<Uint16>(
++        std::lround(strength * 65535.0F));
++    SDL_GameControllerRumble(g_controller, magnitude, magnitude, 350);
++}
++
+ void rocket::platform::queue_samples(std::int16_t* samples, std::size_t sample_count) {
+     std::lock_guard lock(g_audio_mutex);
+     if (g_audio_device == 0 || samples == nullptr || sample_count == 0) return;
+diff --git a/src/platform.hpp b/src/platform.hpp
+index 0875190..f5ec15f 100644
+--- a/src/platform.hpp
++++ b/src/platform.hpp
+@@ -4,6 +4,8 @@
+ 
+ #include <cstddef>
+ #include <cstdint>
++#include <string>
++#include <vector>
+ 
+ union SDL_Event;
+ struct SDL_Window;
+@@ -21,6 +23,22 @@ int android_display_refresh_rate();
+ void pump_runtime_events();
+ void sample_input();
+ void toggle_fullscreen();
++struct ControllerChoice {
++    std::string key;
++    std::string name;
++};
++
++bool controller_connected();
++std::string controller_name();
++std::vector<ControllerChoice> controller_choices();
++std::string preferred_controller_key();
++void set_preferred_controller_key(const std::string& key);
++void rescan_controller();
++bool rumble_enabled();
++void set_rumble_enabled(bool enabled);
++float rumble_strength();
++void set_rumble_strength(float strength);
++void test_rumble();
+ 
+ void queue_samples(std::int16_t* samples, std::size_t sample_count);
+ std::size_t frames_remaining();
+diff --git a/src/runtime_input.cpp b/src/runtime_input.cpp
+new file mode 100644
+index 0000000..210d8bf
+--- /dev/null
++++ b/src/runtime_input.cpp
+@@ -0,0 +1,391 @@
++#include "runtime_input.hpp"
++
++#include <SDL.h>
++
++#include <algorithm>
++#include <array>
++#include <atomic>
++#include <cmath>
++#include <mutex>
++
++namespace {
++
++using rocket::input::Action;
++using rocket::input::BindingSlot;
++using rocket::input::ShortcutAction;
++
++constexpr int kAxisSourceBase = 1000;
++constexpr std::uint16_t kButtonA = 0x8000;
++constexpr std::uint16_t kButtonB = 0x4000;
++constexpr std::uint16_t kButtonZ = 0x2000;
++constexpr std::uint16_t kButtonStart = 0x1000;
++constexpr std::uint16_t kDpadUp = 0x0800;
++constexpr std::uint16_t kDpadDown = 0x0400;
++constexpr std::uint16_t kDpadLeft = 0x0200;
++constexpr std::uint16_t kDpadRight = 0x0100;
++constexpr std::uint16_t kButtonL = 0x0020;
++constexpr std::uint16_t kButtonR = 0x0010;
++constexpr std::uint16_t kCUp = 0x0008;
++constexpr std::uint16_t kCDown = 0x0004;
++constexpr std::uint16_t kCLeft = 0x0002;
++constexpr std::uint16_t kCRight = 0x0001;
++
++struct BindingSet {
++    int keyboard_primary = rocket::input::kUnbound;
++    int keyboard_secondary = rocket::input::kUnbound;
++    int controller_primary = rocket::input::kUnbound;
++    int controller_secondary = rocket::input::kUnbound;
++};
++
++constexpr std::array<BindingSet, static_cast<std::size_t>(Action::Count)> kDefaults{{
++    {SDL_SCANCODE_W, rocket::input::kUnbound, kAxisSourceBase + SDL_CONTROLLER_AXIS_LEFTY * 2, rocket::input::kUnbound},
++    {SDL_SCANCODE_S, rocket::input::kUnbound, kAxisSourceBase + SDL_CONTROLLER_AXIS_LEFTY * 2 + 1, rocket::input::kUnbound},
++    {SDL_SCANCODE_A, rocket::input::kUnbound, kAxisSourceBase + SDL_CONTROLLER_AXIS_LEFTX * 2, rocket::input::kUnbound},
++    {SDL_SCANCODE_D, rocket::input::kUnbound, kAxisSourceBase + SDL_CONTROLLER_AXIS_LEFTX * 2 + 1, rocket::input::kUnbound},
++    {SDL_SCANCODE_SPACE, SDL_SCANCODE_X, SDL_CONTROLLER_BUTTON_A, rocket::input::kUnbound},
++    {SDL_SCANCODE_Z, SDL_SCANCODE_LCTRL, SDL_CONTROLLER_BUTTON_B, rocket::input::kUnbound},
++    {SDL_SCANCODE_LSHIFT, SDL_SCANCODE_RSHIFT, kAxisSourceBase + SDL_CONTROLLER_AXIS_TRIGGERLEFT * 2 + 1, rocket::input::kUnbound},
++    {SDL_SCANCODE_RETURN, rocket::input::kUnbound, SDL_CONTROLLER_BUTTON_START, rocket::input::kUnbound},
++    {SDL_SCANCODE_UP, rocket::input::kUnbound, SDL_CONTROLLER_BUTTON_DPAD_UP, rocket::input::kUnbound},
++    {SDL_SCANCODE_DOWN, rocket::input::kUnbound, SDL_CONTROLLER_BUTTON_DPAD_DOWN, rocket::input::kUnbound},
++    {SDL_SCANCODE_LEFT, rocket::input::kUnbound, SDL_CONTROLLER_BUTTON_DPAD_LEFT, rocket::input::kUnbound},
++    {SDL_SCANCODE_RIGHT, rocket::input::kUnbound, SDL_CONTROLLER_BUTTON_DPAD_RIGHT, rocket::input::kUnbound},
++    {SDL_SCANCODE_Q, rocket::input::kUnbound, SDL_CONTROLLER_BUTTON_LEFTSHOULDER, rocket::input::kUnbound},
++    {SDL_SCANCODE_E, rocket::input::kUnbound, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, rocket::input::kUnbound},
++    {SDL_SCANCODE_I, rocket::input::kUnbound, SDL_CONTROLLER_BUTTON_Y, kAxisSourceBase + SDL_CONTROLLER_AXIS_RIGHTY * 2},
++    {SDL_SCANCODE_K, rocket::input::kUnbound, SDL_CONTROLLER_BUTTON_RIGHTSTICK, kAxisSourceBase + SDL_CONTROLLER_AXIS_RIGHTY * 2 + 1},
++    {SDL_SCANCODE_J, rocket::input::kUnbound, SDL_CONTROLLER_BUTTON_X, kAxisSourceBase + SDL_CONTROLLER_AXIS_RIGHTX * 2},
++    {SDL_SCANCODE_L, rocket::input::kUnbound, kAxisSourceBase + SDL_CONTROLLER_AXIS_RIGHTX * 2 + 1, rocket::input::kUnbound},
++}};
++
++std::array<BindingSet, static_cast<std::size_t>(Action::Count)> g_bindings = kDefaults;
++std::mutex g_binding_mutex;
++
++constexpr std::array<const char*, static_cast<std::size_t>(Action::Count)> kIdentifiers{{
++    "stick_up", "stick_down", "stick_left", "stick_right", "a", "b", "z",
++    "start", "dpad_up", "dpad_down", "dpad_left", "dpad_right", "l", "r",
++    "c_up", "c_down", "c_left", "c_right",
++}};
++
++constexpr std::array<const char*, static_cast<std::size_t>(Action::Count)> kLabels{{
++    "Analogue up", "Analogue down", "Analogue left", "Analogue right", "A button",
++    "B button", "Z trigger", "Start", "D-pad up", "D-pad down", "D-pad left",
++    "D-pad right", "L shoulder", "R shoulder", "C-up", "C-down", "C-left", "C-right",
++}};
++
++std::array<std::atomic<int>, static_cast<std::size_t>(ShortcutAction::Count)> g_shortcut_keyboard{{
++    SDL_SCANCODE_F1, SDL_SCANCODE_F11,
++}};
++std::array<std::atomic<int>, static_cast<std::size_t>(ShortcutAction::Count)> g_shortcut_controller{{
++    SDL_CONTROLLER_BUTTON_BACK, rocket::input::kUnbound,
++}};
++std::array<std::atomic<bool>, static_cast<std::size_t>(ShortcutAction::Count)> g_shortcut_held{};
++std::array<std::atomic<bool>, static_cast<std::size_t>(ShortcutAction::Count)> g_shortcut_requested{};
++
++std::atomic<float> g_stick_deadzone{21.363F};
++std::atomic<float> g_stick_anti_deadzone{0.0F};
++std::atomic<float> g_stick_sensitivity{100.0F};
++std::atomic<float> g_stick_curve{1.0F};
++std::atomic<bool> g_stick_x_inverted{false};
++std::atomic<bool> g_stick_y_inverted{false};
++std::atomic<float> g_trigger_threshold{0.36624F};
++std::atomic<bool> g_background_input_enabled{false};
++
++std::size_t Index(Action action) {
++    return std::min(static_cast<std::size_t>(action),
++                    static_cast<std::size_t>(Action::Count) - 1U);
++}
++
++std::size_t ShortcutIndex(ShortcutAction action) {
++    return std::min(static_cast<std::size_t>(action),
++                    static_cast<std::size_t>(ShortcutAction::Count) - 1U);
++}
++
++float NormaliseAxis(Sint16 value, bool apply_stick_deadzone) {
++    const int magnitude = std::min(
++        std::abs(static_cast<int>(value)), 32767);
++    const int deadzone = apply_stick_deadzone
++        ? static_cast<int>(std::lround(
++              std::clamp(g_stick_deadzone.load(std::memory_order_relaxed),
++                         0.0F, 35.0F) * 32767.0F / 100.0F))
++        : 0;
++    if (magnitude <= deadzone) return 0.0F;
++    const int range = std::max(32767 - deadzone, 1);
++    const float scaled = static_cast<float>(magnitude - deadzone) /
++                         static_cast<float>(range);
++    return std::copysign(std::min(scaled, 1.0F), static_cast<float>(value));
++}
++
++float SourceValue(SDL_GameController* controller, int source,
++                  bool apply_stick_deadzone = false) {
++    if (controller == nullptr || source < 0) return 0.0F;
++    if (source < SDL_CONTROLLER_BUTTON_MAX) {
++        return SDL_GameControllerGetButton(
++                   controller, static_cast<SDL_GameControllerButton>(source)) != 0
++            ? 1.0F : 0.0F;
++    }
++    if (source < kAxisSourceBase) return 0.0F;
++    const int encoded = source - kAxisSourceBase;
++    const int axis = encoded / 2;
++    if (axis < 0 || axis >= SDL_CONTROLLER_AXIS_MAX) return 0.0F;
++    const bool positive = (encoded & 1) != 0;
++    const float value = NormaliseAxis(SDL_GameControllerGetAxis(
++        controller, static_cast<SDL_GameControllerAxis>(axis)),
++        apply_stick_deadzone);
++    return positive ? std::max(value, 0.0F) : std::max(-value, 0.0F);
++}
++
++bool KeyboardHeld(const Uint8* keys, int source) {
++    return keys != nullptr && source >= 0 && source < SDL_NUM_SCANCODES &&
++           keys[source] != 0;
++}
++
++float ShapeStick(float value, bool inverted) {
++    const float magnitude = std::fabs(value);
++    if (magnitude <= 0.0F) return 0.0F;
++    const float anti = std::clamp(
++        g_stick_anti_deadzone.load(std::memory_order_relaxed) / 100.0F,
++        0.0F, 0.5F);
++    const float curve = std::clamp(
++        g_stick_curve.load(std::memory_order_relaxed), 0.5F, 2.5F);
++    const float sensitivity = std::clamp(
++        g_stick_sensitivity.load(std::memory_order_relaxed) / 100.0F,
++        0.5F, 1.5F);
++    float shaped = anti + (1.0F - anti) * std::pow(magnitude, curve);
++    shaped = std::clamp(shaped * sensitivity, 0.0F, 1.0F);
++    return std::copysign(shaped, inverted ? -value : value);
++}
++
++void UpdateShortcutRequests(SDL_GameController* controller, const Uint8* keys,
++                            bool allow_requests) {
++    for (std::size_t i = 0; i < g_shortcut_held.size(); ++i) {
++        const int key = g_shortcut_keyboard[i].load(std::memory_order_relaxed);
++        const int pad = g_shortcut_controller[i].load(std::memory_order_relaxed);
++        const bool held = KeyboardHeld(keys, key) || SourceValue(controller, pad) > 0.5F;
++        const bool was_held = g_shortcut_held[i].exchange(held, std::memory_order_acq_rel);
++        if (allow_requests && held && !was_held) {
++            g_shortcut_requested[i].store(true, std::memory_order_release);
++        }
++    }
++}
++
++} // namespace
++
++std::size_t rocket::input::action_count() {
++    return static_cast<std::size_t>(Action::Count);
++}
++
++const char* rocket::input::action_identifier(Action action) {
++    return kIdentifiers[Index(action)];
++}
++
++const char* rocket::input::action_label(Action action) {
++    return kLabels[Index(action)];
++}
++
++int rocket::input::binding(Action action, BindingSlot slot) {
++    std::scoped_lock lock(g_binding_mutex);
++    const BindingSet& b = g_bindings[Index(action)];
++    switch (slot) {
++        case BindingSlot::KeyboardPrimary: return b.keyboard_primary;
++        case BindingSlot::KeyboardSecondary: return b.keyboard_secondary;
++        case BindingSlot::ControllerPrimary: return b.controller_primary;
++        case BindingSlot::ControllerSecondary: return b.controller_secondary;
++    }
++    return kUnbound;
++}
++
++void rocket::input::set_binding(Action action, BindingSlot slot, int source) {
++    std::scoped_lock lock(g_binding_mutex);
++    BindingSet& b = g_bindings[Index(action)];
++    switch (slot) {
++        case BindingSlot::KeyboardPrimary: b.keyboard_primary = source; break;
++        case BindingSlot::KeyboardSecondary: b.keyboard_secondary = source; break;
++        case BindingSlot::ControllerPrimary: b.controller_primary = source; break;
++        case BindingSlot::ControllerSecondary: b.controller_secondary = source; break;
++    }
++}
++
++void rocket::input::reset_bindings() {
++    std::scoped_lock lock(g_binding_mutex);
++    g_bindings = kDefaults;
++}
++
++int rocket::input::shortcut_keyboard_binding(ShortcutAction action) {
++    return g_shortcut_keyboard[ShortcutIndex(action)].load(std::memory_order_relaxed);
++}
++
++int rocket::input::shortcut_controller_binding(ShortcutAction action) {
++    return g_shortcut_controller[ShortcutIndex(action)].load(std::memory_order_relaxed);
++}
++
++void rocket::input::set_shortcut_keyboard_binding(ShortcutAction action, int source) {
++    g_shortcut_keyboard[ShortcutIndex(action)].store(source, std::memory_order_relaxed);
++}
++
++void rocket::input::set_shortcut_controller_binding(ShortcutAction action, int source) {
++    g_shortcut_controller[ShortcutIndex(action)].store(source, std::memory_order_relaxed);
++}
++
++bool rocket::input::consume_shortcut_request(ShortcutAction action) {
++    return g_shortcut_requested[ShortcutIndex(action)].exchange(false, std::memory_order_acq_rel);
++}
++
++void rocket::input::reset_shortcuts() {
++    g_shortcut_keyboard[ShortcutIndex(ShortcutAction::ToggleOverlay)].store(SDL_SCANCODE_F1, std::memory_order_relaxed);
++    g_shortcut_controller[ShortcutIndex(ShortcutAction::ToggleOverlay)].store(SDL_CONTROLLER_BUTTON_BACK, std::memory_order_relaxed);
++    g_shortcut_keyboard[ShortcutIndex(ShortcutAction::ToggleFullscreen)].store(SDL_SCANCODE_F11, std::memory_order_relaxed);
++    g_shortcut_controller[ShortcutIndex(ShortcutAction::ToggleFullscreen)].store(kUnbound, std::memory_order_relaxed);
++}
++
++float rocket::input::stick_deadzone() { return g_stick_deadzone.load(std::memory_order_relaxed); }
++void rocket::input::set_stick_deadzone(float percent) { g_stick_deadzone.store(std::clamp(percent, 0.0F, 35.0F), std::memory_order_relaxed); }
++float rocket::input::stick_anti_deadzone() { return g_stick_anti_deadzone.load(std::memory_order_relaxed); }
++void rocket::input::set_stick_anti_deadzone(float percent) { g_stick_anti_deadzone.store(std::clamp(percent, 0.0F, 50.0F), std::memory_order_relaxed); }
++float rocket::input::stick_sensitivity() { return g_stick_sensitivity.load(std::memory_order_relaxed); }
++void rocket::input::set_stick_sensitivity(float percent) { g_stick_sensitivity.store(std::clamp(percent, 50.0F, 150.0F), std::memory_order_relaxed); }
++float rocket::input::stick_curve() { return g_stick_curve.load(std::memory_order_relaxed); }
++void rocket::input::set_stick_curve(float exponent) { g_stick_curve.store(std::clamp(exponent, 0.5F, 2.5F), std::memory_order_relaxed); }
++bool rocket::input::stick_x_inverted() { return g_stick_x_inverted.load(std::memory_order_relaxed); }
++void rocket::input::set_stick_x_inverted(bool inverted) { g_stick_x_inverted.store(inverted, std::memory_order_relaxed); }
++bool rocket::input::stick_y_inverted() { return g_stick_y_inverted.load(std::memory_order_relaxed); }
++void rocket::input::set_stick_y_inverted(bool inverted) { g_stick_y_inverted.store(inverted, std::memory_order_relaxed); }
++float rocket::input::trigger_threshold() { return g_trigger_threshold.load(std::memory_order_relaxed); }
++void rocket::input::set_trigger_threshold(float threshold) { g_trigger_threshold.store(std::clamp(threshold, 0.05F, 0.95F), std::memory_order_relaxed); }
++bool rocket::input::background_input_enabled() { return g_background_input_enabled.load(std::memory_order_relaxed); }
++void rocket::input::set_background_input_enabled(bool enabled) { g_background_input_enabled.store(enabled, std::memory_order_relaxed); }
++
++void rocket::input::reset_stick_settings() {
++    set_stick_deadzone(21.363F);
++    set_stick_anti_deadzone(0.0F);
++    set_stick_sensitivity(100.0F);
++    set_stick_curve(1.0F);
++    set_stick_x_inverted(false);
++    set_stick_y_inverted(false);
++    set_trigger_threshold(0.36624F);
++}
++
++int rocket::input::encode_controller_button(int button) {
++    return button >= 0 && button < SDL_CONTROLLER_BUTTON_MAX ? button : kUnbound;
++}
++
++int rocket::input::encode_controller_axis(int axis, bool positive) {
++    return axis >= 0 && axis < SDL_CONTROLLER_AXIS_MAX
++        ? kAxisSourceBase + axis * 2 + (positive ? 1 : 0)
++        : kUnbound;
++}
++
++std::string rocket::input::keyboard_binding_name(int scancode) {
++    if (scancode < 0 || scancode >= SDL_NUM_SCANCODES) return "Unbound";
++    const char* name = SDL_GetScancodeName(static_cast<SDL_Scancode>(scancode));
++    return name != nullptr && *name != '\0' ? name : "Unknown key";
++}
++
++std::string rocket::input::controller_binding_name(int source) {
++    if (source >= 0 && source < SDL_CONTROLLER_BUTTON_MAX) {
++        const char* name = SDL_GameControllerGetStringForButton(
++            static_cast<SDL_GameControllerButton>(source));
++        return name != nullptr ? name : "Unknown button";
++    }
++    if (source >= kAxisSourceBase) {
++        const int encoded = source - kAxisSourceBase;
++        const int axis = encoded / 2;
++        if (axis >= 0 && axis < SDL_CONTROLLER_AXIS_MAX) {
++            const char* name = SDL_GameControllerGetStringForAxis(
++                static_cast<SDL_GameControllerAxis>(axis));
++            return std::string(name != nullptr ? name : "axis") +
++                   ((encoded & 1) != 0 ? " +" : " -");
++        }
++    }
++    return "Unbound";
++}
++
++rocket::input::State rocket::input::poll(SDL_GameController* controller,
++                                          bool include_keyboard,
++                                          bool include_controller,
++                                          bool blocked,
++                                          bool allow_shortcuts) {
++    State state{};
++    const Uint8* keys = include_keyboard ? SDL_GetKeyboardState(nullptr) : nullptr;
++    SDL_GameController* pad = include_controller ? controller : nullptr;
++    UpdateShortcutRequests(pad, keys, allow_shortcuts);
++    if (blocked) return state;
++
++    std::array<BindingSet, static_cast<std::size_t>(Action::Count)> bindings;
++    {
++        std::scoped_lock lock(g_binding_mutex);
++        bindings = g_bindings;
++    }
++
++    const auto controller_suppressed = [&](int source) {
++        if (source == kUnbound) return false;
++        for (std::size_t i = 0; i < g_shortcut_held.size(); ++i) {
++            if (g_shortcut_held[i].load(std::memory_order_relaxed) &&
++                g_shortcut_controller[i].load(std::memory_order_relaxed) == source) {
++                return true;
++            }
++        }
++        return false;
++    };
++    const auto keyboard_suppressed = [&](int source) {
++        if (source == kUnbound) return false;
++        for (std::size_t i = 0; i < g_shortcut_held.size(); ++i) {
++            if (g_shortcut_held[i].load(std::memory_order_relaxed) &&
++                g_shortcut_keyboard[i].load(std::memory_order_relaxed) == source) {
++                return true;
++            }
++        }
++        return false;
++    };
++    const auto value = [&](Action action) {
++        const BindingSet& b = bindings[Index(action)];
++        const bool analogue_stick = action == Action::StickUp ||
++            action == Action::StickDown || action == Action::StickLeft ||
++            action == Action::StickRight;
++        float result = 0.0F;
++        if (!controller_suppressed(b.controller_primary)) {
++            result = SourceValue(pad, b.controller_primary, analogue_stick);
++        }
++        if (!controller_suppressed(b.controller_secondary)) {
++            result = std::max(result, SourceValue(
++                pad, b.controller_secondary, analogue_stick));
++        }
++        if ((!keyboard_suppressed(b.keyboard_primary) && KeyboardHeld(keys, b.keyboard_primary)) ||
++            (!keyboard_suppressed(b.keyboard_secondary) && KeyboardHeld(keys, b.keyboard_secondary))) {
++            result = 1.0F;
++        }
++        return result;
++    };
++    // Rocket's old right-stick C-button path used a 12,000 raw deadzone and a
++    // 0.45 post-deadzone threshold (~65% of the SDL axis range). Preserve that
++    // digital-axis feel while buttons still resolve to a full 1.0 immediately.
++    const auto press = [&](Action action, std::uint16_t mask, float threshold = 0.6516F) {
++        if (value(action) > threshold) state.buttons |= mask;
++    };
++
++    press(Action::A, kButtonA);
++    press(Action::B, kButtonB);
++    press(Action::Z, kButtonZ, trigger_threshold());
++    press(Action::Start, kButtonStart);
++    press(Action::DpadUp, kDpadUp);
++    press(Action::DpadDown, kDpadDown);
++    press(Action::DpadLeft, kDpadLeft);
++    press(Action::DpadRight, kDpadRight);
++    press(Action::L, kButtonL);
++    press(Action::R, kButtonR);
++    press(Action::CUp, kCUp);
++    press(Action::CDown, kCDown);
++    press(Action::CLeft, kCLeft);
++    press(Action::CRight, kCRight);
++
++    state.stick_x = std::clamp(value(Action::StickRight) - value(Action::StickLeft), -1.0F, 1.0F);
++    state.stick_y = std::clamp(value(Action::StickUp) - value(Action::StickDown), -1.0F, 1.0F);
++    const float magnitude = std::sqrt(state.stick_x * state.stick_x + state.stick_y * state.stick_y);
++    if (magnitude > 1.0F) {
++        state.stick_x /= magnitude;
++        state.stick_y /= magnitude;
++    }
++    state.stick_x = ShapeStick(state.stick_x, stick_x_inverted());
++    state.stick_y = ShapeStick(state.stick_y, stick_y_inverted());
++    return state;
++}
+diff --git a/src/runtime_input.hpp b/src/runtime_input.hpp
+new file mode 100644
+index 0000000..34d5d32
+--- /dev/null
++++ b/src/runtime_input.hpp
+@@ -0,0 +1,97 @@
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++#include <string>
++
++struct _SDL_GameController;
++typedef struct _SDL_GameController SDL_GameController;
++
++namespace rocket::input {
++
++constexpr int kUnbound = -1;
++
++enum class Action : std::uint8_t {
++    StickUp,
++    StickDown,
++    StickLeft,
++    StickRight,
++    A,
++    B,
++    Z,
++    Start,
++    DpadUp,
++    DpadDown,
++    DpadLeft,
++    DpadRight,
++    L,
++    R,
++    CUp,
++    CDown,
++    CLeft,
++    CRight,
++    Count,
++};
++
++enum class BindingSlot : std::uint8_t {
++    KeyboardPrimary,
++    KeyboardSecondary,
++    ControllerPrimary,
++    ControllerSecondary,
++};
++
++enum class ShortcutAction : std::uint8_t {
++    ToggleOverlay,
++    ToggleFullscreen,
++    Count,
++};
++
++struct State {
++    std::uint16_t buttons = 0;
++    float stick_x = 0.0F;
++    float stick_y = 0.0F;
++};
++
++std::size_t action_count();
++const char* action_identifier(Action action);
++const char* action_label(Action action);
++
++int binding(Action action, BindingSlot slot);
++void set_binding(Action action, BindingSlot slot, int source);
++void reset_bindings();
++
++int shortcut_keyboard_binding(ShortcutAction action);
++int shortcut_controller_binding(ShortcutAction action);
++void set_shortcut_keyboard_binding(ShortcutAction action, int source);
++void set_shortcut_controller_binding(ShortcutAction action, int source);
++bool consume_shortcut_request(ShortcutAction action);
++void reset_shortcuts();
++
++float stick_deadzone();
++void set_stick_deadzone(float percent);
++float stick_anti_deadzone();
++void set_stick_anti_deadzone(float percent);
++float stick_sensitivity();
++void set_stick_sensitivity(float percent);
++float stick_curve();
++void set_stick_curve(float exponent);
++bool stick_x_inverted();
++void set_stick_x_inverted(bool inverted);
++bool stick_y_inverted();
++void set_stick_y_inverted(bool inverted);
++float trigger_threshold();
++void set_trigger_threshold(float threshold);
++bool background_input_enabled();
++void set_background_input_enabled(bool enabled);
++void reset_stick_settings();
++
++int encode_controller_button(int button);
++int encode_controller_axis(int axis, bool positive);
++std::string keyboard_binding_name(int scancode);
++std::string controller_binding_name(int source);
++
++State poll(SDL_GameController* controller, bool include_keyboard,
++           bool include_controller, bool blocked,
++           bool allow_shortcuts = true);
++
++} // namespace rocket::input
+diff --git a/src/runtime_ui.cpp b/src/runtime_ui.cpp
+index 94da504..06280b4 100644
+--- a/src/runtime_ui.cpp
++++ b/src/runtime_ui.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include "game_registration.hpp"
+ #include "platform.hpp"
++#include "runtime_input.hpp"
+ 
+ #if defined(_WIN32)
+ #ifndef WIN32_LEAN_AND_MEAN
+@@ -27,6 +28,7 @@
+ #include <algorithm>
+ #include <array>
+ #include <atomic>
++#include <chrono>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <fstream>
+@@ -47,6 +49,17 @@ ImFont* g_launcher_body_font = nullptr;
+ ImFont* g_launcher_heading_font = nullptr;
+ bool g_launcher_context_active = false;
+ 
++enum class CaptureDevice { None, Keyboard, Controller };
++CaptureDevice g_capture_device = CaptureDevice::None;
++rocket::input::BindingSlot g_capture_slot = rocket::input::BindingSlot::KeyboardPrimary;
++int g_capture_action = -1;
++bool g_capture_shortcut = false;
++rocket::input::ShortcutAction g_capture_shortcut_action = rocket::input::ShortcutAction::ToggleOverlay;
++bool g_capture_popup_pending = false;
++bool g_capture_finished = false;
++std::chrono::steady_clock::time_point g_capture_started{};
++int g_controls_section = 0;
++
+ constexpr ImVec4 kBackground{0.025F, 0.055F, 0.09F, 1.0F};
+ constexpr ImVec4 kPanel{0.04F, 0.095F, 0.14F, 1.0F};
+ constexpr ImVec4 kPanelSoft{0.065F, 0.15F, 0.20F, 1.0F};
+@@ -216,6 +229,29 @@ void SaveSettings() {
+     out << "n64_dithering=" << (g_n64_dithering_enabled.load(std::memory_order_relaxed) ? 1 : 0) << '\n';
+     out << "volume=" << rocket::platform::master_volume() << '\n';
+     out << "audio_profile=2\n";
++    out << "rumble=" << (rocket::platform::rumble_enabled() ? 1 : 0) << '\n';
++    out << "rumble_strength=" << rocket::platform::rumble_strength() << '\n';
++    out << "controller_device=" << rocket::platform::preferred_controller_key() << '\n';
++    out << "background_input=" << (rocket::input::background_input_enabled() ? 1 : 0) << '\n';
++    out << "stick_deadzone=" << rocket::input::stick_deadzone() << '\n';
++    out << "stick_anti_deadzone=" << rocket::input::stick_anti_deadzone() << '\n';
++    out << "stick_sensitivity=" << rocket::input::stick_sensitivity() << '\n';
++    out << "stick_curve=" << rocket::input::stick_curve() << '\n';
++    out << "stick_x_inverted=" << (rocket::input::stick_x_inverted() ? 1 : 0) << '\n';
++    out << "stick_y_inverted=" << (rocket::input::stick_y_inverted() ? 1 : 0) << '\n';
++    out << "trigger_threshold=" << rocket::input::trigger_threshold() << '\n';
++    for (std::size_t index = 0; index < rocket::input::action_count(); ++index) {
++        const auto action = static_cast<rocket::input::Action>(index);
++        const std::string prefix = std::string("input.") + rocket::input::action_identifier(action) + ".";
++        out << prefix << "keyboard_primary=" << rocket::input::binding(action, rocket::input::BindingSlot::KeyboardPrimary) << '\n';
++        out << prefix << "keyboard_secondary=" << rocket::input::binding(action, rocket::input::BindingSlot::KeyboardSecondary) << '\n';
++        out << prefix << "controller_primary=" << rocket::input::binding(action, rocket::input::BindingSlot::ControllerPrimary) << '\n';
++        out << prefix << "controller_secondary=" << rocket::input::binding(action, rocket::input::BindingSlot::ControllerSecondary) << '\n';
++    }
++    out << "shortcut.overlay.keyboard=" << rocket::input::shortcut_keyboard_binding(rocket::input::ShortcutAction::ToggleOverlay) << '\n';
++    out << "shortcut.overlay.controller=" << rocket::input::shortcut_controller_binding(rocket::input::ShortcutAction::ToggleOverlay) << '\n';
++    out << "shortcut.fullscreen.keyboard=" << rocket::input::shortcut_keyboard_binding(rocket::input::ShortcutAction::ToggleFullscreen) << '\n';
++    out << "shortcut.fullscreen.controller=" << rocket::input::shortcut_controller_binding(rocket::input::ShortcutAction::ToggleFullscreen) << '\n';
+ }
+ 
+ void LoadSettings() {
+@@ -242,6 +278,27 @@ void LoadSettings() {
+         if (eq == std::string::npos) continue;
+         const std::string key = line.substr(0, eq);
+         const std::string value = line.substr(eq + 1);
++        bool input_binding_handled = false;
++        for (std::size_t index = 0; index < rocket::input::action_count() && !input_binding_handled; ++index) {
++            const auto action = static_cast<rocket::input::Action>(index);
++            const std::string prefix = std::string("input.") + rocket::input::action_identifier(action) + ".";
++            try {
++                if (key == prefix + "keyboard_primary") {
++                    rocket::input::set_binding(action, rocket::input::BindingSlot::KeyboardPrimary, std::stoi(value));
++                    input_binding_handled = true;
++                } else if (key == prefix + "keyboard_secondary") {
++                    rocket::input::set_binding(action, rocket::input::BindingSlot::KeyboardSecondary, std::stoi(value));
++                    input_binding_handled = true;
++                } else if (key == prefix + "controller_primary") {
++                    rocket::input::set_binding(action, rocket::input::BindingSlot::ControllerPrimary, std::stoi(value));
++                    input_binding_handled = true;
++                } else if (key == prefix + "controller_secondary") {
++                    rocket::input::set_binding(action, rocket::input::BindingSlot::ControllerSecondary, std::stoi(value));
++                    input_binding_handled = true;
++                }
++            } catch (...) {}
++        }
++        if (input_binding_handled) continue;
+         try {
+             if (key == "window_mode") graphics.wm_option = static_cast<ultramodern::renderer::WindowMode>(std::stoi(value));
+             else if (key == "graphics_api") graphics.api_option = static_cast<ultramodern::renderer::GraphicsApi>(std::stoi(value));
+@@ -258,6 +315,21 @@ void LoadSettings() {
+             else if (key == "downsample") graphics.ds_option = std::clamp(std::stoi(value), 1, 4);
+             else if (key == "n64_dithering") n64_dithering = std::stoi(value) != 0;
+             else if (key == "volume") volume = std::clamp(std::stof(value), 0.0F, 1.0F);
++            else if (key == "rumble") rocket::platform::set_rumble_enabled(std::stoi(value) != 0);
++            else if (key == "rumble_strength") rocket::platform::set_rumble_strength(std::stof(value));
++            else if (key == "controller_device") rocket::platform::set_preferred_controller_key(value);
++            else if (key == "background_input") rocket::input::set_background_input_enabled(std::stoi(value) != 0);
++            else if (key == "stick_deadzone") rocket::input::set_stick_deadzone(std::stof(value));
++            else if (key == "stick_anti_deadzone") rocket::input::set_stick_anti_deadzone(std::stof(value));
++            else if (key == "stick_sensitivity") rocket::input::set_stick_sensitivity(std::stof(value));
++            else if (key == "stick_curve") rocket::input::set_stick_curve(std::stof(value));
++            else if (key == "stick_x_inverted") rocket::input::set_stick_x_inverted(std::stoi(value) != 0);
++            else if (key == "stick_y_inverted") rocket::input::set_stick_y_inverted(std::stoi(value) != 0);
++            else if (key == "trigger_threshold") rocket::input::set_trigger_threshold(std::stof(value));
++            else if (key == "shortcut.overlay.keyboard") rocket::input::set_shortcut_keyboard_binding(rocket::input::ShortcutAction::ToggleOverlay, std::stoi(value));
++            else if (key == "shortcut.overlay.controller") rocket::input::set_shortcut_controller_binding(rocket::input::ShortcutAction::ToggleOverlay, std::stoi(value));
++            else if (key == "shortcut.fullscreen.keyboard") rocket::input::set_shortcut_keyboard_binding(rocket::input::ShortcutAction::ToggleFullscreen, std::stoi(value));
++            else if (key == "shortcut.fullscreen.controller") rocket::input::set_shortcut_controller_binding(rocket::input::ShortcutAction::ToggleFullscreen, std::stoi(value));
+             else if (key == "audio_profile") audio_profile = std::max(std::stoi(value), 0);
+         } catch (...) {}
+     }
+@@ -518,24 +590,350 @@ void DrawSoundPage(float width) {
+     }
+ }
+ 
+-void DrawControlsPage() {
+-    LauncherHeading("CONTROLS");
+-    ImGui::TextDisabled("Keyboard and SDL gamepads are active simultaneously");
+-    ImGui::Separator();
+-    ImGui::Columns(2, "controls", false);
+-    ImGui::TextUnformatted("N64"); ImGui::NextColumn(); ImGui::TextUnformatted("Keyboard / Gamepad"); ImGui::NextColumn();
++std::string CaptureBindingName(CaptureDevice device, int source) {
++    return device == CaptureDevice::Keyboard
++        ? rocket::input::keyboard_binding_name(source)
++        : rocket::input::controller_binding_name(source);
++}
++
++void BeginBindingCapture(rocket::input::Action action,
++                         rocket::input::BindingSlot slot) {
++    g_capture_action = static_cast<int>(action);
++    g_capture_slot = slot;
++    g_capture_shortcut = false;
++    g_capture_device = (slot == rocket::input::BindingSlot::KeyboardPrimary ||
++                        slot == rocket::input::BindingSlot::KeyboardSecondary)
++        ? CaptureDevice::Keyboard : CaptureDevice::Controller;
++    g_capture_popup_pending = true;
++    g_capture_finished = false;
++    g_capture_started = std::chrono::steady_clock::now();
++}
++
++void BeginShortcutCapture(CaptureDevice device,
++                          rocket::input::ShortcutAction action) {
++    g_capture_action = -1;
++    g_capture_shortcut = true;
++    g_capture_shortcut_action = action;
++    g_capture_device = device;
++    g_capture_popup_pending = true;
++    g_capture_finished = false;
++    g_capture_started = std::chrono::steady_clock::now();
++}
++
++void CommitCapturedSource(int source) {
++    if (g_capture_shortcut) {
++        if (g_capture_device == CaptureDevice::Keyboard) {
++            rocket::input::set_shortcut_keyboard_binding(g_capture_shortcut_action, source);
++        } else {
++            rocket::input::set_shortcut_controller_binding(g_capture_shortcut_action, source);
++        }
++    } else if (g_capture_action >= 0 &&
++               g_capture_action < static_cast<int>(rocket::input::Action::Count)) {
++        rocket::input::set_binding(
++            static_cast<rocket::input::Action>(g_capture_action),
++            g_capture_slot, source);
++    }
++    SaveSettings();
++    g_capture_finished = true;
++    g_capture_device = CaptureDevice::None;
++}
++
++bool HandleInputCaptureEvent(SDL_Event* event) {
++    if (event == nullptr || g_capture_device == CaptureDevice::None) return false;
++    if (event->type == SDL_KEYDOWN && event->key.repeat == 0) {
++        if (event->key.keysym.scancode == SDL_SCANCODE_ESCAPE) {
++            g_capture_finished = true;
++            g_capture_device = CaptureDevice::None;
++            return true;
++        }
++        if (event->key.keysym.scancode == SDL_SCANCODE_BACKSPACE ||
++            event->key.keysym.scancode == SDL_SCANCODE_DELETE) {
++            CommitCapturedSource(rocket::input::kUnbound);
++            return true;
++        }
++        if (g_capture_device == CaptureDevice::Keyboard) {
++            CommitCapturedSource(static_cast<int>(event->key.keysym.scancode));
++            return true;
++        }
++        return true;
++    }
++    if (g_capture_device != CaptureDevice::Controller) return false;
++    if (event->type == SDL_CONTROLLERBUTTONDOWN) {
++        CommitCapturedSource(rocket::input::encode_controller_button(
++            static_cast<int>(event->cbutton.button)));
++        return true;
++    }
++    if (event->type == SDL_CONTROLLERAXISMOTION &&
++        std::chrono::steady_clock::now() - g_capture_started >
++            std::chrono::milliseconds(150) &&
++        std::abs(static_cast<int>(event->caxis.value)) >= 24000) {
++        CommitCapturedSource(rocket::input::encode_controller_axis(
++            static_cast<int>(event->caxis.axis), event->caxis.value > 0));
++        return true;
++    }
++    return event->type == SDL_CONTROLLERAXISMOTION;
++}
++
++void DrawCapturePopup() {
++    constexpr const char* kPopup = "Bind control";
++    if (g_capture_popup_pending) {
++        ImGui::OpenPopup(kPopup);
++        g_capture_popup_pending = false;
++    }
++    if (!ImGui::BeginPopupModal(kPopup, nullptr,
++            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
++        return;
++    }
++    if (g_capture_finished) {
++        g_capture_finished = false;
++        ImGui::CloseCurrentPopup();
++        ImGui::EndPopup();
++        return;
++    }
++    LauncherHeading("WAITING FOR INPUT");
+     ImGui::Separator();
+-    ImGui::TextUnformatted("Stick"); ImGui::NextColumn(); ImGui::TextUnformatted("WASD / Left stick"); ImGui::NextColumn();
+-    ImGui::TextUnformatted("A"); ImGui::NextColumn(); ImGui::TextUnformatted("X or Space / A"); ImGui::NextColumn();
+-    ImGui::TextUnformatted("B"); ImGui::NextColumn(); ImGui::TextUnformatted("Z or Ctrl / B"); ImGui::NextColumn();
+-    ImGui::TextUnformatted("Z"); ImGui::NextColumn(); ImGui::TextUnformatted("Shift / Left trigger"); ImGui::NextColumn();
+-    ImGui::TextUnformatted("Start"); ImGui::NextColumn(); ImGui::TextUnformatted("Enter / Start"); ImGui::NextColumn();
+-    ImGui::TextUnformatted("D-pad"); ImGui::NextColumn(); ImGui::TextUnformatted("Arrow keys / D-pad"); ImGui::NextColumn();
+-    ImGui::TextUnformatted("L / R"); ImGui::NextColumn(); ImGui::TextUnformatted("Q / E / shoulders"); ImGui::NextColumn();
+-    ImGui::TextUnformatted("C buttons"); ImGui::NextColumn(); ImGui::TextUnformatted("I J K L / right stick"); ImGui::NextColumn();
+-    ImGui::Columns(1);
++    if (g_capture_device == CaptureDevice::Keyboard) {
++        ImGui::TextWrapped("Press the keyboard key you want to use.");
++    } else {
++        ImGui::TextWrapped("Press a gamepad button or move an axis fully in the direction you want to use.");
++    }
++    ImGui::TextDisabled("Escape cancels. Backspace/Delete clears the binding.");
+     ImGui::Spacing();
+-    ImGui::TextDisabled("F1 or Escape: Rocket-R overlay | F11 / Alt+Enter: fullscreen");
++    if (ImGui::Button("CANCEL", {240.0F, 44.0F})) {
++        g_capture_device = CaptureDevice::None;
++        ImGui::CloseCurrentPopup();
++    }
++    ImGui::EndPopup();
++}
++
++void DrawControlsPage(float width) {
++    using rocket::input::Action;
++    using rocket::input::BindingSlot;
++    LauncherHeading("CONTROLS");
++    ImGui::TextDisabled("Single-player input profiles - keyboard and SDL gamepads can be used together");
++    ImGui::Separator();
++
++    constexpr std::array<const char*, 4> sections{
++        "DEVICE", "N64 BINDINGS", "STICK", "SHORTCUTS"};
++    const float gap = ImGui::GetStyle().ItemSpacing.x;
++    const float section_width = std::max((width - gap * 3.0F) / 4.0F, 1.0F);
++    for (std::size_t index = 0; index < sections.size(); ++index) {
++        if (index != 0U) ImGui::SameLine();
++        const bool selected = g_controls_section == static_cast<int>(index);
++        if (selected) {
++            ImGui::PushStyleColor(ImGuiCol_Button, kWarm);
++            ImGui::PushStyleColor(ImGuiCol_Text, kBackground);
++        }
++        if (ImGui::Button(sections[index], {section_width, 42.0F})) {
++            g_controls_section = static_cast<int>(index);
++        }
++        if (selected) ImGui::PopStyleColor(2);
++    }
++    ImGui::Dummy({0.0F, 12.0F});
++
++    if (g_controls_section == 0) {
++        ImGui::SeparatorText("ACTIVE CONTROLLER");
++        const auto controller_choices = rocket::platform::controller_choices();
++        const std::string preferred_controller = rocket::platform::preferred_controller_key();
++        std::string controller_preview = preferred_controller.empty()
++            ? "Automatic (first connected)"
++            : rocket::platform::controller_name();
++        ImGui::TextUnformatted("Player 1 gamepad");
++        ImGui::SetNextItemWidth(std::min(width, 620.0F));
++        if (ImGui::BeginCombo("##player1-controller", controller_preview.c_str())) {
++            const bool automatic = preferred_controller.empty();
++            if (ImGui::Selectable("Automatic (first connected)", automatic)) {
++                rocket::platform::set_preferred_controller_key({});
++                SaveSettings();
++            }
++            if (automatic) ImGui::SetItemDefaultFocus();
++            for (const auto& choice : controller_choices) {
++                const bool selected = choice.key == preferred_controller;
++                if (ImGui::Selectable(choice.name.c_str(), selected)) {
++                    rocket::platform::set_preferred_controller_key(choice.key);
++                    SaveSettings();
++                }
++                if (selected) ImGui::SetItemDefaultFocus();
++            }
++            ImGui::EndCombo();
++        }
++        if (rocket::platform::controller_connected()) {
++            ImGui::TextColored(kAccent, "Connected: %s", rocket::platform::controller_name().c_str());
++            ImGui::TextDisabled("Keyboard and gamepad input can be used together for Player 1.");
++        } else if (!preferred_controller.empty()) {
++            ImGui::TextColored(kWarm, "The selected gamepad is disconnected");
++            ImGui::TextDisabled("Rocket-R will reclaim it when it reconnects. Keyboard controls remain available.");
++        } else {
++            ImGui::TextColored(kWarm, "No SDL gamepad connected");
++            ImGui::TextDisabled("Keyboard controls remain available. Connect a controller and press RESCAN.");
++        }
++        if (ImGui::Button("RESCAN CONTROLLERS", {std::min(width, 320.0F), 44.0F})) {
++            rocket::platform::rescan_controller();
++        }
++        ImGui::Dummy({0.0F, 8.0F});
++        bool background = rocket::input::background_input_enabled();
++        if (ImGui::Checkbox("Allow controller input while Rocket-R is in the background", &background)) {
++            rocket::input::set_background_input_enabled(background);
++            SaveSettings();
++        }
++        ImGui::TextDisabled("Keyboard input is always focus-only to avoid typing into another app while moving Rocket.");
++        ImGui::Dummy({0.0F, 8.0F});
++        ImGui::SeparatorText("RUMBLE PAK");
++        bool rumble = rocket::platform::rumble_enabled();
++        if (ImGui::Checkbox("Enable Rumble Pak", &rumble)) {
++            rocket::platform::set_rumble_enabled(rumble);
++            SaveSettings();
++        }
++        if (rumble) {
++            float strength = rocket::platform::rumble_strength() * 100.0F;
++            ImGui::TextUnformatted("Rumble strength");
++            ImGui::SetNextItemWidth(std::min(width, 620.0F));
++            if (ImGui::SliderFloat("##rumble-strength", &strength, 0.0F, 100.0F, "%.0f%%")) {
++                rocket::platform::set_rumble_strength(strength / 100.0F);
++                SaveSettings();
++            }
++            ImGui::BeginDisabled(!rocket::platform::controller_connected());
++            if (ImGui::Button("TEST RUMBLE", {220.0F, 42.0F})) {
++                rocket::platform::test_rumble();
++            }
++            ImGui::EndDisabled();
++        }
++    } else if (g_controls_section == 1) {
++        ImGui::SeparatorText("N64 BINDINGS");
++        ImGui::TextDisabled("Every N64 control can have two keyboard inputs and two gamepad inputs.");
++        const auto draw_binding_button = [&](Action action, BindingSlot slot,
++                                             const char* prefix, float button_width) {
++            const int source = rocket::input::binding(action, slot);
++            const bool keyboard = slot == BindingSlot::KeyboardPrimary ||
++                                  slot == BindingSlot::KeyboardSecondary;
++            const std::string name = std::string(prefix) + (keyboard
++                ? rocket::input::keyboard_binding_name(source)
++                : rocket::input::controller_binding_name(source));
++            ImGui::PushID(static_cast<int>(slot));
++            if (ImGui::Button(name.c_str(), {button_width, 36.0F})) {
++                BeginBindingCapture(action, slot);
++            }
++            ImGui::PopID();
++        };
++
++        if (width >= 700.0F && ImGui::BeginTable("rocket-controls-bindings", 3,
++                ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
++                ImGuiTableFlags_SizingStretchProp, {width, 0.0F})) {
++            ImGui::TableSetupColumn("N64 CONTROL", ImGuiTableColumnFlags_WidthFixed,
++                                    std::clamp(width * 0.24F, 160.0F, 250.0F));
++            ImGui::TableSetupColumn("KEYBOARD", ImGuiTableColumnFlags_WidthStretch);
++            ImGui::TableSetupColumn("GAMEPAD", ImGuiTableColumnFlags_WidthStretch);
++            ImGui::TableHeadersRow();
++            for (std::size_t index = 0; index < rocket::input::action_count(); ++index) {
++                const auto action = static_cast<Action>(index);
++                ImGui::PushID(static_cast<int>(index));
++                ImGui::TableNextRow();
++                ImGui::TableSetColumnIndex(0);
++                ImGui::AlignTextToFramePadding();
++                ImGui::TextWrapped("%s", rocket::input::action_label(action));
++                ImGui::TableSetColumnIndex(1);
++                draw_binding_button(action, BindingSlot::KeyboardPrimary, "P: ", -1.0F);
++                draw_binding_button(action, BindingSlot::KeyboardSecondary, "Alt: ", -1.0F);
++                ImGui::TableSetColumnIndex(2);
++                draw_binding_button(action, BindingSlot::ControllerPrimary, "P: ", -1.0F);
++                draw_binding_button(action, BindingSlot::ControllerSecondary, "Alt: ", -1.0F);
++                ImGui::PopID();
++            }
++            ImGui::EndTable();
++        } else {
++            for (std::size_t index = 0; index < rocket::input::action_count(); ++index) {
++                const auto action = static_cast<Action>(index);
++                ImGui::PushID(static_cast<int>(index));
++                ImGui::TextUnformatted(rocket::input::action_label(action));
++                draw_binding_button(action, BindingSlot::KeyboardPrimary, "Keyboard: ", width);
++                draw_binding_button(action, BindingSlot::KeyboardSecondary, "Keyboard alt: ", width);
++                draw_binding_button(action, BindingSlot::ControllerPrimary, "Gamepad: ", width);
++                draw_binding_button(action, BindingSlot::ControllerSecondary, "Gamepad alt: ", width);
++                ImGui::Separator();
++                ImGui::PopID();
++            }
++        }
++        ImGui::Spacing();
++        if (ImGui::Button("RESTORE DEFAULT N64 BINDINGS", {std::min(width, 420.0F), 44.0F})) {
++            rocket::input::reset_bindings();
++            SaveSettings();
++        }
++    } else if (g_controls_section == 2) {
++        ImGui::SeparatorText("CONTROLLER FEEL");
++        const auto slider = [&](const char* label, const char* id, float value,
++                                float minimum, float maximum, const char* format,
++                                auto setter) {
++            ImGui::TextUnformatted(label);
++            ImGui::SetNextItemWidth(std::min(width, 700.0F));
++            if (ImGui::SliderFloat(id, &value, minimum, maximum, format,
++                                   ImGuiSliderFlags_AlwaysClamp)) {
++                setter(value);
++                SaveSettings();
++            }
++        };
++        slider("Stick deadzone", "##stick-deadzone", rocket::input::stick_deadzone(),
++               0.0F, 35.0F, "%.1f%%", rocket::input::set_stick_deadzone);
++        slider("Stick anti-deadzone", "##stick-antideadzone", rocket::input::stick_anti_deadzone(),
++               0.0F, 50.0F, "%.1f%%", rocket::input::set_stick_anti_deadzone);
++        slider("Stick sensitivity", "##stick-sensitivity", rocket::input::stick_sensitivity(),
++               50.0F, 150.0F, "%.0f%%", rocket::input::set_stick_sensitivity);
++        slider("Response curve", "##stick-curve", rocket::input::stick_curve(),
++               0.5F, 2.5F, "%.2f", rocket::input::set_stick_curve);
++        slider("Analogue trigger threshold", "##trigger-threshold", rocket::input::trigger_threshold(),
++               0.05F, 0.95F, "%.2f", rocket::input::set_trigger_threshold);
++        bool invert_x = rocket::input::stick_x_inverted();
++        bool invert_y = rocket::input::stick_y_inverted();
++        if (ImGui::Checkbox("Invert horizontal stick", &invert_x)) {
++            rocket::input::set_stick_x_inverted(invert_x);
++            SaveSettings();
++        }
++        if (ImGui::Checkbox("Invert vertical stick", &invert_y)) {
++            rocket::input::set_stick_y_inverted(invert_y);
++            SaveSettings();
++        }
++        ImGui::TextDisabled("The defaults reproduce Rocket-R's previous fixed deadzone and trigger behaviour.");
++        ImGui::Spacing();
++        if (ImGui::Button("RESTORE DEFAULT STICK FEEL", {std::min(width, 420.0F), 44.0F})) {
++            rocket::input::reset_stick_settings();
++            SaveSettings();
++        }
++    } else {
++        ImGui::SeparatorText("IN-GAME SHORTCUTS");
++        ImGui::TextDisabled("Escape always opens/closes the overlay and Alt+Enter always toggles fullscreen as emergency fallbacks.");
++        struct ShortcutRow {
++            const char* label;
++            rocket::input::ShortcutAction action;
++        };
++        constexpr std::array<ShortcutRow, 2> rows{{
++            {"Toggle Rocket-R overlay", rocket::input::ShortcutAction::ToggleOverlay},
++            {"Toggle fullscreen", rocket::input::ShortcutAction::ToggleFullscreen},
++        }};
++        for (std::size_t index = 0; index < rows.size(); ++index) {
++            const auto& row = rows[index];
++            ImGui::PushID(static_cast<int>(index));
++            ImGui::TextUnformatted(row.label);
++            const float button_gap = ImGui::GetStyle().ItemSpacing.x;
++            const float button_width = std::max((width - button_gap) * 0.5F, 1.0F);
++            const std::string keyboard = "Keyboard: " + rocket::input::keyboard_binding_name(
++                rocket::input::shortcut_keyboard_binding(row.action));
++            const std::string controller = "Gamepad: " + rocket::input::controller_binding_name(
++                rocket::input::shortcut_controller_binding(row.action));
++            if (ImGui::Button(keyboard.c_str(), {button_width, 40.0F})) {
++                BeginShortcutCapture(CaptureDevice::Keyboard, row.action);
++            }
++            ImGui::SameLine();
++            if (ImGui::Button(controller.c_str(), {button_width, 40.0F})) {
++                BeginShortcutCapture(CaptureDevice::Controller, row.action);
++            }
++            ImGui::Spacing();
++            ImGui::PopID();
++        }
++        if (ImGui::Button("RESTORE DEFAULT SHORTCUTS", {std::min(width, 420.0F), 44.0F})) {
++            rocket::input::reset_shortcuts();
++            SaveSettings();
++        }
++    }
++    DrawCapturePopup();
+ }
+ 
+ void DrawAboutPage() {
+@@ -575,7 +973,7 @@ void DrawOverlayPage(int page, float width) {
+     switch (page) {
+         case 1: DrawGraphicsPage(width, true); break;
+         case 2: DrawSoundPage(width); break;
+-        case 3: DrawControlsPage(); break;
++        case 3: DrawControlsPage(width); break;
+         case 4: DrawAboutPage(); break;
+         default:
+             ImGui::TextUnformatted("PLAY");
+@@ -675,6 +1073,9 @@ rocket::ui::StartupResult rocket::ui::run_launcher(
+     while (running) {
+         SDL_Event event{};
+         while (SDL_PollEvent(&event)) {
++            if (HandleInputCaptureEvent(&event)) {
++                continue;
++            }
+             ImGui_ImplSDL2_ProcessEvent(&event);
+             FeedGamepadNavigationEvent(event);
+             if (event.type == SDL_QUIT ||
+@@ -702,6 +1103,7 @@ rocket::ui::StartupResult rocket::ui::run_launcher(
+                 }
+             } else if (event.type == SDL_CONTROLLERDEVICEADDED ||
+                        event.type == SDL_CONTROLLERDEVICEREMOVED) {
++                rocket::platform::rescan_controller();
+                 rocket::platform::sample_input();
+             }
+         }
+@@ -769,7 +1171,7 @@ rocket::ui::StartupResult rocket::ui::run_launcher(
+         } else if (page == 2) {
+             DrawSoundPage(inner);
+         } else if (page == 3) {
+-            DrawControlsPage();
++            DrawControlsPage(inner);
+         } else {
+             DrawAboutPage();
+         }
+@@ -855,12 +1257,13 @@ void rocket::ui::draw(RT64::Application& application) {
+ 
+ bool rocket::ui::handle_runtime_event(SDL_Event* event) {
+     if (event == nullptr) return false;
++    if (HandleInputCaptureEvent(event)) return true;
++    // Escape remains a hard-wired emergency route so a bad custom binding can
++    // never trap the player outside the Rocket-R overlay. F1/controller Back
++    // are ordinary configurable shortcuts handled by runtime_input.
+     const bool keyboard_toggle = event->type == SDL_KEYDOWN && event->key.repeat == 0 &&
+-        (event->key.keysym.scancode == SDL_SCANCODE_ESCAPE ||
+-         event->key.keysym.scancode == SDL_SCANCODE_F1);
+-    const bool controller_toggle = event->type == SDL_CONTROLLERBUTTONDOWN &&
+-        event->cbutton.button == SDL_CONTROLLER_BUTTON_BACK;
+-    if (keyboard_toggle || controller_toggle) {
++        event->key.keysym.scancode == SDL_SCANCODE_ESCAPE;
++    if (keyboard_toggle) {
+         toggle_overlay();
+         return true;
+     }
+@@ -882,6 +1285,10 @@ bool rocket::ui::overlay_visible() {
+     return g_overlay_visible.load(std::memory_order_acquire);
+ }
+ 
++bool rocket::ui::input_capture_active() {
++    return g_capture_device != CaptureDevice::None;
++}
++
+ bool rocket::ui::n64_dithering_enabled() {
+     return g_n64_dithering_enabled.load(std::memory_order_relaxed);
+ }
+diff --git a/src/runtime_ui.hpp b/src/runtime_ui.hpp
+index 15b355f..a5b937e 100644
+--- a/src/runtime_ui.hpp
++++ b/src/runtime_ui.hpp
+@@ -21,6 +21,7 @@ void draw(RT64::Application& application);
+ bool handle_runtime_event(SDL_Event* event);
+ void toggle_overlay();
+ bool overlay_visible();
++bool input_capture_active();
+ bool n64_dithering_enabled();
+ void detach(RT64::Application& application);
+ 

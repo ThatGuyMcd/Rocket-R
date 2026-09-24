@@ -1,0 +1,243 @@
+diff --git a/src/common/rt64_rocket_configuration.h b/src/common/rt64_rocket_configuration.h
+new file mode 100644
+--- /dev/null
++++ b/src/common/rt64_rocket_configuration.h
+@@ -0,0 +1,123 @@
++//
++// Rocket-R project-owned RT64 presentation controls.
++//
++
++#pragma once
++
++#include <algorithm>
++#include <atomic>
++#include <cstdint>
++#include <mutex>
++#include <string>
++
++namespace RT64 {
++    struct RocketGraphicsControls {
++        std::atomic<float> fogDistanceMultiplier{1.0f};
++        std::atomic<float> zFightToleranceScale{1.0f};
++        std::atomic<uint32_t> viFilterMode{0U};
++        std::atomic<float> debandStrength{0.0f};
++        std::atomic<uint32_t> postProcessMode{0U};
++        std::atomic<float> postProcessStrength{0.70f};
++        std::atomic<uint32_t> hudAspectMode{0U};
++        std::atomic<float> hudScale{1.0f};
++        std::atomic<float> hudSafeMargin{0.0f};
++        std::mutex customShaderMutex;
++        std::string customShaderBasePath;
++    };
++
++    inline RocketGraphicsControls &rocketGraphicsControls() {
++        static RocketGraphicsControls controls;
++        return controls;
++    }
++
++    inline void setRocketFogDistanceMultiplier(float value) {
++        rocketGraphicsControls().fogDistanceMultiplier.store(
++            std::clamp(value, 0.0f, 8.0f), std::memory_order_release);
++    }
++
++    inline float getRocketFogDistanceMultiplier() {
++        return rocketGraphicsControls().fogDistanceMultiplier.load(
++            std::memory_order_acquire);
++    }
++
++    inline void setRocketZFightToleranceScale(float value) {
++        rocketGraphicsControls().zFightToleranceScale.store(
++            std::clamp(value, 1.0f, 4.0f), std::memory_order_release);
++    }
++
++    inline float getRocketZFightToleranceScale() {
++        return rocketGraphicsControls().zFightToleranceScale.load(
++            std::memory_order_acquire);
++    }
++
++    inline void setRocketViFilterMode(uint32_t value) {
++        rocketGraphicsControls().viFilterMode.store(
++            std::min(value, 1U), std::memory_order_release);
++    }
++
++    inline uint32_t getRocketViFilterMode() {
++        return rocketGraphicsControls().viFilterMode.load(
++            std::memory_order_acquire);
++    }
++
++    inline void setRocketDebandStrength(float value) {
++        rocketGraphicsControls().debandStrength.store(
++            std::clamp(value, 0.0f, 1.0f), std::memory_order_release);
++    }
++
++    inline float getRocketDebandStrength() {
++        return rocketGraphicsControls().debandStrength.load(
++            std::memory_order_acquire);
++    }
++
++    inline void setRocketPostProcess(uint32_t mode, float strength) {
++        rocketGraphicsControls().postProcessMode.store(
++            std::min(mode, 3U), std::memory_order_release);
++        rocketGraphicsControls().postProcessStrength.store(
++            std::clamp(strength, 0.0f, 1.0f), std::memory_order_release);
++    }
++
++    inline uint32_t getRocketPostProcessMode() {
++        return rocketGraphicsControls().postProcessMode.load(
++            std::memory_order_acquire);
++    }
++
++    inline float getRocketPostProcessStrength() {
++        return rocketGraphicsControls().postProcessStrength.load(
++            std::memory_order_acquire);
++    }
++
++    inline void setRocketHudConfiguration(uint32_t aspectMode, float scale,
++                                           float safeMargin) {
++        rocketGraphicsControls().hudAspectMode.store(
++            std::min(aspectMode, 2U), std::memory_order_release);
++        rocketGraphicsControls().hudScale.store(
++            std::clamp(scale, 0.5f, 1.5f), std::memory_order_release);
++        rocketGraphicsControls().hudSafeMargin.store(
++            std::clamp(safeMargin, 0.0f, 0.20f), std::memory_order_release);
++    }
++
++    inline uint32_t getRocketHudAspectMode() {
++        return rocketGraphicsControls().hudAspectMode.load(std::memory_order_acquire);
++    }
++
++    inline float getRocketHudScale() {
++        return rocketGraphicsControls().hudScale.load(std::memory_order_acquire);
++    }
++
++    inline float getRocketHudSafeMargin() {
++        return rocketGraphicsControls().hudSafeMargin.load(std::memory_order_acquire);
++    }
++
++    inline void setRocketCustomShaderBasePath(const std::string &path) {
++        auto &controls = rocketGraphicsControls();
++        const std::scoped_lock lock(controls.customShaderMutex);
++        controls.customShaderBasePath = path;
++    }
++
++    inline std::string getRocketCustomShaderBasePath() {
++        auto &controls = rocketGraphicsControls();
++        const std::scoped_lock lock(controls.customShaderMutex);
++        return controls.customShaderBasePath;
++    }
++}
+diff --git a/src/hle/rt64_rsp.cpp b/src/hle/rt64_rsp.cpp
+--- a/src/hle/rt64_rsp.cpp
++++ b/src/hle/rt64_rsp.cpp
+@@ -5,6 +5,7 @@
+ #include <cassert>
+ 
+ #include "../include/rt64_extended_gbi.h"
++#include "common/rt64_rocket_configuration.h"
+ #include "common/rt64_common.h"
+ #include "common/rt64_math.h"
+ #include "gbi/rt64_f3d.h"
+@@ -1176,8 +1177,20 @@ namespace RT64 {
+     }
+ 
+     void RSP::setFog(int16_t mul, int16_t offset) {
+-        fog.mul = mul;
+-        fog.offset = offset;
++        const float distanceMultiplier = getRocketFogDistanceMultiplier();
++        if (distanceMultiplier <= 0.0001f) {
++            // A zero fog vector produces zero fog alpha in RSPProcessCS while
++            // preserving the guest's geometry mode and all other RDP state.
++            fog.mul = 0.0f;
++            fog.offset = 0.0f;
++        }
++        else {
++            // Fog alpha is z * mul + offset. Evaluating the authored response
++            // at z / multiplier moves the same fog curve farther from camera
++            // without guessing the original gSPFogPosition min/max pair.
++            fog.mul = static_cast<float>(mul) / distanceMultiplier;
++            fog.offset = offset;
++        }
+         fogChanged = true;
+     }
+     
+diff --git a/src/shared/rt64_raster_params.h b/src/shared/rt64_raster_params.h
+--- a/src/shared/rt64_raster_params.h
++++ b/src/shared/rt64_raster_params.h
+@@ -12,7 +12,8 @@ namespace interop {
+     struct RasterParams {
+         uint renderIndex;
+         float mipLODBias;
+-        uint2 padding;
++        float zFightToleranceScale;
++        uint padding;
+         float2 screenScale;
+         float2 screenOffset;
+     };
+diff --git a/src/render/rt64_framebuffer_renderer.cpp b/src/render/rt64_framebuffer_renderer.cpp
+--- a/src/render/rt64_framebuffer_renderer.cpp
++++ b/src/render/rt64_framebuffer_renderer.cpp
+@@ -9,5 +9,6 @@
+ #include "common/rt64_elapsed_timer.h"
+ #include "common/rt64_math.h"
++#include "common/rt64_rocket_configuration.h"
+ #include "hle/rt64_color_converter.h"
+ #include "gbi/rt64_f3d.h"
+ #include "shared/rt64_framebuffer_params.h"
+@@ -476,6 +477,7 @@ namespace RT64 {
+         RenderRect previousScissor;
+         interop::RasterParams rasterParams{};
+         rasterParams.mipLODBias = getDefaultSamplerMipLODBias();
++        rasterParams.zFightToleranceScale = getRocketZFightToleranceScale();
+         RenderDescriptorSet *descRealFbSet = framebuffer.descRealFbSet->get();
+         RenderDescriptorSet *descDummyFbSet = framebuffer.descDummyFbSet->get();
+ 
+@@ -1077,6 +1079,37 @@ namespace RT64 {
+                             break;
+                         }
+ 
++                        // Rocket-R HUD layout is presentation-only. Restrict
++                        // this transform to orthographic geometry and non-full-
++                        // frame rectangles so world perspective geometry,
++                        // clear/fade rectangles and framebuffer copies retain
++                        // their exact authored coordinates.
++                        const bool fullFrameRect =
++                            (proj.type == Projection::Type::Rectangle) &&
++                            (call.callDesc.rect.ulx <= fbPair.scissorRect.ulx) &&
++                            (call.callDesc.rect.uly <= fbPair.scissorRect.uly) &&
++                            (call.callDesc.rect.lrx >= fbPair.scissorRect.lrx) &&
++                            (call.callDesc.rect.lry >= fbPair.scissorRect.lry);
++                        const bool rocketHudCandidate =
++                            (proj.type == Projection::Type::Orthographic) ||
++                            ((proj.type == Projection::Type::Rectangle) && !fullFrameRect);
++                        if (rocketHudCandidate) {
++                            const uint32_t hudMode = getRocketHudAspectMode();
++                            const float outputAspect = std::max(p.aspectRatioTarget, 0.1f);
++                            float hudAspect = outputAspect;
++                            if (hudMode == 0U) hudAspect = 4.0f / 3.0f;
++                            else if (hudMode == 1U) hudAspect = 16.0f / 9.0f;
++                            const float aspectScale = std::min(hudAspect / outputAspect, 1.0f);
++                            const float safeScale = std::max(
++                                1.0f - 2.0f * getRocketHudSafeMargin(), 0.5f);
++                            const float hudScale = getRocketHudScale() * safeScale;
++                            const float hudScaleX = hudScale * aspectScale;
++                            triangles.screenScale.x *= hudScaleX;
++                            triangles.screenScale.y *= hudScale;
++                            triangles.screenOffset.x *= hudScaleX;
++                            triangles.screenOffset.y *= hudScale;
++                        }
++
+                         triangles.scissor = convertFixedRect(call.callDesc.scissorRect, p.resolutionScale, p.fbWidth, invRatioScale, extOriginPercentage, int32_t(horizontalMisalignment), call.callDesc.scissorLeftOrigin, call.callDesc.scissorRightOrigin);
+ 
+                         bool usesViewport = (proj.type == Projection::Type::Perspective) || (proj.type == Projection::Type::Orthographic);
+diff --git a/src/shaders/RasterPS.hlsl b/src/shaders/RasterPS.hlsl
+--- a/src/shaders/RasterPS.hlsl
++++ b/src/shaders/RasterPS.hlsl
+@@ -116,7 +116,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
+         }
+ 
+         // Perform the decal depth tolerance check.
+-        const float DepthTolerance = max(CoplanarDepthTolerance(surfaceDepth), dz);
++        const float DepthTolerance = max(CoplanarDepthTolerance(surfaceDepth), dz) * max(gConstants.zFightToleranceScale, 1.0f);
+         const float pixelDepth = select(depthClampNear, max(vertexPosition.z, 0.0f), vertexPosition.z);
+         if (abs(pixelDepth - surfaceDepth) > DepthTolerance) {
+             return false;

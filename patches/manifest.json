@@ -119,6 +119,41 @@
           "path": "patches/rt64/0007-cross-platform-linux-arm64-and-android.patch",
           "purpose": "Keep shader embedding tools on the build host during cross-compilation, wire SDL2/Plume for Android, stub unused RT64 native file dialogs on Android, and use SDL_Vulkan_GetDrawableSize for Ubuntu 22.04 SDL2 compatibility.",
           "sha256": "1a3b3bac11ef88b766446075590f819cb5d473199a8faec1e298d48d233e3ac8"
+        },
+        {
+          "path": "patches/rt64/0008-rocket-dkrr-semantic-presentation-identities.patch",
+          "purpose": "Rocket-R global interpolation stability v5: carry RenderEntry semantic owners only across adjacent authored frames with mutual unambiguous continuity, bind exact FIFO task sidecars, and explicitly use G_EX_ID_IGNORE for ambiguous, conflicting or unrecognised model matrices so RT64 never falls back to anonymous transform matching.",
+          "sha256": "b940f2b84e30f4b19d0592b9803846a9178d446141f5c733a717279fba34780e"
+        },
+        {
+          "path": "patches/rt64/0009-rocket-configurable-n64-dithering.patch",
+          "purpose": "Expose Rocket-R launcher control over the original N64 Bayer colour dithering by forcing decoded RT64 draw-state RGB/alpha dither modes to disabled while the option is off, without mutating guest RDP state.",
+          "sha256": "9b3a9dcc15b3db6fae3dcb84f471ce353c7ec8ec927e098f5e580764a781aa64"
+        },
+        {
+          "path": "patches/rt64/0010-dkrr-configurable-default-anisotropy.patch",
+          "purpose": "Port DKR-R's proven configurable RT64 sampler anisotropy control so Rocket-R can select 1x-16x before sampler creation.",
+          "sha256": "b80da1484f0acef5e052e2d93e9f393a1d02b47ccce6d9a162c8c82a5c37f837"
+        },
+        {
+          "path": "patches/rt64/0011-dkrr-configurable-mip-lod-bias.patch",
+          "purpose": "Port DKR-R's live mip LOD bias path through RT64 raster parameters and texture sampling without rebuilding samplers.",
+          "sha256": "e581c4bad7438b17144d5eefd9da86f4458d6e6f8da2afd82b0cdc4701de4278"
+        },
+        {
+          "path": "patches/rt64/0012-rocket-world-hud-graphics-controls.patch",
+          "purpose": "Add Rocket-R renderer-owned fog-distance, decal z-fighting tolerance, and presentation-only HUD aspect/scale/safe-area controls.",
+          "sha256": "0cbf91c65617d863bb844cbd72d65c46cafd56fb84c18c4a3adfd51348528ed9"
+        },
+        {
+          "path": "patches/rt64/0013-rocket-vi-postprocess-and-presentation-stats.patch",
+          "purpose": "Add Rocket-R final-VI clean filtering, debanding, scanline/CRT post-processing and monotonic presentation telemetry.",
+          "sha256": "6aafc93b71a71c0ea84794d260a6392f9d1b5cd6845332b70d8770c67b2aedd5"
+        },
+        {
+          "path": "patches/rt64/0014-rocket-custom-vi-shader.patch",
+          "purpose": "Add optional precompiled custom final-VI pixel shaders using RT64's existing fullscreen vertex shader, descriptor contract and backend-specific DXIL/SPIR-V binaries.",
+          "sha256": "ce763904b126c054710ddbd0dd8e55d23a00610703bafc0c8f1df53bae42126c"
         }
       ]
     }

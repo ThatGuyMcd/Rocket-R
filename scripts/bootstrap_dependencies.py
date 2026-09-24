@@ -205,6 +205,17 @@ def apply_patches(root: Path) -> None:
                 f"Applying {relative}",
             )
             print(f"[OK] {dependency['name']}: {relative}", flush=True)
+            # ROCKET_V94_VI_TRANSFORM
+            if (str(dependency.get("name")) == "RT64" and
+                    patch_path.name == "0013-rocket-vi-postprocess-and-presentation-stats.patch"):
+                vi_transform = root / "scripts" / "apply_rt64_vi_graphics_v94.py"
+                if not vi_transform.is_file():
+                    raise RuntimeError(f"Missing Rocket-R VI shader transformer: {vi_transform}")
+                run_checked(
+                    [sys.executable, str(vi_transform), "--repo", str(repo)],
+                    root,
+                    "Applying Rocket-R deterministic VI shader transformation",
+                )
 
 
 def main() -> int:

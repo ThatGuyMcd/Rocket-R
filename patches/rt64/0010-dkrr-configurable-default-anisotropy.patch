@@ -1,0 +1,55 @@
+diff --git a/src/render/rt64_shader_library.h b/src/render/rt64_shader_library.h
+--- a/src/render/rt64_shader_library.h
++++ b/src/render/rt64_shader_library.h
+@@ -8,5 +8,8 @@
+ 
+ namespace RT64 {
++    void setDefaultSamplerAnisotropy(uint32_t level);
++    uint32_t getDefaultSamplerAnisotropy();
++
+     struct ShaderRecord {
+         std::unique_ptr<RenderPipeline> pipeline;
+         std::unique_ptr<RenderPipelineLayout> pipelineLayout;
+diff --git a/src/render/rt64_shader_library.cpp b/src/render/rt64_shader_library.cpp
+--- a/src/render/rt64_shader_library.cpp
++++ b/src/render/rt64_shader_library.cpp
+@@ -5,5 +5,8 @@
+ #include "rt64_shader_library.h"
+ 
++#include <algorithm>
++#include <atomic>
++
+ #include "common/rt64_common.h"
+ #include "shared/rt64_render_target_copy.h"
+ #include "shared/rt64_rsp_vertex_test_z.h"
+@@ -176,6 +179,19 @@
+ namespace RT64 {
++    namespace {
++        std::atomic<uint32_t> gDefaultSamplerAnisotropy{16U};
++    }
++
++    void setDefaultSamplerAnisotropy(uint32_t level) {
++        gDefaultSamplerAnisotropy.store(std::clamp(level, 1U, 16U),
++                                         std::memory_order_release);
++    }
++
++    uint32_t getDefaultSamplerAnisotropy() {
++        return gDefaultSamplerAnisotropy.load(std::memory_order_acquire);
++    }
++
+     // ShaderLibrary
+ 
+     ShaderLibrary::ShaderLibrary(bool usesHDR, bool usesHardwareResolve) {
+         this->usesHDR = usesHDR;
+         this->usesHardwareResolve = usesHardwareResolve;
+@@ -198,7 +214,9 @@
+         
+         auto fillSamplerSet = [&](SamplerSet &set, RenderFilter filter, bool anisotropyEnabled) {
+             RenderSamplerDesc samplerDesc;
+-            samplerDesc.anisotropyEnabled = anisotropyEnabled;
++            const uint32_t anisotropy = getDefaultSamplerAnisotropy();
++            samplerDesc.anisotropyEnabled = anisotropyEnabled && (anisotropy > 1U);
++            samplerDesc.maxAnisotropy = anisotropy;
+             samplerDesc.minFilter = filter;
+             samplerDesc.magFilter = filter;
+             samplerDesc.addressW = RenderTextureAddressMode::CLAMP;

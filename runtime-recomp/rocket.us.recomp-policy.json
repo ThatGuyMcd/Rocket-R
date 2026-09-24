@@ -125,10 +125,40 @@
   "manualFunctions": [],
   "functionHooks": [
     {
+      "function": "func_8003ACD4",
+      "beforeVram": "0x8003ACD4",
+      "text": "extern void rocket_graphics_camera_begin(uint8_t*, recomp_context*); rocket_graphics_camera_begin(rdram, ctx);",
+      "reason": "Apply project-owned FOV, cutscene-preservation, far-clip extension and conservative camera-shake attenuation immediately before Rocket builds the projection/view matrices. Temporary guest camera values are restored as soon as the first object frustum test confirms the graphics task has consumed them, and otherwise on the next camera build."
+    },
+    {
       "function": "frustum_test",
       "beforeVram": "0x8003C764",
-      "text": "extern void rocket_widescreen_frustum_begin(uint8_t*, recomp_context*); rocket_widescreen_frustum_begin(rdram, ctx);",
-      "reason": "Expand-to-window widens RT64's projection after Rocket has already performed its CPU object-frustum test. Widen only the guest camera's two horizontal side planes immediately before the retail frustum_test body so objects that are genuinely visible outside the authored 4:3 view are retained, while Original 4:3 and render-distance logic remain unchanged."
+      "text": "extern void rocket_graphics_frustum_begin(uint8_t*, recomp_context*); extern void rocket_widescreen_frustum_begin(uint8_t*, recomp_context*); rocket_graphics_frustum_begin(rdram, ctx); rocket_widescreen_frustum_begin(rdram, ctx);",
+      "reason": "Apply Rocket-R world-detail render-distance policy, then widen only the two horizontal retail frustum planes to the selected output aspect. Both operations happen at frustum_test entry and fail closed for Original 4:3."
+    },
+    {
+      "function": "update_gfx_context",
+      "beforeVram": "0x80046D20",
+      "text": "extern void rocket_presentation_frame_begin(uint8_t*, recomp_context*); rocket_presentation_frame_begin(rdram, ctx);",
+      "reason": "Begin Rocket's semantic presentation capture when the newly selected GfxTask becomes the active graphics context. This is before RenderEntry construction and before any later depth sorting can destroy owner order."
+    },
+    {
+      "function": "add_render_entry",
+      "beforeVram": "0x8008B24C",
+      "text": "extern void rocket_presentation_render_entry(uint8_t*, recomp_context*); rocket_presentation_render_entry(rdram, ctx);",
+      "reason": "Capture each unsorted RenderEntry's nested display list, matrix pair, callsite, lifetime track and world position before Rocket sorts opaque/translucent entries by depth. This is Rocket's equivalent of DKR-R's render_object semantic owner hook."
+    },
+    {
+      "function": "schedule_gfx_task",
+      "beforeVram": "0x800473F0",
+      "text": "extern void rocket_presentation_task_submitted(uint8_t*, recomp_context*); rocket_presentation_task_submitted(rdram, ctx);",
+      "reason": "Freeze the completed frame's semantic matrix sidecar at Rocket's graphics-task submission boundary and bind it to the task display-list root, matching DKR-R's FIFO task-owned identity architecture."
+    },
+    {
+      "function": "func_8001ECEC",
+      "beforeVram": "0x8001F084",
+      "text": "extern void rocket_presentation_model_entry_owner(uint8_t*, recomp_context*); rocket_presentation_model_entry_owner(rdram, ctx);",
+      "reason": "Capture the actual GameObject/submodel owner immediately before its add_render_entry call so visible model interpolation uses durable authored ownership instead of positional RenderEntry guessing."
     }
   ],
   "instructionPatches": [],

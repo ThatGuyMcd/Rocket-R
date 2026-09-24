@@ -1,5 +1,6 @@
 #include "platform.hpp"
 #include "runtime_ui.hpp"
+#include "runtime_input.hpp"
 #include "widescreen_culling.hpp"
 
 #define SDL_MAIN_HANDLED
@@ -20,6 +21,7 @@
 #include <deque>
 #include <mutex>
 #include <vector>
+#include <utility>
 
 namespace {
 
@@ -30,6 +32,8 @@ std::atomic<int> g_android_display_rate{60};
 #endif
 SDL_GameController* g_controller = nullptr;
 std::atomic<bool> g_controller_connected{false};
+std::string g_preferred_controller_key;
+std::string g_active_controller_key;
 std::mutex g_input_mutex;
 std::uint16_t g_buttons = 0;
 float g_stick_x = 0.0F;
@@ -37,6 +41,7 @@ float g_stick_y = 0.0F;
 std::atomic<bool> g_rumble_requested{false};
 std::atomic<bool> g_rumble_dirty{false};
 std::atomic<bool> g_rumble_enabled{true};
+std::atomic<float> g_rumble_strength{1.0F};
 
 SDL_AudioDeviceID g_audio_device = 0;
 std::mutex g_audio_mutex;
@@ -58,28 +63,40 @@ std::vector<std::int16_t> g_audio_swap;
 constexpr std::uint32_t AI_STATUS_FIFO_FULL = 0x80000000U;
 constexpr std::uint32_t AI_STATUS_DMA_BUSY = 0x40000000U;
 
-constexpr std::uint16_t N64_A = 0x8000;
-constexpr std::uint16_t N64_B = 0x4000;
-constexpr std::uint16_t N64_Z = 0x2000;
-constexpr std::uint16_t N64_START = 0x1000;
-constexpr std::uint16_t N64_DU = 0x0800;
-constexpr std::uint16_t N64_DD = 0x0400;
-constexpr std::uint16_t N64_DL = 0x0200;
-constexpr std::uint16_t N64_DR = 0x0100;
-constexpr std::uint16_t N64_L = 0x0020;
-constexpr std::uint16_t N64_R = 0x0010;
-constexpr std::uint16_t N64_CU = 0x0008;
-constexpr std::uint16_t N64_CD = 0x0004;
-constexpr std::uint16_t N64_CL = 0x0002;
-constexpr std::uint16_t N64_CR = 0x0001;
+struct ControllerDeviceEntry {
+    int device_index = -1;
+    std::string key;
+    std::string name;
+};
 
-float normalize_axis(Sint16 value, Sint16 deadzone = 7000) {
-    const int v = static_cast<int>(value);
-    const int magnitude = std::abs(v);
-    if (magnitude <= deadzone) return 0.0F;
-    const float scaled = static_cast<float>(magnitude - deadzone) /
-                         static_cast<float>(32767 - deadzone);
-    return std::copysign(std::min(scaled, 1.0F), static_cast<float>(v));
+std::string GuidString(SDL_JoystickGUID guid) {
+    char text[33]{};
+    SDL_JoystickGetGUIDString(guid, text, static_cast<int>(sizeof(text)));
+    return text;
+}
+
+std::vector<ControllerDeviceEntry> EnumerateControllers() {
+    std::vector<ControllerDeviceEntry> result;
+    std::vector<std::pair<std::string, int>> occurrences;
+    for (int i = 0; i < SDL_NumJoysticks(); ++i) {
+        if (!SDL_IsGameController(i)) continue;
+        const std::string guid = GuidString(SDL_JoystickGetDeviceGUID(i));
+        int ordinal = 0;
+        auto it = std::find_if(occurrences.begin(), occurrences.end(),
+            [&](const auto& value) { return value.first == guid; });
+        if (it == occurrences.end()) {
+            occurrences.emplace_back(guid, 1);
+        } else {
+            ordinal = it->second;
+            ++it->second;
+        }
+        const char* raw_name = SDL_GameControllerNameForIndex(i);
+        std::string name = raw_name != nullptr && *raw_name != '\0'
+            ? raw_name : "SDL gamepad";
+        if (ordinal > 0) name += " #" + std::to_string(ordinal + 1);
+        result.push_back({i, guid + "#" + std::to_string(ordinal), std::move(name)});
+    }
+    return result;
 }
 
 void close_controller() {
@@ -87,22 +104,30 @@ void close_controller() {
         SDL_GameControllerClose(g_controller);
         g_controller = nullptr;
     }
+    g_active_controller_key.clear();
     g_controller_connected.store(false, std::memory_order_release);
 }
 
 void open_first_controller() {
-    if (g_controller != nullptr && SDL_GameControllerGetAttached(g_controller)) {
+    if (g_controller != nullptr && SDL_GameControllerGetAttached(g_controller) &&
+        (g_preferred_controller_key.empty() ||
+         g_active_controller_key == g_preferred_controller_key)) {
         g_controller_connected.store(true, std::memory_order_release);
         return;
     }
     close_controller();
-    for (int i = 0; i < SDL_NumJoysticks(); ++i) {
-        if (!SDL_IsGameController(i)) continue;
-        g_controller = SDL_GameControllerOpen(i);
+    const auto devices = EnumerateControllers();
+    for (const auto& device : devices) {
+        if (!g_preferred_controller_key.empty() &&
+            device.key != g_preferred_controller_key) {
+            continue;
+        }
+        g_controller = SDL_GameControllerOpen(device.device_index);
         if (g_controller != nullptr) {
+            g_active_controller_key = device.key;
             g_controller_connected.store(true, std::memory_order_release);
-            std::fprintf(stderr, "[input] controller: %s\n",
-                         SDL_GameControllerName(g_controller));
+            std::fprintf(stderr, "[input] controller: %s (%s)\n",
+                         device.name.c_str(), device.key.c_str());
             break;
         }
     }
@@ -235,69 +260,15 @@ void apply_rumble_request() {
     if (g_controller == nullptr || !SDL_GameControllerGetAttached(g_controller)) return;
     const bool enabled = g_rumble_enabled.load(std::memory_order_acquire) &&
                          g_rumble_requested.load(std::memory_order_acquire);
-    SDL_GameControllerRumble(g_controller, enabled ? 0xFFFF : 0,
-                             enabled ? 0xFFFF : 0, enabled ? 250 : 0);
+    const float strength = std::clamp(
+        g_rumble_strength.load(std::memory_order_acquire), 0.0F, 1.0F);
+    const Uint16 magnitude = enabled
+        ? static_cast<Uint16>(std::lround(strength * 65535.0F)) : 0;
+    SDL_GameControllerRumble(g_controller, magnitude, magnitude,
+                             enabled ? 250 : 0);
 }
 
-void keyboard_input(std::uint16_t& buttons, float& x, float& y) {
-    const Uint8* keys = SDL_GetKeyboardState(nullptr);
-    if (keys == nullptr) return;
-    if (keys[SDL_SCANCODE_X] || keys[SDL_SCANCODE_SPACE]) buttons |= N64_A;
-    if (keys[SDL_SCANCODE_Z] || keys[SDL_SCANCODE_LCTRL]) buttons |= N64_B;
-    if (keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT]) buttons |= N64_Z;
-    if (keys[SDL_SCANCODE_RETURN]) buttons |= N64_START;
-    if (keys[SDL_SCANCODE_UP]) buttons |= N64_DU;
-    if (keys[SDL_SCANCODE_DOWN]) buttons |= N64_DD;
-    if (keys[SDL_SCANCODE_LEFT]) buttons |= N64_DL;
-    if (keys[SDL_SCANCODE_RIGHT]) buttons |= N64_DR;
-    if (keys[SDL_SCANCODE_Q]) buttons |= N64_L;
-    if (keys[SDL_SCANCODE_E]) buttons |= N64_R;
-    if (keys[SDL_SCANCODE_I]) buttons |= N64_CU;
-    if (keys[SDL_SCANCODE_K]) buttons |= N64_CD;
-    if (keys[SDL_SCANCODE_J]) buttons |= N64_CL;
-    if (keys[SDL_SCANCODE_L]) buttons |= N64_CR;
 
-    x = (keys[SDL_SCANCODE_D] ? 1.0F : 0.0F) - (keys[SDL_SCANCODE_A] ? 1.0F : 0.0F);
-    y = (keys[SDL_SCANCODE_W] ? 1.0F : 0.0F) - (keys[SDL_SCANCODE_S] ? 1.0F : 0.0F);
-    if (x != 0.0F && y != 0.0F) {
-        constexpr float kDiagonal = 0.70710678F;
-        x *= kDiagonal;
-        y *= kDiagonal;
-    }
-}
-
-void controller_input(SDL_GameController* controller, std::uint16_t& buttons,
-                      float& x, float& y) {
-    if (controller == nullptr || !SDL_GameControllerGetAttached(controller)) return;
-    auto pressed = [controller](SDL_GameControllerButton button) {
-        return SDL_GameControllerGetButton(controller, button) != 0;
-    };
-    if (pressed(SDL_CONTROLLER_BUTTON_A)) buttons |= N64_A;
-    if (pressed(SDL_CONTROLLER_BUTTON_B)) buttons |= N64_B;
-    if (pressed(SDL_CONTROLLER_BUTTON_START)) buttons |= N64_START;
-    if (pressed(SDL_CONTROLLER_BUTTON_DPAD_UP)) buttons |= N64_DU;
-    if (pressed(SDL_CONTROLLER_BUTTON_DPAD_DOWN)) buttons |= N64_DD;
-    if (pressed(SDL_CONTROLLER_BUTTON_DPAD_LEFT)) buttons |= N64_DL;
-    if (pressed(SDL_CONTROLLER_BUTTON_DPAD_RIGHT)) buttons |= N64_DR;
-    if (pressed(SDL_CONTROLLER_BUTTON_LEFTSHOULDER)) buttons |= N64_L;
-    if (pressed(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)) buttons |= N64_R;
-    if (SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 12000) buttons |= N64_Z;
-
-    if (pressed(SDL_CONTROLLER_BUTTON_Y)) buttons |= N64_CU;
-    if (pressed(SDL_CONTROLLER_BUTTON_X)) buttons |= N64_CL;
-    if (pressed(SDL_CONTROLLER_BUTTON_RIGHTSTICK)) buttons |= N64_CD;
-    const float rx = normalize_axis(SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTX), 12000);
-    const float ry = normalize_axis(SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTY), 12000);
-    if (rx < -0.45F) buttons |= N64_CL;
-    if (rx > 0.45F) buttons |= N64_CR;
-    if (ry < -0.45F) buttons |= N64_CU;
-    if (ry > 0.45F) buttons |= N64_CD;
-
-    const float pad_x = normalize_axis(SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTX));
-    const float pad_y = -normalize_axis(SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTY));
-    if (std::abs(pad_x) > std::abs(x)) x = pad_x;
-    if (std::abs(pad_y) > std::abs(y)) y = pad_y;
-}
 
 } // namespace
 
@@ -435,16 +406,20 @@ int rocket::platform::android_display_refresh_rate() {
 #endif
 
 void rocket::platform::sample_input() {
-    // This function must only run on the SDL/window owner thread.
-    std::uint16_t buttons = 0;
-    float x = 0.0F;
-    float y = 0.0F;
-    keyboard_input(buttons, x, y);
-    controller_input(g_controller, buttons, x, y);
+    // This function must only run on the SDL/window owner thread. Gameplay
+    // sees a protected snapshot; rebinding and UI capture never run on the
+    // emulated game thread.
+    const bool focused = g_window == nullptr ||
+        (SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS) != 0;
+    const bool include_keyboard = focused;
+    const bool include_controller = focused || rocket::input::background_input_enabled();
+    const auto state = rocket::input::poll(
+        g_controller, include_keyboard, include_controller,
+        rocket::ui::overlay_visible(), !rocket::ui::input_capture_active());
     std::lock_guard lock(g_input_mutex);
-    g_buttons = buttons;
-    g_stick_x = std::clamp(x, -1.0F, 1.0F);
-    g_stick_y = std::clamp(y, -1.0F, 1.0F);
+    g_buttons = state.buttons;
+    g_stick_x = state.stick_x;
+    g_stick_y = state.stick_y;
 }
 
 void rocket::platform::pump_runtime_events() {
@@ -460,9 +435,8 @@ void rocket::platform::pump_runtime_events() {
             open_first_controller();
         }
         const bool fullscreen_shortcut = event.type == SDL_KEYDOWN && event.key.repeat == 0 &&
-            (event.key.keysym.scancode == SDL_SCANCODE_F11 ||
-             (event.key.keysym.scancode == SDL_SCANCODE_RETURN &&
-              (event.key.keysym.mod & KMOD_ALT) != 0));
+            event.key.keysym.scancode == SDL_SCANCODE_RETURN &&
+            (event.key.keysym.mod & KMOD_ALT) != 0;
         if (fullscreen_shortcut) {
             toggle_fullscreen();
             continue;
@@ -472,6 +446,14 @@ void rocket::platform::pump_runtime_events() {
         }
     }
     sample_input();
+    if (rocket::input::consume_shortcut_request(
+            rocket::input::ShortcutAction::ToggleOverlay)) {
+        rocket::ui::toggle_overlay();
+    }
+    if (rocket::input::consume_shortcut_request(
+            rocket::input::ShortcutAction::ToggleFullscreen)) {
+        toggle_fullscreen();
+    }
     rocket::widescreen::update_window_aspect(g_window);
     apply_rumble_request();
 }
@@ -488,6 +470,73 @@ void rocket::platform::toggle_fullscreen() {
         ? ultramodern::renderer::WindowMode::Windowed
         : ultramodern::renderer::WindowMode::Fullscreen;
     ultramodern::renderer::set_graphics_config(graphics);
+}
+
+bool rocket::platform::controller_connected() {
+    return g_controller_connected.load(std::memory_order_acquire);
+}
+
+std::string rocket::platform::controller_name() {
+    if (g_controller == nullptr || !SDL_GameControllerGetAttached(g_controller)) {
+        if (!g_preferred_controller_key.empty()) return "Selected gamepad is disconnected";
+        return "No gamepad connected";
+    }
+    const char* name = SDL_GameControllerName(g_controller);
+    return name != nullptr && *name != '\0' ? name : "SDL gamepad";
+}
+
+std::vector<rocket::platform::ControllerChoice> rocket::platform::controller_choices() {
+    std::vector<ControllerChoice> result;
+    for (const auto& device : EnumerateControllers()) {
+        result.push_back({device.key, device.name});
+    }
+    return result;
+}
+
+std::string rocket::platform::preferred_controller_key() {
+    return g_preferred_controller_key;
+}
+
+void rocket::platform::set_preferred_controller_key(const std::string& key) {
+    if (g_preferred_controller_key == key) return;
+    g_preferred_controller_key = key;
+    open_first_controller();
+}
+
+void rocket::platform::rescan_controller() {
+    if (g_controller != nullptr && !SDL_GameControllerGetAttached(g_controller)) {
+        close_controller();
+    }
+    open_first_controller();
+}
+
+bool rocket::platform::rumble_enabled() {
+    return g_rumble_enabled.load(std::memory_order_acquire);
+}
+
+void rocket::platform::set_rumble_enabled(bool enabled) {
+    g_rumble_enabled.store(enabled, std::memory_order_release);
+    g_rumble_dirty.store(true, std::memory_order_release);
+}
+
+float rocket::platform::rumble_strength() {
+    return g_rumble_strength.load(std::memory_order_acquire);
+}
+
+void rocket::platform::set_rumble_strength(float strength) {
+    g_rumble_strength.store(std::clamp(strength, 0.0F, 1.0F),
+                            std::memory_order_release);
+    g_rumble_dirty.store(true, std::memory_order_release);
+}
+
+void rocket::platform::test_rumble() {
+    if (g_controller == nullptr || !SDL_GameControllerGetAttached(g_controller) ||
+        !g_rumble_enabled.load(std::memory_order_acquire)) return;
+    const float strength = std::clamp(
+        g_rumble_strength.load(std::memory_order_acquire), 0.0F, 1.0F);
+    const Uint16 magnitude = static_cast<Uint16>(
+        std::lround(strength * 65535.0F));
+    SDL_GameControllerRumble(g_controller, magnitude, magnitude, 350);
 }
 
 void rocket::platform::queue_samples(std::int16_t* samples, std::size_t sample_count) {

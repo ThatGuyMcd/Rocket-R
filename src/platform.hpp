@@ -4,6 +4,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 union SDL_Event;
 struct SDL_Window;
@@ -21,6 +23,23 @@ int android_display_refresh_rate();
 void pump_runtime_events();
 void sample_input();
 void toggle_fullscreen();
+
+struct ControllerChoice {
+    std::string key;
+    std::string name;
+};
+
+bool controller_connected();
+std::string controller_name();
+std::vector<ControllerChoice> controller_choices();
+std::string preferred_controller_key();
+void set_preferred_controller_key(const std::string& key);
+void rescan_controller();
+bool rumble_enabled();
+void set_rumble_enabled(bool enabled);
+float rumble_strength();
+void set_rumble_strength(float strength);
+void test_rumble();
 
 void queue_samples(std::int16_t* samples, std::size_t sample_count);
 std::size_t frames_remaining();

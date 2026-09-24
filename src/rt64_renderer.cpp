@@ -1,8 +1,10 @@
 #include "rt64_renderer.hpp"
 
 #include "game_registration.hpp"
+#include "graphics_enhancements.hpp"
 #include "platform.hpp"
 #include "renderer_snapshot.hpp"
+#include "presentation_identity.hpp"
 #include "runtime_ui.hpp"
 #include "vi_presentation_policy.hpp"
 
@@ -12,10 +14,12 @@
 #endif
 
 #include "common/rt64_enhancement_configuration.h"
+#include "common/rt64_rocket_configuration.h"
 #include "common/rt64_user_configuration.h"
 #include "hle/rt64_application.h"
 #include "hle/rt64_present_queue.h"
 #include "hle/rt64_state.h"
+#include "render/rt64_shader_library.h"
 #include "ultramodern/config.hpp"
 #include "ultramodern/ultramodern.hpp"
 
@@ -24,7 +28,9 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
+#include <cmath>
 #include <utility>
 
 namespace {
@@ -151,6 +157,67 @@ RT64::UserConfiguration::Antialiasing to_rt64(ultramodern::renderer::Antialiasin
     }
 }
 
+RT64::UserConfiguration::Filtering to_rt64(rocket::graphics::TextureFiltering value) {
+    using R = rocket::graphics::TextureFiltering;
+    using T = RT64::UserConfiguration::Filtering;
+    switch (value) {
+        case R::Nearest: return T::Nearest;
+        case R::AntiAliasedPixelScaling: return T::AntiAliasedPixelScaling;
+        default: return T::Linear;
+    }
+}
+
+RT64::UserConfiguration::Upscale2D to_rt64(rocket::graphics::TextureScaling2D value) {
+    using R = rocket::graphics::TextureScaling2D;
+    using T = RT64::UserConfiguration::Upscale2D;
+    switch (value) {
+        case R::Original: return T::Original;
+        case R::All: return T::All;
+        default: return T::ScaledOnly;
+    }
+}
+
+RT64::UserConfiguration::DisplayBuffering to_rt64(rocket::graphics::DisplayBuffering value) {
+    return value == rocket::graphics::DisplayBuffering::Double
+        ? RT64::UserConfiguration::DisplayBuffering::Double
+        : RT64::UserConfiguration::DisplayBuffering::Triple;
+}
+
+RT64::UserConfiguration::HardwareResolve to_rt64(rocket::graphics::HardwareResolve value) {
+    using R = rocket::graphics::HardwareResolve;
+    using T = RT64::UserConfiguration::HardwareResolve;
+    switch (value) {
+        case R::Off: return T::Disabled;
+        case R::On: return T::Enabled;
+        default: return T::Automatic;
+    }
+}
+
+float z_fight_scale(rocket::graphics::ZFightingMode value) {
+    using Z = rocket::graphics::ZFightingMode;
+    switch (value) {
+        case Z::Consistent: return 1.75F;
+        case Z::Strong: return 3.0F;
+        default: return 1.0F;
+    }
+}
+
+void publish_rt64_rocket_controls(const rocket::graphics::Settings& settings) {
+    // Retired Image controls are pinned to stable/neutral values instead of
+    // being kept as hidden configuration switches.
+    RT64::setRocketFogDistanceMultiplier(1.0F);
+    RT64::setRocketZFightToleranceScale(1.0F);
+    RT64::setRocketViFilterMode(0U);
+    RT64::setRocketDebandStrength(0.0F);
+    RT64::setRocketPostProcess(
+        static_cast<std::uint32_t>(settings.post_process),
+        settings.post_process_strength / 100.0F);
+
+    const bool hud_widescreen =
+        rocket::graphics::widescreen_active(4.0F / 3.0F);
+    RT64::setRocketHudConfiguration(hud_widescreen ? 1U : 0U, 1.0F, 0.0F);
+}
+
 ultramodern::renderer::SetupResult map_setup(RT64::Application::SetupResult value) {
     using UM = ultramodern::renderer::SetupResult;
     using RT = RT64::Application::SetupResult;
@@ -214,7 +281,6 @@ void apply_config(RT64::Application& app,
             app.userConfig.refreshRateTarget = requested;
         }
     }
-    app.userConfig.displayBuffering = RT64::UserConfiguration::DisplayBuffering::Triple;
     switch (config.hpfb_option) {
         case ultramodern::renderer::HighPrecisionFramebuffer::On:
             app.userConfig.internalColorFormat = RT64::UserConfiguration::InternalColorFormat::High;
@@ -243,7 +309,7 @@ rocket::renderer::RT64Context::RT64Context(
     RT64::Application::Core core{};
 #if defined(_WIN32)
     core.window = window_handle.window;
-#elif defined(__linux__) && !defined(__ANDROID__)
+#elif defined(__linux__)
     core.window = window_handle;
 #elif defined(__ANDROID__)
     core.window = static_cast<ANativeWindow*>(rocket::platform::android_native_window());
@@ -291,17 +357,29 @@ rocket::renderer::RT64Context::RT64Context(
     RT64::ApplicationConfiguration app_config{};
     app_config.appId = "rocket-r";
     app_config.useConfigurationFile = false;
-#if defined(__ANDROID__)
-    // Android already supplies an app-private --config directory.
-    // Never let RT64 probe the desktop Linux home (/data on Android).
-    app_config.detectDataPath = false;
-#else
     app_config.detectDataPath = true;
-#endif
 
     const auto create_application = [&]() {
+        const auto extra = rocket::graphics::settings();
+        // Sampler objects and the optional custom VI shader are created during
+        // RT64 setup, so publish those restart-owned choices before constructing
+        // the renderer. Live-safe controls are republished at frame boundaries.
+        RT64::setDefaultSamplerAnisotropy(
+            static_cast<std::uint32_t>(extra.anisotropy));
+        RT64::setDefaultSamplerMipLODBias(extra.mip_lod_bias);
+        RT64::setRocketCustomShaderBasePath(
+            rocket::graphics::custom_shader_base_path());
+        publish_rt64_rocket_controls(extra);
+
         application_ = std::make_unique<RT64::Application>(core, app_config);
         apply_config(*application_, graphics);
+        application_->userConfig.filtering = to_rt64(extra.texture_filtering);
+        application_->userConfig.threePointFiltering = true;
+        application_->userConfig.upscale2D = RT64::UserConfiguration::Upscale2D::ScaledOnly;
+        application_->userConfig.displayBuffering = to_rt64(extra.display_buffering);
+        application_->userConfig.hardwareResolve = to_rt64(extra.hardware_resolve);
+        application_->userConfig.aspectTarget =
+            rocket::graphics::selected_aspect(4.0F / 3.0F);
         application_->userConfig.developerMode = developer_mode;
         application_->enhancementConfig.f3dex.forceBranch = true;
         application_->enhancementConfig.presentation.removeBlackBorders = true;
@@ -339,6 +417,20 @@ rocket::renderer::RT64Context::RT64Context(
 
     application_->setFullScreen(
         graphics.wm_option == ultramodern::renderer::WindowMode::Fullscreen);
+    const auto startup_extra = rocket::graphics::settings();
+    startup_anisotropy_ = startup_extra.anisotropy;
+    startup_buffering_ = startup_extra.display_buffering;
+    startup_custom_shader_ = startup_extra.custom_shader;
+    if (application_->swapChain != nullptr) {
+        application_->swapChain->setVsyncEnabled(startup_extra.vsync);
+    }
+    graphics_revision_ = 0U;
+    apply_extra_graphics(true);
+    performance_window_started_ = std::chrono::steady_clock::now();
+    performance_present_base_ = application_->sharedQueueResources != nullptr
+        ? application_->sharedQueueResources->totalPresentations.load(
+              std::memory_order_relaxed)
+        : 0U;
     std::fprintf(stderr,
                  "[rt64] renderer ready; game start deferred until first safe VI present\n");
     std::fprintf(stderr,
@@ -369,7 +461,14 @@ bool rocket::renderer::RT64Context::update_config(
         old_config.ar_option != new_config.ar_option ||
         old_config.ds_option != new_config.ds_option;
     const bool aa_change = old_config.msaa_option != new_config.msaa_option;
+    const auto active_color_format = application_->userConfig.internalColorFormat;
     apply_config(*application_, new_config);
+    // RT64 allocates its internal color format during setup. Persist an in-game
+    // request for the next launch, but never publish a format that the live
+    // framebuffer resources do not actually use.
+    if (old_config.hpfb_option != new_config.hpfb_option) {
+        application_->userConfig.internalColorFormat = active_color_format;
+    }
     if (aa_change) application_->updateMultisampling();
     application_->updateUserConfig(framebuffer_change);
     if (old_config.rr_option != new_config.rr_option ||
@@ -384,6 +483,9 @@ bool rocket::renderer::RT64Context::update_config(
                          ? "original"
                          : "interpolated");
     }
+    // Re-apply Rocket-owned live settings after the generic config transaction
+    // so it cannot overwrite fixed aspect targets or renderer extension state.
+    apply_extra_graphics(true);
     return true;
 }
 
@@ -408,6 +510,11 @@ void rocket::renderer::RT64Context::send_dl(
     SnapshotScope snapshot(application_->core.RDRAM,
                            application_->state->RDRAM,
                            rdram_snapshot);
+    // Activate only the semantic sidecar frozen for this exact graphics
+    // task. This mirrors DKR-R: physical addresses are task-local lookup
+    // keys and never become long-lived interpolation identities.
+    rocket::presentation::TaskIdentityScope identity_scope(
+        rdram_snapshot, static_cast<std::uint32_t>(task->t.data_ptr));
     // The scheduler renders every two 60 Hz retraces. Pin RT64's source
     // cadence to that authored 30 Hz contract whenever interpolation is
     // enabled so a delayed workload cannot be mistaken for 20/15 Hz and cause
@@ -417,6 +524,14 @@ void rocket::renderer::RT64Context::send_dl(
         RT64::UserConfiguration::RefreshRate::Original) {
         application_->state->setRefreshRate(kAuthoredPresentationRate);
     }
+
+    // Rocket enables 4x4 Bayer colour dithering as part of its normal RDP
+    // frame setup. Let the launcher preserve that retail look or disable it
+    // globally for cleaner gradients (most noticeably the skyboxes). RT64
+    // applies this at decoded draw-state level so later display-list state
+    // changes cannot silently re-enable dithering while the option is off.
+    application_->state->setN64DitheringEnabled(
+        rocket::ui::n64_dithering_enabled());
 
     application_->state->rsp->reset();
     application_->interpreter->loadUCodeGBI(task->t.ucode & 0x03FFFFFF,
@@ -429,6 +544,7 @@ void rocket::renderer::RT64Context::send_dl(
 void rocket::renderer::RT64Context::update_screen() {
     std::scoped_lock presentation_lock(presentation_mutex_);
     if (!application_) return;
+    apply_extra_graphics(false);
     if (application_->sharedQueueResources != nullptr &&
         application_->userConfig.refreshRate !=
             RT64::UserConfiguration::RefreshRate::Original) {
@@ -457,7 +573,105 @@ void rocket::renderer::RT64Context::update_screen() {
         CanonicalViPresentationScope vi_scope(*application_);
         application_->updateScreen();
     }
+    update_performance_stats();
     rocket::ui::draw(*application_);
+}
+
+void rocket::renderer::RT64Context::apply_extra_graphics(bool force) {
+    if (!application_) return;
+
+    const std::uint64_t revision = rocket::graphics::revision();
+    const auto extra = rocket::graphics::settings();
+    if (!force && revision == graphics_revision_) {
+        return;
+    }
+
+    const auto old_user = application_->userConfig;
+    application_->userConfig.filtering = to_rt64(extra.texture_filtering);
+    application_->userConfig.threePointFiltering = true;
+    application_->userConfig.upscale2D = RT64::UserConfiguration::Upscale2D::ScaledOnly;
+    application_->userConfig.hardwareResolve = to_rt64(extra.hardware_resolve);
+
+    // Aspect framing never switches because of heuristic cutscene detection.
+    // The selected aspect remains authoritative for the entire presentation.
+    const auto config = ultramodern::renderer::get_graphics_config();
+    application_->userConfig.aspectRatio = to_rt64(config.ar_option);
+    application_->userConfig.aspectTarget =
+        rocket::graphics::selected_aspect(4.0F / 3.0F);
+
+    RT64::setDefaultSamplerMipLODBias(extra.mip_lod_bias);
+    publish_rt64_rocket_controls(extra);
+    if (application_->shaderLibrary != nullptr) {
+        // Preserve RT64's driver-specific Automatic decision. Only explicit
+        // On/Off choices override the setup-time compatibility result.
+        if (extra.hardware_resolve == rocket::graphics::HardwareResolve::On) {
+            application_->shaderLibrary->usesHardwareResolve = true;
+        } else if (extra.hardware_resolve ==
+                   rocket::graphics::HardwareResolve::Off) {
+            application_->shaderLibrary->usesHardwareResolve = false;
+        }
+    }
+    if (application_->swapChain != nullptr) {
+        application_->swapChain->setVsyncEnabled(extra.vsync);
+    }
+
+    const bool framebuffer_change =
+        old_user.aspectRatio != application_->userConfig.aspectRatio ||
+        std::fabs(old_user.aspectTarget - application_->userConfig.aspectTarget) > 0.0001 ||
+        old_user.upscale2D != application_->userConfig.upscale2D;
+    const bool user_change =
+        framebuffer_change ||
+        old_user.filtering != application_->userConfig.filtering ||
+        old_user.threePointFiltering != application_->userConfig.threePointFiltering ||
+        old_user.hardwareResolve != application_->userConfig.hardwareResolve;
+    if (user_change && application_->sharedQueueResources != nullptr) {
+        application_->updateUserConfig(framebuffer_change);
+    }
+
+    if (force || revision != graphics_revision_) {
+        if (extra.anisotropy != startup_anisotropy_ ||
+            extra.display_buffering != startup_buffering_ ||
+            extra.custom_shader != startup_custom_shader_) {
+            if (!restart_notice_logged_) {
+                std::fprintf(stderr,
+                    "[rt64][graphics] one or more sampler/buffering/custom-shader "
+                    "changes are queued for the next game start\n");
+                restart_notice_logged_ = true;
+            }
+        } else {
+            restart_notice_logged_ = false;
+        }
+    }
+
+    graphics_revision_ = revision;
+}
+
+void rocket::renderer::RT64Context::update_performance_stats() {
+    if (!application_ || application_->sharedQueueResources == nullptr) return;
+    const auto now = std::chrono::steady_clock::now();
+    const std::uint64_t total = application_->sharedQueueResources->
+        totalPresentations.load(std::memory_order_relaxed);
+    const auto elapsed = std::chrono::duration<double>(
+        now - performance_window_started_).count();
+    if (elapsed < 0.40) return;
+
+    const std::uint64_t delta = total >= performance_present_base_
+        ? total - performance_present_base_ : 0U;
+    const float fps = elapsed > 0.0
+        ? static_cast<float>(static_cast<double>(delta) / elapsed) : 0.0F;
+    rocket::graphics::PerformanceStats stats{};
+    stats.fps = fps;
+    stats.frame_ms = fps > 0.01F ? 1000.0F / fps : 0.0F;
+    stats.resolution_scale = get_resolution_scale();
+    stats.display_rate = g_detected_display_rate;
+    stats.target_rate = g_effective_presentation_rate;
+    stats.presents = total;
+    stats.interpolated_presents = application_->sharedQueueResources->
+        totalInterpolatedPresentations.load(std::memory_order_relaxed);
+    rocket::graphics::publish_performance(stats);
+
+    performance_window_started_ = now;
+    performance_present_base_ = total;
 }
 
 void rocket::renderer::RT64Context::shutdown() {
@@ -477,6 +691,10 @@ std::uint32_t rocket::renderer::RT64Context::get_display_framerate() const {
 
 float rocket::renderer::RT64Context::get_resolution_scale() const {
     if (!application_) return 1.0F;
+    if (application_->sharedQueueResources != nullptr) {
+        const float scale = application_->sharedQueueResources->resolutionScale.y;
+        if (std::isfinite(scale) && scale > 0.0F) return scale;
+    }
     if (application_->userConfig.resolution ==
         RT64::UserConfiguration::Resolution::Manual) {
         return static_cast<float>(application_->userConfig.resolutionMultiplier);

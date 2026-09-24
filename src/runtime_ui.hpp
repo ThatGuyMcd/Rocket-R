@@ -21,6 +21,8 @@ void draw(RT64::Application& application);
 bool handle_runtime_event(SDL_Event* event);
 void toggle_overlay();
 bool overlay_visible();
+bool input_capture_active();
+bool n64_dithering_enabled();
 void detach(RT64::Application& application);
 
 } // namespace rocket::ui

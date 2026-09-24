@@ -1,0 +1,74 @@
+diff --git a/src/shared/rt64_video_interface.h b/src/shared/rt64_video_interface.h
+--- a/src/shared/rt64_video_interface.h
++++ b/src/shared/rt64_video_interface.h
+@@ -12,6 +12,10 @@ namespace interop {
+         float2 videoResolution;
+         float2 textureResolution;
+         float gamma;
++        uint rocketViFilterMode;
++        float rocketDebandStrength;
++        uint rocketPostProcessMode;
++        float rocketPostProcessStrength;
+     };
+ #ifdef HLSL_CPU
+ };
+diff --git a/src/render/rt64_vi_renderer.cpp b/src/render/rt64_vi_renderer.cpp
+--- a/src/render/rt64_vi_renderer.cpp
++++ b/src/render/rt64_vi_renderer.cpp
+@@ -4,6 +4,7 @@
+ 
+ #include "rt64_vi_renderer.h"
+ 
++#include "common/rt64_rocket_configuration.h"
+ #include "shared/rt64_hlsl.h"
+ #include "shared/rt64_video_interface.h"
+ 
+@@ -30,7 +31,12 @@ namespace RT64 {
+     void VIRenderer::render(const RenderParams &p) {
+         const ShaderRecord *shader = nullptr;
+         const RenderSampler *sampler = nullptr;
+-        switch (p.filtering) {
++        UserConfiguration::Filtering effectiveFiltering = p.filtering;
++        if ((getRocketViFilterMode() == 1U) &&
++            (effectiveFiltering == UserConfiguration::Filtering::AntiAliasedPixelScaling)) {
++            effectiveFiltering = UserConfiguration::Filtering::Linear;
++        }
++        switch (effectiveFiltering) {
+         case UserConfiguration::Filtering::Nearest:
+             shader = &p.shaderLibrary->videoInterfaceNearest;
+             sampler = p.shaderLibrary->samplerLibrary.nearest.borderBorder.get();
+@@ -62,6 +68,10 @@ namespace RT64 {
+         pushConstants.videoResolution = computeHDSize(hlslpp::float2(p.vi->fbSize()), p.resolutionScale, p.downsamplingScale);
+         pushConstants.textureResolution = { float(p.textureWidth), float(p.textureHeight) };
+         pushConstants.gamma = p.vi->gamma();
++        pushConstants.rocketViFilterMode = getRocketViFilterMode();
++        pushConstants.rocketDebandStrength = getRocketDebandStrength();
++        pushConstants.rocketPostProcessMode = getRocketPostProcessMode();
++        pushConstants.rocketPostProcessStrength = getRocketPostProcessStrength();
+ 
+         p.commandList->setPipeline(shader->pipeline.get());
+         p.commandList->setGraphicsPipelineLayout(shader->pipelineLayout.get());
+diff --git a/src/hle/rt64_shared_queue_resources.h b/src/hle/rt64_shared_queue_resources.h
+--- a/src/hle/rt64_shared_queue_resources.h
++++ b/src/hle/rt64_shared_queue_resources.h
+@@ -55,6 +55,7 @@ namespace RT64 {
+         std::vector<std::unique_ptr<RenderTarget>> interpolatedColorTargets;
+         InterpolatedFrameCounters interpolatedFrames[2];
+         uint32_t interpolatedFramesIndex = 0;
++        std::atomic<uint64_t> totalPresentations{ 0 };
+         std::atomic<uint64_t> totalInterpolatedPresentations{ 0 };
+         std::mutex interpolatedMutex;
+         std::condition_variable interpolatedCondition;
+diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
+--- a/src/hle/rt64_present_queue.cpp
++++ b/src/hle/rt64_present_queue.cpp
+@@ -402,6 +402,9 @@ namespace RT64 {
+                 presentTimestamp = Timer::current();
+                 swapChainValid = ext.swapChain->present(swapChainIndex, &waitSemaphore, 1);
+                 presentProfiler.logAndRestart();
++                if (swapChainValid) {
++                    ext.sharedResources->totalPresentations.fetch_add(1, std::memory_order_relaxed);
++                }
+                 if (swapChainValid && (framesToPresent > 1) && ((i + 1) < framesToPresent)) {
+                     ext.sharedResources->totalInterpolatedPresentations.fetch_add(
+                         1, std::memory_order_relaxed);

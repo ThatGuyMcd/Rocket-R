@@ -1,0 +1,27 @@
+[
+  {
+    "path": "patches/rt64/0010-dkrr-configurable-default-anisotropy.patch",
+    "purpose": "Port DKR-R's proven configurable RT64 sampler anisotropy control so Rocket-R can select 1x-16x before sampler creation.",
+    "sha256": "b80da1484f0acef5e052e2d93e9f393a1d02b47ccce6d9a162c8c82a5c37f837"
+  },
+  {
+    "path": "patches/rt64/0011-dkrr-configurable-mip-lod-bias.patch",
+    "purpose": "Port DKR-R's live mip LOD bias path through RT64 raster parameters and texture sampling without rebuilding samplers.",
+    "sha256": "e581c4bad7438b17144d5eefd9da86f4458d6e6f8da2afd82b0cdc4701de4278"
+  },
+  {
+    "path": "patches/rt64/0012-rocket-world-hud-graphics-controls.patch",
+    "purpose": "Add Rocket-R renderer-owned fog-distance, decal z-fighting tolerance, and presentation-only HUD aspect/scale/safe-area controls.",
+    "sha256": "0cbf91c65617d863bb844cbd72d65c46cafd56fb84c18c4a3adfd51348528ed9"
+  },
+  {
+    "path": "patches/rt64/0013-rocket-vi-postprocess-and-presentation-stats.patch",
+    "purpose": "Add Rocket-R final-VI clean filtering, debanding, scanline/CRT post-processing and monotonic presentation telemetry.",
+    "sha256": "3f2d5da46a4bc36e0b3e9950bb87bf11c0583c0d76e593798d73060a351c2fe0"
+  },
+  {
+    "path": "patches/rt64/0014-rocket-custom-vi-shader.patch",
+    "purpose": "Add optional precompiled custom final-VI pixel shaders using RT64's existing fullscreen vertex shader, descriptor contract and backend-specific DXIL/SPIR-V binaries.",
+    "sha256": "ce763904b126c054710ddbd0dd8e55d23a00610703bafc0c8f1df53bae42126c"
+  }
+]

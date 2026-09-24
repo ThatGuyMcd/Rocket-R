@@ -1,0 +1,136 @@
+diff --git a/src/hle/rt64_rsp.cpp b/src/hle/rt64_rsp.cpp
+--- a/src/hle/rt64_rsp.cpp
++++ b/src/hle/rt64_rsp.cpp
+@@ -14,6 +14,20 @@
+ #include "rt64_interpreter.h"
+ #include "rt64_state.h"
+ 
++// Rocket-R's DKR-R-style presentation sidecar. The physical matrix address is
++// only a lookup key for the exact immutable task being decoded. It is never the
++// interpolation identity itself.
++struct RocketPresentationMatrixBinding {
++    uint32_t identity;
++    uint8_t interpolate_vertices;
++    uint8_t interpolate_texcoords;
++    uint8_t interpolate_tiles;
++    uint8_t reserved;
++};
++extern "C" bool rocket_presentation_matrix_binding(
++    uint32_t physical_matrix_address,
++    RocketPresentationMatrixBinding *out_binding);
++
+ //#define LOG_SPECIAL_MATRIX_OPERATIONS
+ 
+ namespace RT64 {
+@@ -627,9 +641,52 @@ namespace RT64 {
+ 
+         if (addWorldTransform) {
+             uint32_t physicalAddress = modelMatrixPhysicalAddressStack[modelMatrixStackSize - 1];
++            uint32_t groupIndex = extended.curModelMatrixIdGroupIndex;
++            RocketPresentationMatrixBinding semantic{};
++            if (rocket_presentation_matrix_binding(physicalAddress, &semantic)) {
++                TransformGroup group = workload.drawData.transformGroups[groupIndex];
++                group.matrixId = semantic.identity;
++                group.ordering = G_EX_ORDER_LINEAR;
++
++                // A successful Rocket sidecar lookup is authoritative. ID 0 is
++                // G_EX_ID_IGNORE and deliberately disables RT64's anonymous
++                // fallback matcher for an ambiguous/conflicting matrix.
++                const bool interpolateTransform =
++                    (semantic.identity != G_EX_ID_IGNORE) &&
++                    (semantic.identity != G_EX_ID_AUTO);
++
++                // Match DKR-R's stable matrix policy: do not decompose Rocket's
++                // arbitrary N64 matrices as rigid bodies. Interpolate only the
++                // components that are safe for an accepted semantic identity.
++                group.decompose = false;
++                group.positionInterpolation = interpolateTransform
++                    ? G_EX_COMPONENT_INTERPOLATE : G_EX_COMPONENT_SKIP;
++                group.rotationInterpolation = interpolateTransform
++                    ? G_EX_COMPONENT_INTERPOLATE : G_EX_COMPONENT_SKIP;
++                group.scaleInterpolation = G_EX_COMPONENT_SKIP;
++                group.skewInterpolation = G_EX_COMPONENT_SKIP;
++                group.perspectiveInterpolation = interpolateTransform
++                    ? G_EX_COMPONENT_INTERPOLATE : G_EX_COMPONENT_SKIP;
++                group.vertexInterpolation =
++                    interpolateTransform && semantic.interpolate_vertices
++                    ? G_EX_COMPONENT_INTERPOLATE : G_EX_COMPONENT_SKIP;
++                group.texcoordInterpolation =
++                    interpolateTransform && semantic.interpolate_texcoords
++                    ? G_EX_COMPONENT_AUTO : G_EX_COMPONENT_SKIP;
++                group.tileInterpolation =
++                    interpolateTransform && semantic.interpolate_tiles
++                    ? G_EX_COMPONENT_AUTO : G_EX_COMPONENT_SKIP;
++
++                // Rocket's render-entry owner already disambiguates these
++                // matrices. Generic look-at matching can only reintroduce an
++                // unrelated repeated-material candidate.
++                group.lookAtInterpolation = G_EX_COMPONENT_SKIP;
++                groupIndex = uint32_t(workload.drawData.transformGroups.size());
++                workload.drawData.transformGroups.emplace_back(group);
++            }
+             workload.physicalAddressTransformMap.emplace(physicalAddress, uint32_t(worldTransformGroups.size()));
+-            worldTransformGroups.emplace_back(extended.curModelMatrixIdGroupIndex);
++            worldTransformGroups.emplace_back(groupIndex);
+             worldTransformSegmentedAddresses.emplace_back(modelMatrixSegmentedAddressStack[modelMatrixStackSize - 1]);
+             worldTransformPhysicalAddresses.emplace_back(physicalAddress);
+             worldTransformVertexIndices.emplace_back(workload.drawData.vertexCount());
+         }
+diff --git a/src/hle/rt64_game_frame.h b/src/hle/rt64_game_frame.h
+--- a/src/hle/rt64_game_frame.h
++++ b/src/hle/rt64_game_frame.h
+@@ -96,6 +96,7 @@ namespace RT64 {
+         uint32_t doTransformMatching : 1;
+         uint32_t doTileInterpolation : 1;
+         uint32_t doTileMatching : 1;
++        uint32_t doLookAtInterpolation : 1;
+     };
+ 
+     struct ModifiedBuffers {
+diff --git a/src/hle/rt64_game_frame.cpp b/src/hle/rt64_game_frame.cpp
+--- a/src/hle/rt64_game_frame.cpp
++++ b/src/hle/rt64_game_frame.cpp
+@@ -521,5 +521,12 @@ namespace RT64 {
+         // Traverse the map and fill the set with all the combinations of transforms to check.
+         for (std::pair<uint64_t, GameCallMap> curIt : curCallHashMap) {
++            // Ported from DKR-R: explicit semantic groups can disable every
++            // call-level automatic component. Do not expand equal-hash ranges
++            // for them; repeated billboards/materials otherwise recreate the
++            // quadratic anonymous matching path that the semantic ID removed.
++            if (!curIt.second.doTransformMatching && !curIt.second.doTileInterpolation && !curIt.second.doLookAtInterpolation) {
++                continue;
++            }
+             auto prevRange = prevCallHashMap.equal_range(curIt.first);
+             for (auto prevIt = prevRange.first; prevIt != prevRange.second; prevIt++) {
+                 const GameIndices::Projection &curProjIndices = curScene.projections[curIt.second.sceneProjIndex];
+@@ -561,7 +569,8 @@ namespace RT64 {
+                 const uint32_t textureGenMask = G_LIGHTING | G_TEXTURE_GEN;
+                 const bool curUsesTextureGen = (curCall.callDesc.geometryMode & textureGenMask) == textureGenMask;
+                 const bool prevUsesTextureGen = (prevCall.callDesc.geometryMode & textureGenMask) == textureGenMask;
+-                if (curUsesTextureGen && prevUsesTextureGen && (true && true)) { // TODO: Do look at matching condition.
++                if (curUsesTextureGen && prevUsesTextureGen &&
++                    curIt.second.doLookAtInterpolation && prevIt->second.doLookAtInterpolation) {
+                     // FIXME: We assume the same look at is used throughout the entire draw call, so we only check the first vertex.
+                     const uint32_t curVertexIndex = curWorkload.drawData.faceIndices[curCall.meshDesc.faceIndicesStart];
+                     const uint32_t prevVertexIndex = prevWorkload.drawData.faceIndices[prevCall.meshDesc.faceIndicesStart];
+@@ -792,17 +801,19 @@ namespace RT64 {
+             bool doTransformMatching = false;
+             bool doTileInterpolation = false;
+             bool doTileMatching = false;
++            bool doLookAtInterpolation = false;
+             for (uint32_t m = call.callDesc.minWorldMatrix; m <= call.callDesc.maxWorldMatrix; m++) {
+                 const uint32_t groupIndex = workload.drawData.worldTransformGroups[m];
+                 const TransformGroup &group = workload.drawData.transformGroups[groupIndex];
+                 matrixIdHash = matrixIdHash * 33 ^ group.matrixId;
+ 
+                 const bool usesIdWithAutoOrdering = (group.matrixId != G_EX_ID_AUTO) && (group.matrixId != G_EX_ID_IGNORE) && (group.ordering == G_EX_ORDER_AUTO);
+                 doTransformMatching = doTransformMatching || (group.matrixId == G_EX_ID_AUTO) || usesIdWithAutoOrdering;
+                 doTileInterpolation = doTileInterpolation || (group.tileInterpolation != G_EX_COMPONENT_SKIP);
+                 doTileMatching = doTileMatching || (group.tileInterpolation == G_EX_COMPONENT_AUTO);
++                doLookAtInterpolation = doLookAtInterpolation || (group.lookAtInterpolation != G_EX_COMPONENT_SKIP);
+             }
+ 
+-            hashMap.emplace(hashFromCall(call, matrixIdHash), GameCallMap{ sceneProjIndex, c, doTransformMatching, doTileInterpolation, doTileMatching });
++            hashMap.emplace(hashFromCall(call, matrixIdHash), GameCallMap{ sceneProjIndex, c, doTransformMatching, doTileInterpolation, doTileMatching, doLookAtInterpolation });
+         }
+     }
