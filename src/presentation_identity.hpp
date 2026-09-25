@@ -59,6 +59,12 @@ extern "C" void rocket_presentation_render_entry(std::uint8_t* rdram,
 extern "C" void rocket_presentation_task_submitted(std::uint8_t* rdram,
                                                      recomp_context* context);
 
+// ROCKET-R INTERPOLATION V35: exact GameObject/Submodel matrix ownership hooks.
+extern "C" void rocket_presentation_submodel_matrix_begin(
+    std::uint8_t* rdram, recomp_context* context);
+extern "C" void rocket_presentation_submodel_matrix_end(
+    std::uint8_t* rdram, recomp_context* context);
+
 // ROCKET-R SKYBOX INTERPOLATION V33
 // The guest thread records the exact pre-world/background command range; the
 // RT64 decode thread uses this task-owned range to identify only the nested

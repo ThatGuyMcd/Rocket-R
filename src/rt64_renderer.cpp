@@ -309,7 +309,7 @@ rocket::renderer::RT64Context::RT64Context(
     RT64::Application::Core core{};
 #if defined(_WIN32)
     core.window = window_handle.window;
-#elif defined(__linux__)
+#elif defined(__linux__) && !defined(__ANDROID__)
     core.window = window_handle;
 #elif defined(__ANDROID__)
     core.window = static_cast<ANativeWindow*>(rocket::platform::android_native_window());
@@ -357,7 +357,11 @@ rocket::renderer::RT64Context::RT64Context(
     RT64::ApplicationConfiguration app_config{};
     app_config.appId = "rocket-r";
     app_config.useConfigurationFile = false;
+#if defined(__ANDROID__)
+    app_config.detectDataPath = false;
+#else
     app_config.detectDataPath = true;
+#endif
 
     const auto create_application = [&]() {
         const auto extra = rocket::graphics::settings();
@@ -393,7 +397,21 @@ rocket::renderer::RT64Context::RT64Context(
 #if defined(_WIN32)
     thread_id = window_handle.thread_id;
 #endif
+#if defined(__ANDROID__)
+    std::fprintf(stderr, "[rt64][android] beginning RT64 setup with cached ANativeWindow\n");
+#elif defined(__linux__)
+    std::fprintf(stderr, "[rt64][linux] beginning RT64 Vulkan setup on launcher-owned SDL window\n");
+#endif
     setup_result = map_setup(application_->setup(thread_id));
+#if defined(__ANDROID__)
+    std::fprintf(stderr, "[rt64][android] RT64 setup result=%d api=%d\n",
+                 static_cast<int>(setup_result),
+                 static_cast<int>(application_->chosenGraphicsAPI));
+#elif defined(__linux__)
+    std::fprintf(stderr, "[rt64][linux] RT64 setup result=%d api=%d\n",
+                 static_cast<int>(setup_result),
+                 static_cast<int>(application_->chosenGraphicsAPI));
+#endif
     chosen_api = map_api(application_->chosenGraphicsAPI);
 
     if (setup_result != ultramodern::renderer::SetupResult::Success &&

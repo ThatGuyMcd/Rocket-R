@@ -15,6 +15,8 @@ namespace rocket::platform {
 bool initialise();
 void shutdown();
 ultramodern::renderer::WindowHandle create_window();
+// Platform-only launcher -> renderer handoff. Windows stays unchanged.
+ultramodern::renderer::WindowHandle prepare_window_for_game();
 SDL_Window* sdl_window();
 #if defined(__ANDROID__)
 void* android_native_window();

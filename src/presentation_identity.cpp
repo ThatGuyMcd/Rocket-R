@@ -19,6 +19,11 @@
 
 namespace {
 
+// === ROCKET-R INTERPOLATION V35 SPECIFIC SUBMODEL MATRICES + RANGE-STABLE SKY ===
+// Additive coverage only: the proven v5/v6 RenderEntry matcher remains authoritative
+// for all existing draws. v35 overlays an identity only when Rocket itself proves
+// the exact GameObject/Submodel that authored a matrix. Unknowns still fail closed.
+
 constexpr std::uint32_t kRdramMask = 0x007FFFFFU;
 constexpr std::uint32_t kRdramStart = 0x80000000U;
 constexpr std::uint32_t kRdramEnd = 0x807FFFFFU;
@@ -28,6 +33,10 @@ constexpr std::uint32_t kGfxTaskCtxDlStartOffset = 0x008U;
 constexpr std::uint32_t kGfxTaskDlStartOffset = 0x014U;
 constexpr std::uint32_t kGfxContextDlHeadAddress = 0x800A5DB0U; // v33 sky/background command-range capture
 constexpr std::uint32_t kMtxBytes = 0x40U;
+constexpr std::uint32_t kSubmodelBytes = 0x28U;
+constexpr std::uint32_t kGameObjectClassOffset = 0x000U;
+constexpr std::uint32_t kGameObjectSubmodelsOffset = 0x0F4U;
+constexpr std::uint32_t kGameObjectSubmodelCountOffset = 0x0F8U;
 constexpr std::uint64_t kMaximumTrackAge = 1U;
 constexpr std::size_t kMaximumPendingTasks = 8U;
 // Rocket v4.2 allowed a previous owner to be selected from as far as 768 world
@@ -109,6 +118,28 @@ struct SharedCandidate {
     float cost = 0.0F;
 };
 
+struct SpecificMatrixSample {
+    std::uint64_t key = 0U;
+    std::uint32_t address = 0U;
+    Vec3 position{};
+    bool position_valid = false;
+    std::uint32_t track_token = 0U;
+};
+
+struct SpecificContinuity {
+    std::uint64_t key = 0U;
+    std::uint32_t token = 0U;
+    Vec3 position{};
+    bool position_valid = false;
+    std::uint64_t last_frame = 0U;
+    bool claimed = false;
+};
+
+struct SubmodelMatrixCapture {
+    std::uint64_t key = 0U;
+    bool valid = false;
+};
+
 struct BindingRecord {
     rocket::presentation::MatrixBinding binding{};
 };
@@ -135,16 +166,20 @@ std::mutex g_mutex;
 std::vector<RecordedEntry> g_entries;
 std::vector<Track> g_tracks;
 std::vector<SharedMatrixTrack> g_shared_matrix_tracks;
+std::vector<SpecificMatrixSample> g_specific_samples;
+std::vector<SpecificContinuity> g_specific_continuity;
 std::vector<SubmittedFrame> g_submitted;
 std::uint64_t g_frame = 0U;
 std::uint64_t g_submission_sequence = 1U;
 std::uint32_t g_next_token = 1U;
 std::uint32_t g_empty_frames = 0U;
 std::unordered_map<std::uint64_t, std::uint32_t> g_key_ordinals;
+std::unordered_map<std::uint64_t, std::uint32_t> g_specific_key_ordinals;
 std::vector<BackgroundCommandRange> g_background_ranges;
 bool g_background_capture_active = false;
 std::uint32_t g_background_capture_begin = 0U;
 thread_local MatrixMap g_active_matrices;
+thread_local SubmodelMatrixCapture g_submodel_matrix_capture{};
 thread_local std::vector<BackgroundCommandRange> g_active_background_ranges;
 thread_local std::uint32_t g_active_context_dl_start = 0U;
 thread_local std::uint32_t g_active_context_size = 0U;
@@ -164,6 +199,12 @@ std::atomic<std::uint64_t> g_trace_shared_samples{0U};
 std::atomic<std::uint64_t> g_trace_shared_matches{0U};
 std::atomic<std::uint64_t> g_trace_shared_new_tracks{0U};
 std::atomic<std::uint64_t> g_trace_shared_rejects{0U};
+std::atomic<std::uint64_t> g_trace_specific_samples{0U};
+std::atomic<std::uint64_t> g_trace_specific_matches{0U};
+std::atomic<std::uint64_t> g_trace_specific_new{0U};
+std::atomic<std::uint64_t> g_trace_specific_conflicts{0U};
+std::atomic<std::uint64_t> g_trace_unowned_matrix_snaps{0U};
+std::atomic<std::uint64_t> g_trace_background_identities{0U};
 std::atomic<std::uint64_t> g_trace_sidecar_mismatches{0U};
 std::atomic<std::uint64_t> g_coverage_semantic_bindings{0U};
 std::atomic<std::uint64_t> g_coverage_snapped_bindings{0U};
@@ -205,10 +246,21 @@ std::atomic<std::uint64_t> g_coverage_dynamic_vertex_bindings{0U};
     return true;
 }
 
-[[nodiscard]] bool BackgroundRangeContains(std::uint32_t address) {
+struct BackgroundCommandLocation {
+    std::uint32_t range_index = 0U;
+    std::uint32_t offset = 0U;
+};
+
+[[nodiscard]] bool BackgroundRangeLocation(
+    std::uint32_t address, BackgroundCommandLocation& out) {
     const std::uint32_t physical = Physical(address);
-    for (const BackgroundCommandRange& range : g_active_background_ranges) {
-        if (physical >= range.begin && physical < range.end) return true;
+    for (std::size_t index = 0; index < g_active_background_ranges.size(); ++index) {
+        const BackgroundCommandRange& range = g_active_background_ranges[index];
+        if (physical >= range.begin && physical < range.end) {
+            out.range_index = static_cast<std::uint32_t>(index);
+            out.offset = physical - range.begin;
+            return true;
+        }
     }
     return false;
 }
@@ -224,6 +276,31 @@ std::atomic<std::uint64_t> g_coverage_dynamic_vertex_bindings{0U};
     }
     return physical;
 }
+
+[[nodiscard]] std::uint32_t CanonicalBackgroundTarget(std::uint32_t address) {
+    BackgroundCommandLocation nested{};
+    if (BackgroundRangeLocation(address, nested)) {
+        // Nested dynamic background command: make it relative to the captured
+        // background producer rather than to the alternating whole task arena.
+        return 0x40000000U |
+               ((nested.range_index & 0x3FU) << 20U) |
+               (nested.offset & 0x000FFFFFU);
+    }
+
+    const std::uint32_t physical = Physical(address);
+    if (g_active_context_size != 0U) {
+        const std::uint64_t begin = g_active_context_dl_start;
+        const std::uint64_t end = begin + static_cast<std::uint64_t>(g_active_context_size);
+        if (physical >= begin && static_cast<std::uint64_t>(physical) < end) {
+            // The source command's range-relative offset already disambiguates
+            // generated sky calls. Do not let an unrelated whole-arena offset
+            // make the logical background identity jump between authored frames.
+            return 0x80000000U;
+        }
+    }
+    return CanonicalActiveDlAddress(address);
+}
+
 
 [[nodiscard]] std::uint16_t ReadU16(std::uint8_t* rdram,
                                     std::uint32_t address) {
@@ -338,6 +415,13 @@ struct GfxSemanticRef {
     if (id == 0U || id == 0xFFFFFFFFU) id ^= 0x51A7C3D9U;
     if (id == 0U || id == 0xFFFFFFFFU) id = 1U;
     return id;
+}
+
+[[nodiscard]] std::uint32_t NextSpecificPresentationToken() {
+    for (;;) {
+        const std::uint32_t token = g_next_token++;
+        if (token != 0U && token != 0xFFFFFFFFU) return token;
+    }
 }
 
 [[nodiscard]] std::uint32_t MatrixIdentity(std::uint32_t token,
@@ -587,6 +671,83 @@ void MatchSharedMatrixSamples(std::vector<SharedMatrixSample>& samples) {
     g_trace_shared_samples.fetch_add(samples.size(), std::memory_order_relaxed);
 }
 
+// ROCKET-R INTERPOLATION V35: high-confidence Submodel matrices are matched
+// separately from the stable v5/v6 RenderEntry heuristic. This cannot make an
+// existing generic match less conservative: it only overrides a physical slot
+// when Rocket's own func_8001EA18 proved the exact GameObject/Submodel owner.
+void FinalizeSpecificMatrixBindings(MatrixMap& out) {
+    std::erase_if(g_specific_continuity, [](const SpecificContinuity& item) {
+        return g_frame > item.last_frame + kMaximumTrackAge;
+    });
+    for (SpecificContinuity& item : g_specific_continuity) item.claimed = false;
+
+    std::unordered_map<std::uint32_t, std::uint32_t> specific_claims;
+    specific_claims.reserve(g_specific_samples.size());
+
+    for (SpecificMatrixSample& sample : g_specific_samples) {
+        SpecificContinuity* match = nullptr;
+        bool ambiguous = false;
+        for (SpecificContinuity& item : g_specific_continuity) {
+            if (item.key != sample.key || item.claimed ||
+                item.last_frame >= g_frame || g_frame - item.last_frame != 1U) {
+                continue;
+            }
+            if (sample.position_valid != item.position_valid) continue;
+            if (sample.position_valid) {
+                const float dist2 = DistanceSquared(sample.position, item.position);
+                const float limit2 = kMaximumTrackDistance * kMaximumTrackDistance;
+                if (!std::isfinite(dist2) || dist2 > limit2) continue;
+            }
+            if (match != nullptr) {
+                ambiguous = true;
+                break;
+            }
+            match = &item;
+        }
+
+        if (match != nullptr && !ambiguous) {
+            sample.track_token = match->token;
+            match->position = sample.position;
+            match->position_valid = sample.position_valid;
+            match->last_frame = g_frame;
+            match->claimed = true;
+            g_trace_specific_matches.fetch_add(1U, std::memory_order_relaxed);
+        } else {
+            SpecificContinuity item{};
+            item.key = sample.key;
+            item.token = NextSpecificPresentationToken();
+            item.position = sample.position;
+            item.position_valid = sample.position_valid;
+            item.last_frame = g_frame;
+            item.claimed = true;
+            sample.track_token = item.token;
+            g_specific_continuity.push_back(item);
+            g_trace_specific_new.fetch_add(1U, std::memory_order_relaxed);
+        }
+
+        if (sample.track_token == 0U || sample.address == 0U ||
+            !ValidRange(sample.address, kMtxBytes)) continue;
+        const std::uint32_t physical = Physical(sample.address);
+        rocket::presentation::MatrixBinding binding{};
+        binding.identity = MatrixIdentity(sample.track_token, 0x40U);
+        binding.interpolate_vertices = false;
+        binding.interpolate_texcoords = false;
+        binding.interpolate_tiles = false;
+
+        const auto prior = specific_claims.find(physical);
+        if (prior == specific_claims.end()) {
+            specific_claims.emplace(physical, binding.identity);
+            // A proven Submodel owner is more specific than a RenderEntry-level
+            // heuristic, so it intentionally overlays that one exact matrix.
+            out.insert_or_assign(physical, BindingRecord{binding});
+        } else if (prior->second != binding.identity) {
+            // specific physical-slot ownership conflict: never guess.
+            out.insert_or_assign(physical, BindingRecord{IgnoredBinding()});
+            g_trace_specific_conflicts.fetch_add(1U, std::memory_order_relaxed);
+        }
+    }
+}
+
 void FinalizeTracksAndBindings(MatrixMap& out) {
     ExpireTracks();
     for (Track& track : g_tracks) track.claimed = false;
@@ -812,6 +973,35 @@ void MaybeTraceSummary() {
         static_cast<unsigned long long>(g_trace_task_misses.exchange(0U)),
         static_cast<unsigned long long>(g_trace_sidecar_mismatches.exchange(0U)),
         g_tracks.size(), g_shared_matrix_tracks.size(), g_submitted.size());
+
+    const std::uint64_t v35_samples =
+        g_trace_specific_samples.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v35_matches =
+        g_trace_specific_matches.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v35_new =
+        g_trace_specific_new.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v35_conflicts =
+        g_trace_specific_conflicts.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v35_unowned =
+        g_trace_unowned_matrix_snaps.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v35_background =
+        g_trace_background_identities.exchange(0U, std::memory_order_relaxed);
+    char v35_line[512]{};
+    std::snprintf(v35_line, sizeof(v35_line),
+        "[rocket-interpolation-v35] frame=%llu specific-samples=%llu specific-match=%llu specific-new=%llu specific-conflict=%llu background-id=%llu unowned-snap=%llu continuity=%zu\n",
+        static_cast<unsigned long long>(g_frame),
+        static_cast<unsigned long long>(v35_samples),
+        static_cast<unsigned long long>(v35_matches),
+        static_cast<unsigned long long>(v35_new),
+        static_cast<unsigned long long>(v35_conflicts),
+        static_cast<unsigned long long>(v35_background),
+        static_cast<unsigned long long>(v35_unowned),
+        g_specific_continuity.size());
+    std::fputs(v35_line, stderr);
+    if (std::FILE* v35_file = std::fopen("Rocket-R-interpolation-coverage.log", "a")) {
+        std::fputs(v35_line, v35_file);
+        std::fclose(v35_file);
+    }
 }
 
 } // namespace
@@ -889,6 +1079,7 @@ rocket::presentation::TaskIdentityScope::TaskIdentityScope(
                 context_size);
         }
         g_submitted.clear();
+        g_specific_continuity.clear();
         g_tracks.clear();
         g_shared_matrix_tracks.clear();
         return;
@@ -931,6 +1122,7 @@ bool rocket::presentation::matrix_binding(
     // owner of this matrix, do not let RT64 guess from draw order/material
     // similarity. Present the newest authored transform for this matrix.
     if (g_active_task_fail_closed) {
+        g_trace_unowned_matrix_snaps.fetch_add(1U, std::memory_order_relaxed);
         binding = IgnoredBinding();
         g_coverage_snapped_bindings.fetch_add(1U, std::memory_order_relaxed);
         return true;
@@ -960,23 +1152,33 @@ extern "C" bool rocket_presentation_background_display_list(
     std::uint32_t physical_target_address,
     std::uint32_t* out_identity) {
     if (out_identity == nullptr || !g_active_task_fail_closed) return false;
-    if (!BackgroundRangeContains(physical_command_address)) return false;
+    BackgroundCommandLocation command{};
+    if (!BackgroundRangeLocation(physical_command_address, command)) return false;
 
-    const std::uint32_t command_key =
-        CanonicalActiveDlAddress(physical_command_address);
+    // v35 range-stable background identity: source location is relative to the
+    // captured pre-world background range, not to the alternating whole task
+    // arena. A variable amount of earlier frame work can no longer rename the sky.
     const std::uint32_t target_key =
-        CanonicalActiveDlAddress(physical_target_address);
+        CanonicalBackgroundTarget(physical_target_address);
     std::uint64_t key = Mix64(0x524F434B4554534BULL ^
-                              static_cast<std::uint64_t>(command_key));
-    key = Mix64(key ^ (static_cast<std::uint64_t>(target_key) << 32U));
+        (static_cast<std::uint64_t>(command.range_index) << 32U) ^
+        static_cast<std::uint64_t>(command.offset));
+    key = Mix64(key ^ (static_cast<std::uint64_t>(target_key) << 1U));
     const std::uint32_t identity = NormalizeIdentity(key);
     *out_identity = identity;
-    return identity != 0U && identity != 0xFFFFFFFFU;
+    if (identity != 0U && identity != 0xFFFFFFFFU) {
+        g_trace_background_identities.fetch_add(1U, std::memory_order_relaxed);
+        return true;
+    }
+    return false;
 }
 
 extern "C" void rocket_presentation_frame_begin(std::uint8_t*,
                                                   recomp_context*) {
     std::scoped_lock lock(g_mutex);
+    g_specific_samples.clear();
+    g_specific_key_ordinals.clear();
+    g_submodel_matrix_capture = {};
     g_background_ranges.clear();
     g_background_capture_active = false;
     g_background_capture_begin = 0U;
@@ -1009,6 +1211,64 @@ extern "C" void rocket_presentation_background_end(std::uint8_t* rdram,
     // stale pointer instead of classifying unrelated world/HUD commands.
     if ((head - begin) > 0x00080000U) return;
     g_background_ranges.push_back(BackgroundCommandRange{begin, head});
+}
+
+extern "C" void rocket_presentation_submodel_matrix_begin(
+    std::uint8_t* rdram, recomp_context* context) {
+    g_submodel_matrix_capture = {};
+    if (rdram == nullptr || context == nullptr) return;
+
+    const std::uint32_t object = static_cast<std::uint32_t>(context->r4);
+    const std::uint32_t submodel = static_cast<std::uint32_t>(context->r5);
+    if (!ValidRange(object, kGameObjectSubmodelCountOffset + 4U) ||
+        !ValidRange(submodel, kSubmodelBytes)) return;
+
+    const std::uint32_t submodels =
+        ReadU32(rdram, object + kGameObjectSubmodelsOffset);
+    const std::uint32_t count =
+        ReadU32(rdram, object + kGameObjectSubmodelCountOffset);
+    if (count == 0U || count > 512U || submodel < submodels ||
+        !ValidRange(submodels, count * kSubmodelBytes)) return;
+    const std::uint32_t delta = submodel - submodels;
+    if ((delta % kSubmodelBytes) != 0U) return;
+    const std::uint32_t index = delta / kSubmodelBytes;
+    if (index >= count) return;
+
+    const std::uint32_t object_class =
+        ReadU32(rdram, object + kGameObjectClassOffset);
+    const std::uint32_t submodel_gfx = ReadU32(rdram, submodel);
+    std::uint64_t base_key = Mix64(0x5355424D41545258ULL ^
+        static_cast<std::uint64_t>(Physical(object)));
+    base_key = Mix64(base_key ^ (static_cast<std::uint64_t>(index) << 32U));
+    base_key = Mix64(base_key ^
+        (static_cast<std::uint64_t>(object_class) << 1U));
+    base_key = Mix64(base_key ^
+        (static_cast<std::uint64_t>(submodel_gfx) << 17U));
+
+    std::scoped_lock lock(g_mutex);
+    const std::uint32_t occurrence = g_specific_key_ordinals[base_key]++;
+    std::uint64_t key = Mix64(base_key ^
+        (static_cast<std::uint64_t>(occurrence) << 48U));
+    if (key == 0U) key = 1U;
+    g_submodel_matrix_capture = {key, true};
+}
+
+extern "C" void rocket_presentation_submodel_matrix_end(
+    std::uint8_t* rdram, recomp_context* context) {
+    const SubmodelMatrixCapture capture = std::exchange(
+        g_submodel_matrix_capture, SubmodelMatrixCapture{});
+    if (!capture.valid || rdram == nullptr || context == nullptr) return;
+
+    const std::uint32_t matrix = static_cast<std::uint32_t>(context->r2);
+    if (!ValidRange(matrix, kMtxBytes)) return;
+    SpecificMatrixSample sample{};
+    sample.key = capture.key;
+    sample.address = matrix;
+    sample.position_valid = ReadMtxTranslation(rdram, matrix, sample.position);
+
+    std::scoped_lock lock(g_mutex);
+    g_specific_samples.push_back(sample);
+    g_trace_specific_samples.fetch_add(1U, std::memory_order_relaxed);
 }
 
 extern "C" void rocket_presentation_render_entry(std::uint8_t* rdram,
@@ -1070,10 +1330,12 @@ extern "C" void rocket_presentation_task_submitted(std::uint8_t* rdram,
     frame.background_ranges = g_background_ranges;
     frame.sequence = g_submission_sequence++;
     FinalizeTracksAndBindings(frame.matrices);
+    FinalizeSpecificMatrixBindings(frame.matrices);
 
     if (g_entries.empty()) {
         ++g_empty_frames;
         if (g_empty_frames >= 2U) {
+            g_specific_continuity.clear();
             g_tracks.clear();
             g_shared_matrix_tracks.clear();
         }
@@ -1085,6 +1347,7 @@ extern "C" void rocket_presentation_task_submitted(std::uint8_t* rdram,
         g_submitted.clear();
         // Never guess after queue ownership is lost. Current task is still
         // allowed to start a fresh FIFO; prior interpolation history is gone.
+        g_specific_continuity.clear();
         g_tracks.clear();
         g_shared_matrix_tracks.clear();
         if (TraceEnabled()) {
@@ -1098,4 +1361,7 @@ extern "C" void rocket_presentation_task_submitted(std::uint8_t* rdram,
     g_background_capture_begin = 0U;
     g_entries.clear();
     g_key_ordinals.clear();
+    g_specific_samples.clear();
+    g_specific_key_ordinals.clear();
+    g_submodel_matrix_capture = {};
 }

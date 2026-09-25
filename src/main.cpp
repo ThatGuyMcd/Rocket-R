@@ -149,7 +149,7 @@ int rocket_main(int argc, char** argv) {
     if (!rocket::platform::initialise()) return 5;
     rocket::ui::configure(options.config);
 
-    const auto window_handle = rocket::platform::create_window();
+    auto window_handle = rocket::platform::create_window();
     if (!valid_window_handle(window_handle)) {
         rocket::platform::shutdown();
         return 5;
@@ -179,6 +179,17 @@ int rocket_main(int argc, char** argv) {
         rocket::platform::shutdown();
         return startup.exit_requested ? 0 : 5;
     }
+#if defined(__linux__) && !defined(__ANDROID__)
+    // v19: validate the launcher-owned SDL window for Vulkan only after
+    // the software ImGui renderer has released it.
+    window_handle = rocket::platform::prepare_window_for_game();
+    if (!valid_window_handle(window_handle)) {
+        std::fprintf(stderr,
+            "[boot][linux] launcher-to-Vulkan handoff failed; game was not started\n");
+        rocket::platform::shutdown();
+        return 5;
+    }
+#endif
     // Publish the launcher-selected aspect mode/window size before the guest
     // thread can execute its first object frustum test.
     rocket::widescreen::update_window_aspect(rocket::platform::sdl_window());

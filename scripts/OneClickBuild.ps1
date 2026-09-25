@@ -861,6 +861,8 @@ try {
         Install-Winget 'Python.Python.3.12' 'Python 3.12'
     }
     Invoke-Python @((Join-Path $Root 'scripts\self_check.py'),'--root',$Root)
+    Invoke-Python @((Join-Path $Root 'scripts\verify_interpolation_v35.py'),'--root',$Root)
+    Write-Host 'Interpolation v35 source coverage: VERIFIED (v5/v6 baseline preserved).' -ForegroundColor DarkGreen
 
     if (-not (Import-VsEnvironment)) {
         Install-Winget 'Microsoft.VisualStudio.2022.BuildTools' 'Visual Studio 2022 Build Tools' '--wait --passive --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --add Microsoft.VisualStudio.Component.VC.Llvm.Clang --add Microsoft.VisualStudio.Component.VC.CMake.Project'
@@ -1155,6 +1157,10 @@ inline constexpr std::uint32_t kBootstrapBssEnd = $($RocketBootstrap.BssEnd)U;
     # func_8008B594 initializes it once; the main renderer continues the SAME list.
     # No staging pool, no copying, no eviction, no second-pass reset.
     Invoke-Python @((Join-Path $Root 'scripts\patch_render_capacity_v32_generated.py'),'--root',$Root)
+    # Interpolation v35: capture the exact matrix returned by func_8001EA18.
+    # This is additive and never replaces the stable v5/v6 RenderEntry matcher.
+    Invoke-Python @((Join-Path $Root 'scripts\patch_interpolation_v35_generated.py'),'--root',$Root)
+    Invoke-Python @((Join-Path $Root 'scripts\verify_interpolation_v35.py'),'--root',$Root,'--with-generated')
     Write-Host 'Graphics v32 single live RenderEntry queue: ENABLED (32768 entries; v29 interpolation untouched).'
 
     Push-Location (Join-Path $Root 'runtime-recomp\rsp')
@@ -1177,6 +1183,7 @@ inline constexpr std::uint32_t kBootstrapBssEnd = $($RocketBootstrap.BssEnd)U;
 
     Write-Host 'Rocket runtime policy: retail 30 Hz simulation + stable v5/v6 RT64 semantic interpolation + original Rocket RenderEntry/sort/draw path + safe-area crop + widescreen CPU frustum.' -ForegroundColor DarkGreen
     Write-Host 'Attachment/skybox interpolation v6: ENABLED (shared-parent + dynamic GFX identities).' -ForegroundColor Green
+    Write-Host 'Interpolation v35: ENABLED (exact Submodel wheels/parts + range-stable V33 sky identity; fail-closed fallback retained).' -ForegroundColor Green
     Write-Host 'N64 colour dithering v7: LAUNCHER TOGGLE (retail Bayer / disabled).' -ForegroundColor Green
     Write-Host 'Interpolation + presentation fix v3.1: ENABLED (centroid-stable small geometry + double-buffered RT64 presentation targets).' -ForegroundColor Green
 

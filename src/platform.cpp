@@ -5,6 +5,9 @@
 
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <SDL_vulkan.h>
+#endif
 #if defined(_WIN32) || defined(__APPLE__) || defined(__ANDROID__)
 #include <SDL_syswm.h>
 #if defined(_WIN32)
@@ -390,6 +393,96 @@ ultramodern::renderer::WindowHandle rocket::platform::create_window() {
     return ultramodern::renderer::WindowHandle{info.info.cocoa.window, SDL_Metal_GetLayer(metal_view)};
 #endif
 }
+
+// === ROCKET-R PLATFORM LAUNCH REPAIR V19 BEGIN ===
+// DKR-R-proven launcher -> Vulkan handoff, isolated to desktop Linux.
+// The software launcher can succeed even when Vulkan cannot. Validate the same
+// SDL window after launcher teardown and recreate it only if required.
+ultramodern::renderer::WindowHandle rocket::platform::prepare_window_for_game() {
+#if defined(__linux__) && !defined(__ANDROID__)
+    auto vulkan_ready = [](SDL_Window* window) -> bool {
+        if (window == nullptr) return false;
+        const Uint32 flags = SDL_GetWindowFlags(window);
+        if ((flags & SDL_WINDOW_VULKAN) == 0U) return false;
+
+        unsigned int extension_count = 0U;
+        SDL_ClearError();
+        if (SDL_Vulkan_GetInstanceExtensions(window, &extension_count, nullptr) != SDL_TRUE ||
+            extension_count == 0U) {
+            std::fprintf(stderr,
+                "[platform][linux] Vulkan window preflight failed: %s\n",
+                SDL_GetError());
+            return false;
+        }
+        std::fprintf(stderr,
+            "[platform][linux] Vulkan preflight PASS: flags=0x%08X extensions=%u driver=%s\n",
+            static_cast<unsigned>(flags), extension_count,
+            SDL_GetCurrentVideoDriver() ? SDL_GetCurrentVideoDriver() : "unknown");
+        return true;
+    };
+
+    if (vulkan_ready(g_window)) return create_window();
+    if (g_window == nullptr) {
+        std::fprintf(stderr, "[platform][linux] launcher handoff has no SDL window\n");
+        return {};
+    }
+
+    const Uint32 old_flags = SDL_GetWindowFlags(g_window);
+    int x=SDL_WINDOWPOS_CENTERED, y=SDL_WINDOWPOS_CENTERED, w=1440, h=900;
+    SDL_GetWindowPosition(g_window,&x,&y);
+    SDL_GetWindowSize(g_window,&w,&h);
+    const bool was_hidden=(old_flags & SDL_WINDOW_HIDDEN)!=0U;
+    const bool was_maximized=(old_flags & SDL_WINDOW_MAXIMIZED)!=0U;
+    const Uint32 fullscreen_mode=old_flags &
+        (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP);
+
+    std::fprintf(stderr,
+        "[platform][linux] recreating launcher window for Vulkan handoff; old-flags=0x%08X\n",
+        static_cast<unsigned>(old_flags));
+
+    SDL_DestroyWindow(g_window);
+    g_window=nullptr;
+
+    Uint32 flags=SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_VULKAN;
+    if (was_hidden) flags |= SDL_WINDOW_HIDDEN;
+    g_window=SDL_CreateWindow("Rocket-R - Rocket: Robot on Wheels Recompiled",
+                              x,y,w,h,flags);
+    if (g_window==nullptr) {
+        const std::string detail=SDL_GetError();
+        std::fprintf(stderr,"[platform][linux] Vulkan recreation failed: %s\n",detail.c_str());
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
+            "Rocket-R - Vulkan startup failed",
+            ("Rocket-R could not create the Vulkan game window.\n\n"+detail+
+             "\n\nPlease install/update your Vulkan GPU driver. "
+             "The software launcher can run even when the game renderer cannot.").c_str(),
+            nullptr);
+        return {};
+    }
+
+    SDL_SetWindowMinimumSize(g_window,800,600);
+    SDL_EventState(SDL_DROPFILE,SDL_ENABLE);
+    if (was_maximized) SDL_MaximizeWindow(g_window);
+    if (fullscreen_mode!=0U && SDL_SetWindowFullscreen(g_window,fullscreen_mode)!=0) {
+        std::fprintf(stderr,"[platform][linux] fullscreen restore failed: %s\n",SDL_GetError());
+    }
+    rocket::widescreen::update_window_aspect(g_window);
+
+    if (!vulkan_ready(g_window)) {
+        const std::string detail=SDL_GetError();
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
+            "Rocket-R - Vulkan unavailable",
+            ("The launcher opened, but Rocket-R's Vulkan renderer is unavailable.\n\n"+
+             detail+"\n\nThe Linux game build requires a working Vulkan driver.").c_str(),
+            g_window);
+        SDL_DestroyWindow(g_window);
+        g_window=nullptr;
+        return {};
+    }
+#endif
+    return create_window();
+}
+// === ROCKET-R PLATFORM LAUNCH REPAIR V19 END ===
+
 
 SDL_Window* rocket::platform::sdl_window() {
     return g_window;
