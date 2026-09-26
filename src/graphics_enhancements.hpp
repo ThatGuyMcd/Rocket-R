@@ -84,6 +84,7 @@ struct Settings {
     HardwareResolve hardware_resolve = HardwareResolve::Automatic;
     int anisotropy = 16;
     float mip_lod_bias = -0.25F;
+    float texture_detail_at_distance = 0.0F;
 
     float fov_offset_degrees = 0.0F;
     bool preserve_cutscene_fov = true;

@@ -37,6 +37,19 @@ struct BindingSet {
     int controller_secondary = rocket::input::kUnbound;
 };
 
+bool KeyboardSlot(BindingSlot slot) {
+    return slot == BindingSlot::KeyboardPrimary || slot == BindingSlot::KeyboardSecondary;
+}
+int& SlotValue(BindingSet& set, BindingSlot slot) {
+    switch (slot) {
+        case BindingSlot::KeyboardPrimary: return set.keyboard_primary;
+        case BindingSlot::KeyboardSecondary: return set.keyboard_secondary;
+        case BindingSlot::ControllerPrimary: return set.controller_primary;
+        case BindingSlot::ControllerSecondary: return set.controller_secondary;
+    }
+    return set.keyboard_primary;
+}
+
 constexpr std::array<BindingSet, static_cast<std::size_t>(Action::Count)> kDefaults{{
     {SDL_SCANCODE_W, rocket::input::kUnbound, kAxisSourceBase + SDL_CONTROLLER_AXIS_LEFTY * 2, rocket::input::kUnbound},
     {SDL_SCANCODE_S, rocket::input::kUnbound, kAxisSourceBase + SDL_CONTROLLER_AXIS_LEFTY * 2 + 1, rocket::input::kUnbound},
@@ -68,7 +81,7 @@ constexpr std::array<const char*, static_cast<std::size_t>(Action::Count)> kIden
 }};
 
 constexpr std::array<const char*, static_cast<std::size_t>(Action::Count)> kLabels{{
-    "Analogue up", "Analogue down", "Analogue left", "Analogue right", "A button",
+    "Stick up", "Stick down", "Stick left", "Stick right", "A button",
     "B button", "Z trigger", "Start", "D-pad up", "D-pad down", "D-pad left",
     "D-pad right", "L shoulder", "R shoulder", "C-up", "C-down", "C-left", "C-right",
 }};
@@ -211,6 +224,32 @@ void rocket::input::reset_bindings() {
     g_bindings = kDefaults;
 }
 
+std::vector<rocket::input::BindingLocation> rocket::input::binding_conflicts(Action action, BindingSlot slot, int source) {
+    std::vector<BindingLocation> result;
+    if (source == kUnbound) return result;
+    std::scoped_lock lock(g_binding_mutex);
+    for (std::size_t i = 0; i < g_bindings.size(); ++i) {
+        if (i == Index(action)) continue;
+        for (auto other : {BindingSlot::KeyboardPrimary, BindingSlot::KeyboardSecondary,
+                           BindingSlot::ControllerPrimary, BindingSlot::ControllerSecondary}) {
+            if (KeyboardSlot(slot) == KeyboardSlot(other) && SlotValue(g_bindings[i], other) == source) {
+                result.push_back({static_cast<Action>(i), other});
+            }
+        }
+    }
+    return result;
+}
+
+bool rocket::input::swap_binding(Action action, BindingSlot slot, int source, BindingLocation conflict) {
+    std::scoped_lock lock(g_binding_mutex);
+    if (action == conflict.action || KeyboardSlot(slot) != KeyboardSlot(conflict.slot)) return false;
+    int& target = SlotValue(g_bindings[Index(action)], slot);
+    int& other = SlotValue(g_bindings[Index(conflict.action)], conflict.slot);
+    if (source == kUnbound || other != source) return false;
+    std::swap(target, other);
+    return true;
+}
+
 int rocket::input::shortcut_keyboard_binding(ShortcutAction action) {
     return g_shortcut_keyboard[ShortcutIndex(action)].load(std::memory_order_relaxed);
 }
@@ -276,40 +315,48 @@ int rocket::input::encode_controller_axis(int axis, bool positive) {
 }
 
 std::string rocket::input::keyboard_binding_name(int scancode) {
-    if (scancode < 0 || scancode >= SDL_NUM_SCANCODES) return "Unbound";
+    if (scancode < 0 || scancode >= SDL_NUM_SCANCODES) return "Not assigned";
     const char* name = SDL_GetScancodeName(static_cast<SDL_Scancode>(scancode));
     return name != nullptr && *name != '\0' ? name : "Unknown key";
 }
 
 std::string rocket::input::controller_binding_name(int source) {
+    static constexpr std::array<const char*, SDL_CONTROLLER_BUTTON_MAX> names{
+        "Bottom face button", "Right face button", "Left face button", "Top face button",
+        "Back / Select", "Guide / Home", "Menu / Start", "Left stick click", "Right stick click",
+        "Left bumper", "Right bumper", "D-pad up", "D-pad down", "D-pad left", "D-pad right",
+        "Extra button", "Paddle 1", "Paddle 2", "Paddle 3", "Paddle 4", "Touchpad click"};
     if (source >= 0 && source < SDL_CONTROLLER_BUTTON_MAX) {
-        const char* name = SDL_GameControllerGetStringForButton(
-            static_cast<SDL_GameControllerButton>(source));
-        return name != nullptr ? name : "Unknown button";
+        return names[source] != nullptr ? names[source] : "Controller button";
     }
     if (source >= kAxisSourceBase) {
         const int encoded = source - kAxisSourceBase;
         const int axis = encoded / 2;
         if (axis >= 0 && axis < SDL_CONTROLLER_AXIS_MAX) {
-            const char* name = SDL_GameControllerGetStringForAxis(
-                static_cast<SDL_GameControllerAxis>(axis));
-            return std::string(name != nullptr ? name : "axis") +
-                   ((encoded & 1) != 0 ? " +" : " -");
+            const bool positive = (encoded & 1) != 0;
+            switch (axis) {
+                case SDL_CONTROLLER_AXIS_LEFTX: return positive ? "Left stick right" : "Left stick left";
+                case SDL_CONTROLLER_AXIS_LEFTY: return positive ? "Left stick down" : "Left stick up";
+                case SDL_CONTROLLER_AXIS_RIGHTX: return positive ? "Right stick right" : "Right stick left";
+                case SDL_CONTROLLER_AXIS_RIGHTY: return positive ? "Right stick down" : "Right stick up";
+                case SDL_CONTROLLER_AXIS_TRIGGERLEFT: return positive ? "Left trigger" : "Left trigger (negative axis)";
+                case SDL_CONTROLLER_AXIS_TRIGGERRIGHT: return positive ? "Right trigger" : "Right trigger (negative axis)";
+            }
         }
     }
-    return "Unbound";
+    return "Not assigned";
 }
 
 rocket::input::State rocket::input::poll(SDL_GameController* controller,
                                           bool include_keyboard,
                                           bool include_controller,
                                           bool blocked,
-                                          bool allow_shortcuts) {
+                                          bool allow_shortcuts, State* preview) {
     State state{};
     const Uint8* keys = include_keyboard ? SDL_GetKeyboardState(nullptr) : nullptr;
     SDL_GameController* pad = include_controller ? controller : nullptr;
     UpdateShortcutRequests(pad, keys, allow_shortcuts);
-    if (blocked) return state;
+    if (blocked && preview == nullptr) return state;
 
     std::array<BindingSet, static_cast<std::size_t>(Action::Count)> bindings;
     {
@@ -387,5 +434,6 @@ rocket::input::State rocket::input::poll(SDL_GameController* controller,
     }
     state.stick_x = ShapeStick(state.stick_x, stick_x_inverted());
     state.stick_y = ShapeStick(state.stick_y, stick_y_inverted());
-    return state;
+    if (preview != nullptr) *preview = state;
+    return blocked ? State{} : state;
 }

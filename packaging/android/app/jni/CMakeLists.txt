@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.22.1)
 project(RocketRAndroid LANGUAGES C CXX)
+add_link_options("-Wl,-z,max-page-size=16384" "-Wl,-z,common-page-size=16384")
 
 # app/jni -> app -> android-project -> build -> Rocket-R root.
 get_filename_component(ROCKET_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../.." ABSOLUTE)
@@ -14,4 +15,5 @@ set(SDL_SHARED ON CACHE BOOL "" FORCE)
 set(SDL_STATIC OFF CACHE BOOL "" FORCE)
 set(SDL_TEST OFF CACHE BOOL "" FORCE)
 add_subdirectory("${ROCKET_ROOT}/extern/sdl2" "${CMAKE_BINARY_DIR}/sdl2")
+set(SDL2_INCLUDE_DIRS "${ROCKET_ROOT}/extern/sdl2/include" CACHE STRING "Rocket-R Android SDL2 headers" FORCE)
 add_subdirectory("${ROCKET_ROOT}" "${CMAKE_BINARY_DIR}/rocket-r")

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 struct _SDL_GameController;
 typedef struct _SDL_GameController SDL_GameController;
@@ -59,6 +60,9 @@ const char* action_label(Action action);
 int binding(Action action, BindingSlot slot);
 void set_binding(Action action, BindingSlot slot, int source);
 void reset_bindings();
+struct BindingLocation { Action action; BindingSlot slot; };
+std::vector<BindingLocation> binding_conflicts(Action action, BindingSlot slot, int source);
+bool swap_binding(Action action, BindingSlot slot, int source, BindingLocation conflict);
 
 int shortcut_keyboard_binding(ShortcutAction action);
 int shortcut_controller_binding(ShortcutAction action);
@@ -92,6 +96,6 @@ std::string controller_binding_name(int source);
 
 State poll(SDL_GameController* controller, bool include_keyboard,
            bool include_controller, bool blocked,
-           bool allow_shortcuts = true);
+           bool allow_shortcuts = true, State* preview = nullptr);
 
 } // namespace rocket::input

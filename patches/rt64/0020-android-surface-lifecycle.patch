@@ -1,0 +1,129 @@
+--- a/src/contrib/plume/plume_render_interface.h
++++ b/src/contrib/plume/plume_render_interface.h
+@@ -12,6 +12,11 @@
+ #include "plume_render_interface_types.h"
+ 
+ namespace plume {
++#if defined(__ANDROID__)
++    // The SDL owner thread publishes surface replacement/loss. The Vulkan
++    // present thread consumes a retained native window at its resize boundary.
++    void setAndroidNativeWindow(RenderWindow window);
++#endif
+     // Interfaces.
+ 
+     struct RenderBufferFormattedView {
+--- a/src/contrib/plume/plume_vulkan.h
++++ b/src/contrib/plume/plume_vulkan.h
+@@ -226,6 +226,9 @@
+         VkSwapchainKHR vk = VK_NULL_HANDLE;
+         VulkanCommandQueue *commandQueue = nullptr;
+         VkSurfaceKHR surface = VK_NULL_HANDLE;
++#if defined(__ANDROID__)
++        uint64_t androidWindowRevision = 0;
++#endif
+ #if defined(__APPLE__)
+         std::unique_ptr<CocoaWindow> windowWrapper;
+ #endif
+--- a/src/contrib/plume/plume_vulkan.cpp
++++ b/src/contrib/plume/plume_vulkan.cpp
+@@ -28,6 +28,22 @@
+ // - Fix resource pools.
+ 
+ namespace plume {
++#if defined(__ANDROID__)
++    namespace {
++        std::mutex androidWindowMutex;
++        RenderWindow androidWindow = nullptr;
++        uint64_t androidWindowRevision = 0;
++    }
++
++    void setAndroidNativeWindow(RenderWindow window) {
++        std::lock_guard<std::mutex> lock(androidWindowMutex);
++        if (window != nullptr) ANativeWindow_acquire(window);
++        if (androidWindow != nullptr) ANativeWindow_release(androidWindow);
++        androidWindow = window;
++        // A Surface can be replaced even when its native pointer is reused.
++        ++androidWindowRevision;
++    }
++#endif
+     // Backend constants.
+ 
+     // Required buffer alignment for acceleration structures.
+@@ -2079,6 +2095,13 @@
+ 
+         this->commandQueue = commandQueue;
+         this->desc = desc;
++#if defined(__ANDROID__)
++        ANativeWindow_acquire(this->desc.renderWindow);
++        {
++            std::lock_guard<std::mutex> lock(androidWindowMutex);
++            this->androidWindowRevision = plume::androidWindowRevision;
++        }
++#endif
+ 
+         VkResult res;
+ 
+@@ -2249,6 +2272,10 @@
+             vkDestroySurfaceKHR(renderInterface->instance, surface, nullptr);
+         }
+ 
++#if defined(__ANDROID__)
++        ANativeWindow_release(desc.renderWindow);
++#endif
++
+         // Remove tracking from the parent command queue.
+         commandQueue->swapChains.erase(this);
+     }
+@@ -2310,6 +2337,38 @@
+     }
+ 
+     bool VulkanSwapChain::resize() {
++#if defined(__ANDROID__)
++        // Serialize with publication, then retire all uses of the old native
++        // surface before releasing it. This only runs on lifecycle changes.
++        std::unique_lock<std::mutex> windowLock(androidWindowMutex);
++        if (plume::androidWindowRevision != 0) {
++            if (androidWindow == nullptr) return false;
++            if (androidWindowRevision != plume::androidWindowRevision || surface == VK_NULL_HANDLE) {
++                if (vkDeviceWaitIdle(commandQueue->device->vk) != VK_SUCCESS) return false;
++                releaseImageViews();
++                releaseSwapChain();
++                auto *renderInterface = commandQueue->device->renderInterface;
++                if (surface != VK_NULL_HANDLE) {
++                    vkDestroySurfaceKHR(renderInterface->instance, surface, nullptr);
++                    surface = VK_NULL_HANDLE;
++                }
++                ANativeWindow_acquire(androidWindow);
++                ANativeWindow_release(desc.renderWindow);
++                desc.renderWindow = androidWindow;
++                androidWindowRevision = plume::androidWindowRevision;
++                VkAndroidSurfaceCreateInfoKHR surfaceInfo{};
++                surfaceInfo.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
++                surfaceInfo.window = desc.renderWindow;
++                if (vkCreateAndroidSurfaceKHR(renderInterface->instance, &surfaceInfo, nullptr, &surface) != VK_SUCCESS) {
++                    surface = VK_NULL_HANDLE;
++                    return false;
++                }
++                currentPresentId = 0;
++                fprintf(stderr, "[plume][android] native surface restored\n");
++            }
++        }
++        windowLock.unlock();
++#endif
+         getWindowSize(width, height);
+ 
+         // Don't recreate the swap chain at all if the window doesn't have a valid size.
+@@ -2401,6 +2460,13 @@
+     }
+ 
+     bool VulkanSwapChain::needsResize() const {
++#if defined(__ANDROID__)
++        {
++            std::lock_guard<std::mutex> lock(androidWindowMutex);
++            if (plume::androidWindowRevision != 0 &&
++                (androidWindow == nullptr || androidWindowRevision != plume::androidWindowRevision)) return true;
++        }
++#endif
+         uint32_t windowWidth, windowHeight;
+         getWindowSize(windowWidth, windowHeight);
+         return (vk == VK_NULL_HANDLE) || (windowWidth != width) || (windowHeight != height) || (requiredPresentMode != createdPresentMode);

@@ -1,41 +1,46 @@
-# Rocket-R custom final-VI shaders
+# Custom shaders
 
-Rocket-R Graphics v9 can replace the final RT64 Video Interface pixel shader with a custom, **single-pass precompiled** pixel shader.
+Rocket-R can use a precompiled shader for the final Video Interface image.
+It supports one pass. Choose the shader in **Graphics > Image**, then restart
+the game to load it.
 
-The launcher scans the Rocket-R configuration directory's `shaders` folder for matching shader stems. For a shader named `my-filter`:
+Put shader files in the `shaders` folder inside Rocket-R's configuration folder.
+Files with the same name are treated as one shader:
 
-- D3D12 loads `my-filter.dxil`.
-- Vulkan loads `my-filter.spv`.
+- `my-filter.dxil` for D3D12
+- `my-filter.spv` for Vulkan
 
-A matching binary for the active backend is required. The shader is loaded when RT64 starts, so changing the selected custom shader requires restarting the game from the launcher.
+You need the file for the backend you're using. If it is missing or cannot be
+loaded, RT64 logs the problem and uses its built-in shader.
 
-## Shader contract
+## Shader interface
 
-The custom shader reuses RT64's full-screen vertex shader, descriptor bindings and the Rocket-R Video Interface push constants. It must expose:
+Start with [the example](custom-shaders/example-rocket-postprocess.hlsl).
+Keep its `VideoInterfaceCB` layout, texture/sampler bindings and entry point:
 
-- `Texture2D<float4> gInput : register(t1)`
-- `SamplerState gSampler : register(s2)`
-- `PSMain(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_TARGET`
-- the `VideoInterfaceCB` layout shown in `example-rocket-postprocess.hlsl`
+```hlsl
+Texture2D<float4> gInput : register(t1);
+SamplerState gSampler : register(s2);
+float4 PSMain(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_TARGET;
+```
 
-The full-screen triangle supplies UVs in the same form as RT64's normal Video Interface shader. `videoResolution / textureResolution` is the lower-right UV of the valid N64 image inside the backing texture.
+The existing fullscreen vertex shader supplies the UV coordinates.
+`videoResolution / textureResolution` gives the lower-right UV of the valid
+N64 image within the backing texture.
 
-## Compiling with DXC
+## Compiling
 
-From a Developer Command Prompt or any shell containing `dxc`:
-
-### D3D12 / DXIL
+Use a shell with DXC available. For D3D12:
 
 ```text
 dxc -T ps_6_0 -E PSMain -Qstrip_debug -Qstrip_reflect -Fo my-filter.dxil my-filter.hlsl
 ```
 
-### Vulkan / SPIR-V
+For Vulkan:
 
 ```text
 dxc -T ps_6_0 -E PSMain -spirv -fvk-use-dx-layout -Fo my-filter.spv my-filter.hlsl
 ```
 
-Copy the resulting binary/binaries into the `shaders` folder shown by Rocket-R's Graphics page, choose **Custom shader**, select the stem, and restart the game.
-
-This v9 interface is deliberately single-pass and precompiled. It avoids adding a second runtime shader compiler to Linux/Android and keeps the renderer failure mode safe: if the selected backend binary is unavailable or invalid, RT64 logs the problem and uses its built-in VI path instead.
+Copy the compiled files into the configuration folder's `shaders` directory,
+choose **Custom shader**, select the name and restart the game.

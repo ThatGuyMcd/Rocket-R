@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [switch]$RepairDependencies,
     [switch]$NoPackage,
@@ -15,7 +15,11 @@ New-Item -ItemType Directory -Force -Path $LogRoot | Out-Null
 $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $LogPath = Join-Path $LogRoot "one-click-$Stamp.log"
 $Version = (Get-Content (Join-Path $Root 'VERSION') -Raw).Trim()
+<<<<<<< Updated upstream
 $BuilderRevision = 'FIXED34'
+=======
+$BuilderRevision = 'RELEASE-1.0.0'
+>>>>>>> Stashed changes
 if ($Version -notmatch '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z._-]+)?$') {
     throw "Invalid VERSION value: '$Version'"
 }
@@ -1196,8 +1200,16 @@ inline constexpr std::uint32_t kBootstrapBssEnd = $($RocketBootstrap.BssEnd)U;
         Write-Host "Rocket runtime build log: $RuntimeLog"
         $runtimeConfigureExit = Invoke-NativeLogged $NativeCMake @('-S',$Root,'-B',$WindowsBuild,'-G','Ninja',"-DCMAKE_MAKE_PROGRAM=$NativeNinja",'-DCMAKE_BUILD_TYPE=Release',"-DCMAKE_C_COMPILER=$ClangCl","-DCMAKE_CXX_COMPILER=$ClangCl") $RuntimeLog
         if ($runtimeConfigureExit -ne 0) { throw "Rocket-R Windows CMake configuration failed (exit $runtimeConfigureExit). See $RuntimeLog" }
+<<<<<<< Updated upstream
         $runtimeBuildExit = Invoke-NativeLogged $NativeCMake @('--build',$WindowsBuild,'--target','RocketR','--parallel') $RuntimeLog
         if ($runtimeBuildExit -ne 0) { throw "Rocket-R Windows build failed (exit $runtimeBuildExit). See $RuntimeLog" }
+=======
+        $runtimeBuildExit = Invoke-NativeLogged $NativeCMake @('--build',$WindowsBuild,'--target','RocketR','RocketPresentationTests','RocketRuntimeLogTests','RocketControlsTests','RocketControlsUiTests','--parallel') $RuntimeLog
+        if ($runtimeBuildExit -ne 0) { throw "Rocket-R Windows build failed (exit $runtimeBuildExit). See $RuntimeLog" }
+        $NativeCTest = Join-Path (Split-Path -Parent $NativeCMake) 'ctest.exe'
+        $runtimeTestExit = Invoke-NativeLogged $NativeCTest @('--test-dir',$WindowsBuild,'--output-on-failure') $RuntimeLog
+        if ($runtimeTestExit -ne 0) { throw "Rocket-R regression tests failed. See $RuntimeLog" }
+>>>>>>> Stashed changes
         $RocketExe = Find-BuiltFile $WindowsBuild 'Rocket-R.exe'
         $RocketDir = Split-Path $RocketExe -Parent
         Write-Host "Built: $RocketExe" -ForegroundColor Green
@@ -1253,10 +1265,7 @@ inline constexpr std::uint32_t kBootstrapBssEnd = $($RocketBootstrap.BssEnd)U;
             Remove-Item $Stage -Recurse -Force -ErrorAction SilentlyContinue
             New-Item -ItemType Directory -Force -Path $Stage | Out-Null
             Copy-Item (Join-Path $RocketDir '*') $Stage -Recurse -Force
-            Copy-Item (Join-Path $Root 'README.md') $Stage -Force
-            Copy-Item (Join-Path $Root 'THIRD_PARTY.md') $Stage -Force
-            Copy-Item (Join-Path $Root 'LICENSE.md') $Stage -Force
-            Copy-Item (Join-Path $Root 'docs\STATUS.md') (Join-Path $Stage 'STATUS.md') -Force
+            Invoke-Python @((Join-Path $Root 'scripts\stage_release_docs.py'),'--root',$Root,'--output',$Stage)
             Invoke-Python @((Join-Path $Root 'scripts\scan_release.py'),$Stage)
             $ZipPath = Join-Path $Dist "$PackageName.zip"
             Remove-Item $ZipPath -Force -ErrorAction SilentlyContinue

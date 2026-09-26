@@ -1,33 +1,72 @@
 # Troubleshooting
 
-## The builder says WSL needs first-run setup
+## Finding the log
 
-Open **Ubuntu** from the Start menu once, choose its Linux username/password, close it, then rerun `ONE-CLICK-BUILD.cmd`.
+Open **Graphics > Diagnostics** in the launcher or overlay. You can pause the
+view, copy it, clear the visible history or let it follow new output.
 
-## The builder stops after installing Visual Studio Build Tools
+Desktop session logs are in the configuration folder's `logs` directory:
 
-A newly installed C++/LLVM workload is occasionally not visible to the current shell until Windows restarts. Restart and rerun the builder; it is safe to repeat.
+- Windows: `%APPDATA%/Rocket-R/logs`
+- Linux: `${XDG_CONFIG_HOME:-$HOME/.config}/rocket-r/logs`
+- A custom `--config` folder: its `logs` directory
+
+Windows crash reports and minidumps also go under the log directory. Include
+the Rocket-R version, your OS/GPU and what you were doing when reporting a fault.
 
 ## ROM rejected
 
-Only the unmodified US `NSUE` release is supported initially. The script accepts all three common N64 byte orders but validates the canonical SHA-1 `622D71A44DA0B81EA68092CAC9198C66154A4F4A`. Patched, overdumped, truncated, PAL or prototype ROMs are intentionally rejected.
+Use an unmodified US copy of Rocket: Robot on Wheels, game code `NSUE`.
+The expected size is 12 MiB and the canonical SHA-1 is
+`622D71A44DA0B81EA68092CAC9198C66154A4F4A`.
+The launcher accepts `.z64`, `.n64` and `.v64` byte orders. Other regions,
+modified ROMs and incomplete dumps are not supported.
 
-## Rocket decomp `make` fails
+## Steam Deck or Linux will not start
 
-Read the current `build/logs/one-click-*.log`. The WSL stage must have `gcc-mips-linux-gnu`, `binutils-mips-linux-gnu`, Python/venv, wget and build-essential. The decomp's own `make` ends in a byte-for-byte `diff`; a mismatch is treated as unsafe and stops the recomp pipeline.
+Steam Deck needs the x86_64 package. Extract the Steam Deck archive and run
+`START-ROCKET-R.sh`. It does not need FUSE. For the other Linux packages, try the
+portable archive's `Launch-Rocket-R.sh` if the AppImage cannot mount.
 
-## N64Recomp reports a missing function/indirect target
+Launch-helper logs are in `${XDG_STATE_HOME:-$HOME/.local/state}/rocket-r/`.
+Look for `steamdeck-launch.log`, `portable-launch.log` or `appimage-launch.log`.
+Keep the whole extracted package together. Its libraries and assets are required.
 
-Do not edit `RecompiledFuncs`. Add evidenced metadata to `runtime-recomp/rocket.us.recomp-policy.json`, then run `Diagnose-Rocket-Recompile.cmd`. The useful evidence is the function name, VRAM and size/caller from the matching ELF/decomp.
+Linux tests under WSL may use llvmpipe software rendering. Their performance does
+not represent a Steam Deck or a native Linux GPU. Check the renderer named in
+the log before treating low frame rates there as a game regression.
 
-## `osPiRawStartDma_recomp` aborts
+## Android launch or sound problems
 
-Capture the runtime log/stack and identify the translated caller. Rocket contains a guarded startup raw-DMA branch that should not execute for the normal US layout. If a real path reaches it, implement the smallest game/runtime patch supported by the callsite rather than globally turning arbitrary MMIO into host pointers.
+The APK needs an ARM64 device with the Vulkan features used by the renderer.
+Vulkan 1.0 support alone is not enough. Check media volume and the active audio
+output if the game is silent. Android Back and the Settings touch button open
+the overlay.
 
-## RT64 opens a window but the frame is black
+For a crash log, connect the device with USB debugging enabled and run
+`CAPTURE-ANDROID-CRASH.cmd` from the source folder. It writes the captured logs
+under `build/logs/`. Review them before sharing, as Android logs can contain
+information from other apps.
 
-Confirm the log reaches an `M_GFXTASK` and that the task's ucode equals Rocket's `gspF3DEX2_fifoTextStart` (`0x800021C0`). A black window before the first graphics task is a CPU/scheduler bring-up issue; a black window after accepted display lists is a renderer/VI issue.
+## Controls seem wrong
 
-## Audio task rejected
+Select the intended device in **Controls > Controller**, then use **Test Inputs**
+in N64 Controls. Release held buttons and centre the stick before assigning
+a new input. See the [controls guide](CONTROLS.md).
 
-The initial dispatcher expects `M_AUDTASK` with ucode `0x80001560`. If the log shows another address, do not broaden the dispatcher blindly; inspect the task and Rocket's matching ROM map first.
+## Builder cannot continue
+
+If WSL needs first-run setup, open Ubuntu once and create its account, then rerun
+the builder. If newly installed Visual Studio tools are still unavailable,
+restart Windows and try again.
+
+Read the failed stage's log in `build/logs/`. The matching decompilation must
+rebuild the ROM byte for byte. A mismatch stops the build. Do not bypass it.
+For a missing translated function or indirect target, fix the recompilation
+policy using the matching ELF; do not edit RecompiledFuncs.
+
+## A font or shader looks different
+
+Comic Sans is loaded when it is installed. Otherwise Rocket-R uses its shared
+fallback font. Custom shaders need a binary for the active graphics backend and
+a game restart. See [custom shaders](CUSTOM_SHADERS.md).

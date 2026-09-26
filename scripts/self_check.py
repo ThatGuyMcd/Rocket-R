@@ -80,6 +80,15 @@ def main() -> int:
         "scripts/bootstrap_dependencies.py", "scripts/generate_recomp_config.py",
         "scripts/validate_rom.py", "scripts/scan_release.py", "scripts/OneClickBuild.ps1",
         "scripts/Build-Android.ps1", "scripts/package_appimage.sh",
+        "scripts/stage_release_docs.py", "scripts/verify_release.py",
+        "docs/CONTROLS.md", "docs/TESTING.md",
+        "src/binding_capture.cpp", "src/binding_capture.hpp",
+        "src/controls_studio.cpp", "src/controls_studio.hpp",
+        "src/runtime_log.cpp", "src/runtime_log.hpp",
+        "tests/controls_tests.cpp", "tests/controls_ui_tests.cpp", "tests/runtime_log_tests.cpp",
+        "tests/TouchControlsModelTest.java",
+        "packaging/android/app/src/main/java/com/rocketret/rocketr/TouchControlsModel.java",
+        "packaging/android/app/src/main/java/com/rocketret/rocketr/TouchControlsView.java",
         "scripts/build_rocket_decomp.sh", "Build-Linux.sh",
         "packaging/android/build.gradle", "packaging/android/settings.gradle",
         "packaging/android/app-build.gradle", "packaging/android/app/jni/CMakeLists.txt",
@@ -95,6 +104,12 @@ def main() -> int:
         require((root / name).is_file(), f"missing required source file: {name}")
 
     version = (root / "VERSION").read_text(encoding="utf-8-sig").strip()
+    for builder in ("scripts/OneClickBuild.ps1", "Build-Linux.sh"):
+        text = (root / builder).read_text(encoding="utf-8-sig")
+        build_lines = [line for line in text.splitlines() if '--target' in line and 'RocketR' in line]
+        require(any(all(target in line for target in (
+            'RocketPresentationTests', 'RocketRuntimeLogTests', 'RocketControlsTests', 'RocketControlsUiTests'
+        )) for line in build_lines), f"{builder} must compile all four test executables before CTest")
     require(bool(VERSION_RE.fullmatch(version)), f"invalid VERSION value: {version!r}")
 
     lock = json.loads((root / "dependencies.lock.json").read_text(encoding="utf-8"))
@@ -212,8 +227,13 @@ def main() -> int:
     builder = (root / "scripts/OneClickBuild.ps1").read_text(encoding="utf-8-sig")
     require('Banner "Rocket-R ${Version}: local static recompilation builder"' in builder,
             "OneClickBuild.ps1 must delimit Version before a literal colon for Windows PowerShell 5.1")
+<<<<<<< Updated upstream
     require("$BuilderRevision = 'FIXED34'" in builder,
             "OneClickBuild.ps1 must identify this multi-platform FIXED27-baseline source as FIXED34")
+=======
+    require("$BuilderRevision = 'RELEASE-1.0.0'" in builder,
+            "OneClickBuild.ps1 must identify the current stabilization pipeline")
+>>>>>>> Stashed changes
     require(".Replace([char]0,'')" not in builder and '.Replace([char]0,"")' not in builder,
             "OneClickBuild.ps1 contains the PowerShell 5.1 Replace(char,char) empty-string trap")
     require("ROCKET_R_BUILDER_WINPATH" in builder and "$bridgeName + '/p'" in builder,
@@ -282,8 +302,19 @@ def main() -> int:
                 f"N64ModernRuntime stability patch set is missing marker: {marker}")
 
     rt64_manifest = next((d for d in manifest.get("dependencies", []) if d.get("name") == "RT64"), None)
+<<<<<<< Updated upstream
     require(rt64_manifest is not None and len(rt64_manifest.get("patches", [])) == 14,
             "Rocket-R self-check RT64 patch count must match the current manifest, including the DKR-R semantic identity patch")
+=======
+    require(rt64_manifest is not None and len(rt64_manifest.get("patches", [])) == 20,
+            "Rocket-R self-check requires all 20 RT64 patches, including Android and texture detail repairs")
+    require(any(p.get("path") == "patches/rt64/0015-rocket-rigid-interpolation.patch"
+                for p in rt64_manifest["patches"]),
+            "Rocket-R rigid interpolation patch is missing from the manifest")
+    require(any(p.get("path") == "patches/rt64/0016-rocket-projected-shadow-interpolation.patch"
+                for p in rt64_manifest["patches"]),
+            "Rocket-R projected shadow interpolation patch is missing from the manifest")
+>>>>>>> Stashed changes
     rt64_patch_text = "\n".join(
         (root / patch["path"]).read_text(encoding="utf-8")
         for patch in rt64_manifest["patches"])
@@ -315,10 +346,11 @@ def main() -> int:
             "SDL_GetQueuedAudioSize" in platform_cpp and
             "g_audio_total_submitted_frames" not in platform_cpp and
             "g_audio_accounted_consumed_frames" not in platform_cpp and
-            "open_audio_locked(g_audio_frequency)" not in platform_cpp,
+            "open_audio_locked(frequency);" in platform_cpp and
+            "Desktop audio retains V47 timing." in platform_cpp,
             "FIXED34 must pace Rocket's two-slot N64 AI FIFO from a continuous wall clock, keep SDL host buffering independent, and use a sub-DMA callback quantum")
     require("audio_profile=2" in ui_cpp and "volume = 0.65F" in ui_cpp and
-            "normalized default" in ui_cpp,
+            "if (audio_profile < 2)" in ui_cpp and "volume = std::min(volume, 0.65F)" in ui_cpp,
             "FIXED34 must preserve the normalized 65% default/migration for legacy audio settings")
     require("config.window_handle = window_handle" in main_cpp and "std::thread runtime_thread" in main_cpp,
             "FIXED34 must hand the main-thread SDL window to N64ModernRuntime and run recomp::start on a worker")

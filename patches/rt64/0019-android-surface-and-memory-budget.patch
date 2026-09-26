@@ -1,0 +1,50 @@
+diff --git a/src/hle/rt64_application.cpp b/src/hle/rt64_application.cpp
+--- a/src/hle/rt64_application.cpp
++++ b/src/hle/rt64_application.cpp
+@@ -72,6 +72,9 @@
+ 
+         frameCounter = 0;
+         threadsAvailable = std::max(std::thread::hardware_concurrency(), 1U);
++#if defined(__ANDROID__)
++        threadsAvailable = std::min(threadsAvailable, 4U);
++#endif
+         freeCamClearQueued = false;
+ 
+         if (appConfig.detectDataPath) {
+@@ -316,7 +319,11 @@
+         // Create the swap chain with the texture count specified from the configuration.
+         RenderSwapChainDesc swapChainDesc;
+         swapChainDesc.renderWindow = appWindow->windowHandle;
++#if defined(__ANDROID__)
++        swapChainDesc.format = RenderFormat::R8G8B8A8_UNORM;
++#else
+         swapChainDesc.format = RenderFormat::B8G8R8A8_UNORM;
++#endif
+         swapChainDesc.textureCount = (userConfig.displayBuffering == UserConfiguration::DisplayBuffering::Triple) ? 3 : 2;
+ 
+         // Enable present wait if supported by the device. We specify a max latency of 1 as we use it to wait right before the next
+@@ -368,6 +375,9 @@
+         // Compute the approximate pool for texture replacements from the dedicated video memory.
+         const uint64_t MinimumTexturePoolSize = 512 * 1024 * 1024;
+         uint64_t texturePoolSize = std::max((deviceDescription.dedicatedVideoMemory * 2) / 3, MinimumTexturePoolSize);
++#if defined(__ANDROID__)
++        texturePoolSize = 128ULL * 1024 * 1024; // Shared system RAM on 3 GB phones.
++#endif
+         textureCache->setReplacementPoolMaxSize(texturePoolSize);
+ 
+ #   if RT_ENABLED
+diff --git a/src/render/rt64_shader_library.cpp b/src/render/rt64_shader_library.cpp
+--- a/src/render/rt64_shader_library.cpp
++++ b/src/render/rt64_shader_library.cpp
+@@ -632,7 +632,11 @@
+             RenderGraphicsPipelineDesc pipelineDesc;
+             pipelineDesc.vertexShader = fullScreenVertexShader.get();
+             pipelineDesc.pixelShader = regularShader.get();
++#if defined(__ANDROID__)
++            pipelineDesc.renderTargetFormat[0] = RenderFormat::R8G8B8A8_UNORM;
++#else
+             pipelineDesc.renderTargetFormat[0] = RenderFormat::B8G8R8A8_UNORM; // TODO: Use whatever format the swap chain was created with.
++#endif
+             pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+             pipelineDesc.renderTargetCount = 1;
+             pipelineDesc.pipelineLayout = videoInterfaceNearest.pipelineLayout.get();

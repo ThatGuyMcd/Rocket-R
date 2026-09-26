@@ -1,0 +1,157 @@
+diff --git a/src/shared/rt64_raster_params.h b/src/shared/rt64_raster_params.h
+--- a/src/shared/rt64_raster_params.h
++++ b/src/shared/rt64_raster_params.h
+@@ -13,7 +13,7 @@
+         uint renderIndex;
+         float mipLODBias;
+         float zFightToleranceScale;
+-        uint padding;
++        float textureDetailAtDistance;
+         float2 screenScale;
+         float2 screenOffset;
+     };
+diff --git a/src/render/rt64_framebuffer_renderer.cpp b/src/render/rt64_framebuffer_renderer.cpp
+--- a/src/render/rt64_framebuffer_renderer.cpp
++++ b/src/render/rt64_framebuffer_renderer.cpp
+@@ -473,6 +473,7 @@
+         RenderRect previousScissor;
+         interop::RasterParams rasterParams{};
+         rasterParams.mipLODBias = getDefaultSamplerMipLODBias();
++        rasterParams.textureDetailAtDistance = getTextureDetailAtDistance();
+         rasterParams.zFightToleranceScale = getRocketZFightToleranceScale();
+         RenderDescriptorSet *descRealFbSet = framebuffer.descRealFbSet->get();
+         RenderDescriptorSet *descDummyFbSet = framebuffer.descDummyFbSet->get();
+diff --git a/src/render/rt64_shader_library.h b/src/render/rt64_shader_library.h
+--- a/src/render/rt64_shader_library.h
++++ b/src/render/rt64_shader_library.h
+@@ -11,6 +11,8 @@
+     uint32_t getDefaultSamplerAnisotropy();
+     void setDefaultSamplerMipLODBias(float bias);
+     float getDefaultSamplerMipLODBias();
++    void setTextureDetailAtDistance(float detail);
++    float getTextureDetailAtDistance();
+ 
+     struct ShaderRecord {
+         std::unique_ptr<RenderPipeline> pipeline;
+diff --git a/src/render/rt64_shader_library.cpp b/src/render/rt64_shader_library.cpp
+--- a/src/render/rt64_shader_library.cpp
++++ b/src/render/rt64_shader_library.cpp
+@@ -6,6 +6,7 @@
+ 
+ #include <algorithm>
+ #include <atomic>
++#include <cmath>
+ #include <exception>
+ #include <filesystem>
+ #include <fstream>
+@@ -185,6 +186,7 @@
+     namespace {
+         std::atomic<uint32_t> gDefaultSamplerAnisotropy{16U};
+         std::atomic<float> gDefaultSamplerMipLODBias{0.0f};
++        std::atomic<float> gTextureDetailAtDistance{0.0f};
+     }
+ 
+     void setDefaultSamplerAnisotropy(uint32_t level) {
+@@ -203,6 +205,15 @@
+ 
+     float getDefaultSamplerMipLODBias() {
+         return gDefaultSamplerMipLODBias.load(std::memory_order_acquire);
++    }
++
++    void setTextureDetailAtDistance(float detail) {
++        gTextureDetailAtDistance.store(std::isfinite(detail) ? std::clamp(detail, 0.0f, 1.0f) : 0.0f,
++                                      std::memory_order_release);
++    }
++
++    float getTextureDetailAtDistance() {
++        return gTextureDetailAtDistance.load(std::memory_order_acquire);
+     }
+ 
+     // ShaderLibrary
+diff --git a/src/shaders/RasterPS.hlsl b/src/shaders/RasterPS.hlsl
+--- a/src/shaders/RasterPS.hlsl
++++ b/src/shaders/RasterPS.hlsl
+@@ -128,7 +128,7 @@
+         lodScale = FbParams.resolutionScale.y;
+     }
+     
+-    computeLOD(otherMode, instanceRenderIndices[gConstants.renderIndex].rdpTileCount, instanceRDPParams[instanceIndex].primLOD, lodScale, ddxVertexUV, ddyVertexUV, tileIndex0, tileIndex1, lodFraction);
++    computeLOD(otherMode, instanceRenderIndices[gConstants.renderIndex].rdpTileCount, instanceRDPParams[instanceIndex].primLOD, lodScale, ddxVertexUV, ddyVertexUV, tileIndex0, tileIndex1, lodFraction, gConstants.textureDetailAtDistance);
+ 
+     float4 texVal0 = float4(0.0f, 0.0f, 0.0f, 1.0f);
+     float4 texVal1 = float4(0.0f, 0.0f, 0.0f, 1.0f);
+@@ -143,7 +143,7 @@
+         
+         const GPUTile gpuTile = GPUTiles[globalTileIndex];
+         const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags) ? vertexUV : lowResUV;
+-        texVal0 = sampleTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, false, gConstants.mipLODBias);
++        texVal0 = sampleTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, false, gConstants.mipLODBias, gConstants.textureDetailAtDistance);
+     }
+     
+     if (renderFlagUsesTexture1(rp.flags)) {
+@@ -159,7 +159,7 @@
+         const GPUTile gpuTile = GPUTiles[globalTileIndex];
+         const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags) ? vertexUV : lowResUV;
+         const uint nativeSampler = renderFlagNativeSampler1(rp.flags);
+-        texVal1 = sampleTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, oneCycleHardwareBug, gConstants.mipLODBias);
++        texVal1 = sampleTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, oneCycleHardwareBug, gConstants.mipLODBias, gConstants.textureDetailAtDistance);
+     }
+     
+     // Color combiner.
+diff --git a/src/shaders/TextureSampler.hlsli b/src/shaders/TextureSampler.hlsli
+--- a/src/shaders/TextureSampler.hlsli
++++ b/src/shaders/TextureSampler.hlsli
+@@ -24,7 +24,7 @@
+ #define USE_FOR_LOOPS 0
+ #endif
+ 
+-void computeLOD(OtherMode otherMode, uint rdpTileCount, float2 primLOD, float resLodScale, float2 ddxUV, float2 ddyUV, inout int tileIndex0, inout int tileIndex1, out float lodFraction) {
++void computeLOD(OtherMode otherMode, uint rdpTileCount, float2 primLOD, float resLodScale, float2 ddxUV, float2 ddyUV, inout int tileIndex0, inout int tileIndex1, out float lodFraction, float textureDetailAtDistance = 0.0f) {
+     const bool usesLOD = (otherMode.textLOD() == G_TL_LOD);
+     if (usesLOD) {
+         const bool lodSharpen = (otherMode.textDetail() & G_TD_SHARPEN) != 0;
+@@ -32,6 +32,12 @@
+         const int tileMax = int(rdpTileCount) - 1;
+         float2 maxDdUV = max(abs(ddxUV), abs(ddyUV));
+         float maxDst = max(maxDdUV.x, maxDdUV.y) * resLodScale;
++        // Reduce only minification. Zero preserves the authored N64 LOD;
++        // one keeps the finest distance level. Preserve near-camera detail
++        // and sharpen modes, including the authored minimum LOD.
++        if (textureDetailAtDistance > 0.0f && maxDst > 1.0f) {
++            maxDst = exp2(log2(maxDst) * (1.0f - textureDetailAtDistance));
++        }
+         if (lodDetail || lodSharpen) {
+             maxDst = max(maxDst, primLOD.y);
+         }
+@@ -214,7 +220,7 @@
+     }
+ }
+ 
+-float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputUV, float2 ddxUV, float2 ddyUV, const RDPTile rdpTile, const GPUTile gpuTile, bool nextPixelBug, float mipLODBias) {
++float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputUV, float2 ddxUV, float2 ddyUV, const RDPTile rdpTile, const GPUTile gpuTile, bool nextPixelBug, float mipLODBias, float textureDetailAtDistance = 0.0f) {
+     const bool texturePerspective = (otherMode.textPersp() == G_TP_PERSP);
+     const bool applyCorrection = (!texturePerspective && !renderFlagRect(renderFlags));
+ 
+@@ -280,6 +286,7 @@
+             float ddMax = max(dot(ddxUVScaled, ddxUVScaled), dot(ddyUVScaled, ddyUVScaled));
+             float maxMip = float(gpuTile.textureDimensions.z - 1);
+             mip = clamp(0.5 * log2(ddMax) + mipLODBias, 0.0f, maxMip);
++            mip *= (1.0f - textureDetailAtDistance);
+             RDPMipLevels[0] = uint(floor(mip));
+             RDPMipLevels[1] = min(RDPMipLevels[0] + 1U, uint(maxMip));
+             numRDPSamples = 2;
+@@ -290,7 +297,13 @@
+             float2 originalSize = gpuTile.textureDimensions.xy / gpuTile.tcScale;
+             // A 2^bias gradient scale adds bias to the selected mip level.
+             // Scale both axes equally to preserve the anisotropic footprint ratio.
+-            const float lodGradientScale = exp2(mipLODBias);
++            float lodGradientScale = exp2(mipLODBias);
++            if (textureDetailAtDistance > 0.0f) {
++                float2 gx = ddxUV * gpuTile.tcScale * lodGradientScale;
++                float2 gy = ddyUV * gpuTile.tcScale * lodGradientScale;
++                float minification = max(max(dot(gx, gx), dot(gy, gy)), 1.0f);
++                lodGradientScale *= exp2(-0.5f * log2(minification) * textureDetailAtDistance);
++            }
+             float2 ddxUVNorm = (ddxUV / originalSize) * lodGradientScale;
+             float2 ddyUVNorm = (ddyUV / originalSize) * lodGradientScale;
+             

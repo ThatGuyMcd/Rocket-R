@@ -1,2 +1,0 @@
-=== Rocket-R v28 stable-v6 interpolation + unbounded render queue ===
-queue_base=80480000 capacity=32768 entry_bytes=24 retail_limit=256 v21_batches=OFF v27_gfx_arena_redirect=OFF

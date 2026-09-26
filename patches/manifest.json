@@ -154,6 +154,39 @@
           "path": "patches/rt64/0014-rocket-custom-vi-shader.patch",
           "purpose": "Add optional precompiled custom final-VI pixel shaders using RT64's existing fullscreen vertex shader, descriptor contract and backend-specific DXIL/SPIR-V binaries.",
           "sha256": "ce763904b126c054710ddbd0dd8e55d23a00610703bafc0c8f1df53bae42126c"
+<<<<<<< Updated upstream
+=======
+        },
+        {
+          "path": "patches/rt64/0015-rocket-rigid-interpolation.patch",
+          "purpose": "Preserve constant angular progress in quaternion interpolation and rigid shape on the first matched frame; snap invalid decompositions.",
+          "sha256": "aa99c88bb88aff8091d237eee5c420d0ac86474d2af43d2be322428faefc6d98"
+        },
+        {
+          "path": "patches/rt64/0016-rocket-projected-shadow-interpolation.patch",
+          "purpose": "Restore component interpolation for singular shadow projections while retaining V45 rigid rotation and first-match fixes.",
+          "sha256": "c1dc53a71210c0672ef57da314c98199fcfcfb98107f19fd085a362c1beb1a37"
+        },
+        {
+          "path": "patches/rt64/0017-android-build-compatibility.patch",
+          "purpose": "Make Android native-window guards, zstd qsort fallback and Python shader embedding compatibility reproducible through the checked dependency pipeline, replacing temporary build-time rewrites.",
+          "sha256": "c3be5fdb82a2ba418e08095feeab4b514d8f4c537231dd349ae8e52be4044e7f"
+        },
+        {
+          "path": "patches/rt64/0018-texture-detail-at-distance.patch",
+          "purpose": "Add live Original-to-Highest texture-distance detail control for native N64 mip tile selection and replacement texture mipmaps.",
+          "sha256": "90cb517b234b7504535fe1835521261d0385920e5d200b35b555b101672a7d05"
+        },
+        {
+          "path": "patches/rt64/0019-android-surface-and-memory-budget.patch",
+          "purpose": "Use Android RGBA swapchain and matching VI pipelines; constrain mobile replacement-texture memory for the 3 GB phone target.",
+          "sha256": "9cfb8db6ec87f1c4ca597d99349790baa81b8bb839bb9e47400b1b30de287bbf"
+        },
+        {
+          "path": "patches/rt64/0020-android-surface-lifecycle.patch",
+          "purpose": "Retain and replace Android native Vulkan surfaces at the present-thread resize boundary after background/resume.",
+          "sha256": "f564b1aaeca8969aa5670e784e2f6cc9bde38f902ca3e22293a502cb33b059ab"
+>>>>>>> Stashed changes
         }
       ]
     }

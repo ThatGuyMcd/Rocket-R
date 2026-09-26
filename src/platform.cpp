@@ -5,6 +5,10 @@
 
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
+#if defined(__ANDROID__)
+#include "plume_render_interface.h"
+#include <jni.h>
+#endif
 #if defined(__linux__) && !defined(__ANDROID__)
 #include <SDL_vulkan.h>
 #endif
@@ -32,9 +36,20 @@ SDL_Window* g_window = nullptr;
 #if defined(__ANDROID__)
 void* g_android_native_window = nullptr;
 std::atomic<int> g_android_display_rate{60};
+std::mutex g_touch_mutex;
+rocket::input::State g_touch_state{};
+std::atomic<bool> g_touch_overlay_request{false};
+std::atomic<int> g_android_output_rate{48000};
+std::atomic<float> g_android_focus_gain{1.0F};
+SDL_AudioStream* g_android_audio_stream = nullptr;
+std::uint32_t g_android_device_rate = 0;
+std::vector<std::int16_t> g_android_output_samples;
+std::chrono::steady_clock::time_point g_android_audio_retry_after{};
 #endif
 SDL_GameController* g_controller = nullptr;
 std::atomic<bool> g_controller_connected{false};
+std::atomic<SDL_JoystickID> g_controller_instance{-1};
+rocket::input::State g_input_preview{};
 std::string g_preferred_controller_key;
 std::string g_active_controller_key;
 std::mutex g_input_mutex;
@@ -95,7 +110,7 @@ std::vector<ControllerDeviceEntry> EnumerateControllers() {
         }
         const char* raw_name = SDL_GameControllerNameForIndex(i);
         std::string name = raw_name != nullptr && *raw_name != '\0'
-            ? raw_name : "SDL gamepad";
+            ? raw_name : "Controller";
         if (ordinal > 0) name += " #" + std::to_string(ordinal + 1);
         result.push_back({i, guid + "#" + std::to_string(ordinal), std::move(name)});
     }
@@ -103,6 +118,7 @@ std::vector<ControllerDeviceEntry> EnumerateControllers() {
 }
 
 void close_controller() {
+    g_controller_instance.store(-1);
     if (g_controller != nullptr) {
         SDL_GameControllerClose(g_controller);
         g_controller = nullptr;
@@ -128,6 +144,7 @@ void open_first_controller() {
         g_controller = SDL_GameControllerOpen(device.device_index);
         if (g_controller != nullptr) {
             g_active_controller_key = device.key;
+            g_controller_instance.store(SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(g_controller)));
             g_controller_connected.store(true, std::memory_order_release);
             std::fprintf(stderr, "[input] controller: %s (%s)\n",
                          device.name.c_str(), device.key.c_str());
@@ -149,8 +166,16 @@ void reset_audio_timing_locked() {
 
 std::size_t queued_audio_frames_locked() {
     if (g_audio_device == 0) return 0;
+#if defined(__ANDROID__)
+    // Report output buffering in guest frames. It never drives the AI clock.
+    const std::uint64_t frames = SDL_GetQueuedAudioSize(g_audio_device) /
+        (2U * sizeof(std::int16_t));
+    return g_android_device_rate == 0 ? 0 :
+        static_cast<std::size_t>(frames * g_audio_frequency / g_android_device_rate);
+#else
     return SDL_GetQueuedAudioSize(g_audio_device) /
            (2U * sizeof(std::int16_t));
+#endif
 }
 
 // Model the N64 AI DMA engine independently from the host audio backend.
@@ -223,6 +248,10 @@ void maybe_start_audio_locked() {
 }
 
 void open_audio_locked(std::uint32_t frequency) {
+#if defined(__ANDROID__)
+    SDL_FreeAudioStream(g_android_audio_stream);
+    g_android_audio_stream = nullptr;
+#endif
     if (g_audio_device != 0) {
         SDL_ClearQueuedAudio(g_audio_device);
         SDL_CloseAudioDevice(g_audio_device);
@@ -238,10 +267,22 @@ void open_audio_locked(std::uint32_t frequency) {
     // host callback below that size so one host wake cannot consume more than
     // a complete minimum guest DMA in a single scheduling quantum.
     desired.samples = 256;
+#if defined(__ANDROID__)
+    // AudioTrack implementations need not accept Rocket's unusual 22,500 Hz
+    // rate. Convert only the Android output, continuously across DMA blocks.
+    // Guest AI frequency, FIFO progression and desktop output stay unchanged.
+    desired.freq = g_android_output_rate.load(std::memory_order_acquire);
+    desired.samples = 512;
+#endif
     SDL_AudioSpec obtained{};
     g_audio_device = SDL_OpenAudioDevice(nullptr, 0, &desired, &obtained, 0);
     if (g_audio_device == 0) {
+#if defined(__ANDROID__)
+        g_audio_frequency = frequency;
+        g_android_audio_retry_after = AudioClock::now() + std::chrono::seconds(2);
+#else
         g_audio_frequency = 0;
+#endif
         g_audio_callback_frames = 0;
         std::fprintf(stderr, "[audio] SDL_OpenAudioDevice failed at %u Hz: %s\n",
                      frequency, SDL_GetError());
@@ -252,6 +293,24 @@ void open_audio_locked(std::uint32_t frequency) {
     // guest AI clock anchored to the rate Rocket asked osAiSetFrequency for.
     g_audio_frequency = frequency;
     g_audio_callback_frames = obtained.samples;
+#if defined(__ANDROID__)
+    g_android_device_rate = static_cast<std::uint32_t>(obtained.freq);
+    g_audio_callback_frames = static_cast<std::uint32_t>(
+        (static_cast<std::uint64_t>(obtained.samples) * frequency + obtained.freq - 1) / obtained.freq);
+    if (frequency != g_android_device_rate) {
+        g_android_audio_stream = SDL_NewAudioStream(AUDIO_S16SYS, 2, static_cast<int>(frequency),
+                                                   AUDIO_S16SYS, 2, obtained.freq);
+        if (g_android_audio_stream == nullptr) {
+            std::fprintf(stderr, "[audio] Android output conversion failed: %s\n", SDL_GetError());
+            SDL_CloseAudioDevice(g_audio_device);
+            g_audio_device = 0;
+            g_android_audio_retry_after = AudioClock::now() + std::chrono::seconds(2);
+            return;
+        }
+    }
+    std::fprintf(stderr, "[audio][android] guest=%u output=%d Hz driver=%s; output conversion only\n",
+                 frequency, obtained.freq, SDL_GetCurrentAudioDriver());
+#endif
     SDL_PauseAudioDevice(g_audio_device, 1);
     std::fprintf(stderr,
                  "[audio] device opened requested=%u actual=%d Hz stereo S16 callback=%u; host paused for cushion prime\n",
@@ -286,6 +345,11 @@ bool rocket::platform::initialise() {
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
 #if defined(_WIN32)
     SDL_setenv("SDL_AUDIODRIVER", "wasapi", 0);
+#elif defined(__ANDROID__)
+    SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+    // The pinned SDL AAudio backend races timestamp polling with device
+    // open/close. AudioTrack avoids that Android launch crash.
+    SDL_setenv("SDL_AUDIODRIVER", "android", 0);
 #endif
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER |
                  SDL_INIT_HAPTIC | SDL_INIT_SENSOR) < 0) {
@@ -309,6 +373,10 @@ void rocket::platform::shutdown() {
     close_controller();
     {
         std::lock_guard lock(g_audio_mutex);
+#if defined(__ANDROID__)
+        SDL_FreeAudioStream(g_android_audio_stream);
+        g_android_audio_stream = nullptr;
+#endif
         if (g_audio_device != 0) {
             SDL_ClearQueuedAudio(g_audio_device);
             SDL_CloseAudioDevice(g_audio_device);
@@ -323,6 +391,7 @@ void rocket::platform::shutdown() {
         g_window = nullptr;
     }
 #if defined(__ANDROID__)
+    plume::setAndroidNativeWindow(nullptr);
     g_android_native_window = nullptr;
     g_android_display_rate.store(60, std::memory_order_release);
 #endif
@@ -332,6 +401,9 @@ void rocket::platform::shutdown() {
 ultramodern::renderer::WindowHandle rocket::platform::create_window() {
     if (g_window == nullptr) {
         Uint32 flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+#if defined(__ANDROID__)
+        flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+#endif
 #if defined(__APPLE__)
         flags |= SDL_WINDOW_METAL;
 #elif defined(__linux__) || defined(__ANDROID__)
@@ -362,6 +434,7 @@ ultramodern::renderer::WindowHandle rocket::platform::create_window() {
             return {};
         }
         g_android_native_window = android_info.info.android.window;
+        plume::setAndroidNativeWindow(android_info.info.android.window);
         const int display_index = SDL_GetWindowDisplayIndex(g_window);
         SDL_DisplayMode display_mode{};
         if (display_index >= 0 &&
@@ -451,10 +524,10 @@ ultramodern::renderer::WindowHandle rocket::platform::prepare_window_for_game() 
         const std::string detail=SDL_GetError();
         std::fprintf(stderr,"[platform][linux] Vulkan recreation failed: %s\n",detail.c_str());
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
-            "Rocket-R - Vulkan startup failed",
-            ("Rocket-R could not create the Vulkan game window.\n\n"+detail+
-             "\n\nPlease install/update your Vulkan GPU driver. "
-             "The software launcher can run even when the game renderer cannot.").c_str(),
+            "Rocket-R - Graphics startup failed",
+            ("Rocket-R could not start Vulkan.\n\nDetails: "+detail+
+             "\n\nCheck that your graphics driver supports Vulkan and is up to date."
+             "").c_str(),
             nullptr);
         return {};
     }
@@ -471,8 +544,8 @@ ultramodern::renderer::WindowHandle rocket::platform::prepare_window_for_game() 
         const std::string detail=SDL_GetError();
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
             "Rocket-R - Vulkan unavailable",
-            ("The launcher opened, but Rocket-R's Vulkan renderer is unavailable.\n\n"+
-             detail+"\n\nThe Linux game build requires a working Vulkan driver.").c_str(),
+            ("Rocket-R needs a working Vulkan driver to run the game.\n\nDetails: "+
+             detail+"").c_str(),
             g_window);
         SDL_DestroyWindow(g_window);
         g_window=nullptr;
@@ -506,18 +579,54 @@ void rocket::platform::sample_input() {
         (SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS) != 0;
     const bool include_keyboard = focused;
     const bool include_controller = focused || rocket::input::background_input_enabled();
-    const auto state = rocket::input::poll(
+    const bool testing = rocket::ui::bindings_test_active();
+    rocket::input::State preview{};
+    auto state = rocket::input::poll(
         g_controller, include_keyboard, include_controller,
-        rocket::ui::overlay_visible(), !rocket::ui::input_capture_active());
+        rocket::ui::overlay_visible() || testing, !rocket::ui::input_capture_active(),
+        testing && focused ? &preview : nullptr);
+#if defined(__ANDROID__)
+    {
+        std::lock_guard touch_lock(g_touch_mutex);
+        if (focused && !rocket::ui::overlay_visible() && !testing) {
+            state.buttons |= g_touch_state.buttons;
+            if (g_touch_state.stick_x != 0.0F || g_touch_state.stick_y != 0.0F) {
+                state.stick_x = g_touch_state.stick_x;
+                state.stick_y = g_touch_state.stick_y;
+            }
+        } else {
+            g_touch_state = {};
+        }
+    }
+#endif
     std::lock_guard lock(g_input_mutex);
+    g_input_preview = preview;
     g_buttons = state.buttons;
     g_stick_x = state.stick_x;
     g_stick_y = state.stick_y;
 }
 
 void rocket::platform::pump_runtime_events() {
+#if defined(__ANDROID__)
+    if (g_touch_overlay_request.exchange(false, std::memory_order_acq_rel)) {
+        rocket::ui::toggle_overlay();
+    }
+#endif
     SDL_Event event{};
     while (SDL_PollEvent(&event)) {
+#if defined(__ANDROID__)
+        if (event.type == SDL_APP_WILLENTERBACKGROUND) {
+            plume::setAndroidNativeWindow(nullptr);
+        } else if (event.type == SDL_APP_DIDENTERFOREGROUND) {
+            SDL_SysWMinfo info{};
+            SDL_VERSION(&info.version);
+            if (SDL_GetWindowWMInfo(g_window, &info) == SDL_TRUE &&
+                info.subsystem == SDL_SYSWM_ANDROID && info.info.android.window != nullptr) {
+                g_android_native_window = info.info.android.window;
+                plume::setAndroidNativeWindow(info.info.android.window);
+            }
+        }
+#endif
         if (event.type == SDL_QUIT ||
             (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE)) {
             ultramodern::quit();
@@ -527,7 +636,7 @@ void rocket::platform::pump_runtime_events() {
             event.type == SDL_CONTROLLERDEVICEREMOVED) {
             open_first_controller();
         }
-        const bool fullscreen_shortcut = event.type == SDL_KEYDOWN && event.key.repeat == 0 &&
+        const bool fullscreen_shortcut = !rocket::ui::input_capture_active() && event.type == SDL_KEYDOWN && event.key.repeat == 0 &&
             event.key.keysym.scancode == SDL_SCANCODE_RETURN &&
             (event.key.keysym.mod & KMOD_ALT) != 0;
         if (fullscreen_shortcut) {
@@ -569,13 +678,20 @@ bool rocket::platform::controller_connected() {
     return g_controller_connected.load(std::memory_order_acquire);
 }
 
+std::int32_t rocket::platform::controller_instance_id() { return g_controller_instance.load(); }
+
+rocket::input::State rocket::platform::input_preview() {
+    std::lock_guard lock(g_input_mutex);
+    return g_input_preview;
+}
+
 std::string rocket::platform::controller_name() {
     if (g_controller == nullptr || !SDL_GameControllerGetAttached(g_controller)) {
-        if (!g_preferred_controller_key.empty()) return "Selected gamepad is disconnected";
-        return "No gamepad connected";
+        if (!g_preferred_controller_key.empty()) return "Selected controller disconnected.";
+        return "No controller connected.";
     }
     const char* name = SDL_GameControllerName(g_controller);
-    return name != nullptr && *name != '\0' ? name : "SDL gamepad";
+    return name != nullptr && *name != '\0' ? name : "Controller";
 }
 
 std::vector<rocket::platform::ControllerChoice> rocket::platform::controller_choices() {
@@ -634,6 +750,14 @@ void rocket::platform::test_rumble() {
 
 void rocket::platform::queue_samples(std::int16_t* samples, std::size_t sample_count) {
     std::lock_guard lock(g_audio_mutex);
+#if defined(__ANDROID__)
+    // Open only when real PCM arrives, avoiding a placeholder-rate Android
+    // AudioTrack open/close during startup. Desktop audio retains V47 timing.
+    if (g_audio_device == 0 && g_audio_frequency != 0 && samples != nullptr && sample_count != 0 &&
+        AudioClock::now() >= g_android_audio_retry_after) {
+        open_audio_locked(g_audio_frequency);
+    }
+#endif
     if (g_audio_device == 0 || samples == nullptr || sample_count == 0) return;
     if ((sample_count & 1U) != 0U) {
         std::fprintf(stderr, "[audio] rejected odd PCM sample count: %zu\n", sample_count);
@@ -675,6 +799,14 @@ void rocket::platform::queue_samples(std::int16_t* samples, std::size_t sample_c
     g_audio_swap.resize(sample_count);
     const float gain = std::clamp(
         g_master_volume.load(std::memory_order_acquire), 0.0F, 1.0F);
+<<<<<<< Updated upstream
+=======
+    const float gain = volume * kMaximumOutputGain
+#if defined(__ANDROID__)
+        * g_android_focus_gain.load(std::memory_order_acquire)
+#endif
+        ;
+>>>>>>> Stashed changes
     int peak = 0;
     for (std::size_t i = 0; i + 1 < sample_count; i += 2) {
         const auto scale = [gain, &peak](std::int16_t value) {
@@ -691,7 +823,25 @@ void rocket::platform::queue_samples(std::int16_t* samples, std::size_t sample_c
 
     const auto byte_count = static_cast<Uint32>(
         g_audio_swap.size() * sizeof(std::int16_t));
-    if (SDL_QueueAudio(g_audio_device, g_audio_swap.data(), byte_count) != 0) {
+    const void* output_data = g_audio_swap.data();
+    Uint32 output_bytes = byte_count;
+#if defined(__ANDROID__)
+    if (g_android_audio_stream != nullptr) {
+        if (SDL_AudioStreamPut(g_android_audio_stream, g_audio_swap.data(), static_cast<int>(byte_count)) < 0) {
+            std::fprintf(stderr, "[audio] Android stream input failed: %s\n", SDL_GetError());
+            return;
+        }
+        const int available = SDL_AudioStreamAvailable(g_android_audio_stream);
+        if (available < 0) return;
+        g_android_output_samples.resize(static_cast<std::size_t>(available) / sizeof(std::int16_t));
+        const int received = available > 0 ? SDL_AudioStreamGet(g_android_audio_stream,
+            g_android_output_samples.data(), available) : 0;
+        if (received < 0) return;
+        output_data = g_android_output_samples.data();
+        output_bytes = static_cast<Uint32>(received);
+    }
+#endif
+    if (output_bytes != 0 && SDL_QueueAudio(g_audio_device, output_data, output_bytes) != 0) {
         std::fprintf(stderr, "[audio] SDL_QueueAudio failed: %s\n", SDL_GetError());
         return;
     }
@@ -751,6 +901,9 @@ void rocket::platform::set_frequency(std::uint32_t frequency) {
     if (frequency < 8000U || frequency > 96000U) return;
     std::lock_guard lock(g_audio_mutex);
     if (g_audio_device != 0 && g_audio_frequency == frequency) return;
+#if defined(__ANDROID__)
+    if (g_audio_device == 0) { g_audio_frequency = frequency; return; }
+#endif
     open_audio_locked(frequency);
 }
 
@@ -792,3 +945,36 @@ rocket::platform::get_connected_device_info(int controller_num) {
     return {ultramodern::input::Device::Controller,
             pad ? ultramodern::input::Pak::RumblePak : ultramodern::input::Pak::None};
 }
+
+#if defined(__ANDROID__)
+// Java UI callbacks publish data only. SDL and ImGui remain on their owner
+// threads; holding a touch never blocks the game or opens an audio device.
+extern "C" JNIEXPORT void JNICALL
+Java_com_rocketret_rocketr_RocketActivity_nativeTouchState(JNIEnv*, jclass, jint buttons, jfloat x, jfloat y) {
+    std::lock_guard lock(g_touch_mutex);
+    g_touch_state.buttons = static_cast<std::uint16_t>(buttons);
+    g_touch_state.stick_x = std::isfinite(x) ? std::clamp(x, -1.0F, 1.0F) : 0.0F;
+    g_touch_state.stick_y = std::isfinite(y) ? std::clamp(y, -1.0F, 1.0F) : 0.0F;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_rocketret_rocketr_RocketActivity_nativeToggleOverlay(JNIEnv*, jclass) {
+    g_touch_overlay_request.store(true, std::memory_order_release);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_rocketret_rocketr_RocketActivity_nativeOverlayVisible(JNIEnv*, jclass) {
+    return rocket::ui::overlay_visible() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_rocketret_rocketr_RocketActivity_nativeOutputRate(JNIEnv*, jclass, jint rate) {
+    if (rate >= 8000 && rate <= 96000) g_android_output_rate.store(rate, std::memory_order_release);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_rocketret_rocketr_RocketActivity_nativeAudioFocus(JNIEnv*, jclass, jfloat gain) {
+    g_android_focus_gain.store(std::isfinite(gain) ? std::clamp(gain, 0.0F, 1.0F) : 0.0F,
+                               std::memory_order_release);
+}
+#endif

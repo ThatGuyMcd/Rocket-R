@@ -26,9 +26,11 @@ echo Launch Rocket-R on the device, choose/play the ROM, and reproduce any crash
 echo When Rocket-R closes or fails, return here and press any key.
 pause >nul
 
-set "OUT=%~dp0rocket-r-android-crash.txt"
-set "CRASH=%~dp0rocket-r-android-crash-buffer.txt"
-set "PKG=%~dp0rocket-r-android-package.txt"
+set "LOGDIR=%~dp0build\logs"
+if not exist "%LOGDIR%" mkdir "%LOGDIR%"
+set "OUT=%LOGDIR%\rocket-r-android-crash.txt"
+set "CRASH=%LOGDIR%\rocket-r-android-crash-buffer.txt"
+set "PKG=%LOGDIR%\rocket-r-android-package.txt"
 
 "%ADB%" logcat -d -v threadtime > "%OUT%"
 "%ADB%" logcat -b crash -d -v threadtime > "%CRASH%" 2>nul

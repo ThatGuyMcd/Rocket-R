@@ -20,6 +20,7 @@ mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib" "$APPDIR/usr/share/applications" "$
 install -m 0755 "$BINARY" "$APPDIR/usr/bin/Rocket-R"
 install -m 0644 "$PROJECT_ROOT/packaging/linux/rocket-r.desktop" "$APPDIR/rocket-r.desktop"
 install -m 0644 "$PROJECT_ROOT/packaging/linux/rocket-r.desktop" "$APPDIR/usr/share/applications/rocket-r.desktop"
+<<<<<<< Updated upstream
 install -m 0644 "$PROJECT_ROOT/packaging/linux/rocket-r.svg" "$APPDIR/rocket-r.svg"
 install -m 0644 "$PROJECT_ROOT/packaging/linux/rocket-r.svg" "$APPDIR/usr/share/icons/hicolor/scalable/apps/rocket-r.svg"
 ln -sfn rocket-r.svg "$APPDIR/.DirIcon"
@@ -27,6 +28,14 @@ install -m 0644 "$PROJECT_ROOT/LICENSE.md" "$APPDIR/usr/share/doc/rocket-r/LICEN
 install -m 0644 "$PROJECT_ROOT/THIRD_PARTY.md" "$APPDIR/usr/share/doc/rocket-r/THIRD_PARTY.md"
 install -m 0644 "$PROJECT_ROOT/README.md" "$APPDIR/usr/share/doc/rocket-r/README.md"
 install -m 0644 "$PROJECT_ROOT/docs/STATUS.md" "$APPDIR/usr/share/doc/rocket-r/STATUS.md"
+=======
+mkdir -p "$APPDIR/usr/bin/assets/ui" "$APPDIR/usr/share/icons/hicolor/512x512/apps"
+install -m 0644 "$PROJECT_ROOT/src/UI/Rocket-R-green-full-resolution.png" "$APPDIR/usr/bin/assets/ui/Rocket-R-green-full-resolution.png"
+install -m 0644 "$PROJECT_ROOT/src/UI/Rocket-R-green-512x512.png" "$APPDIR/rocket-r.png"
+install -m 0644 "$PROJECT_ROOT/src/UI/Rocket-R-green-512x512.png" "$APPDIR/usr/share/icons/hicolor/512x512/apps/rocket-r.png"
+ln -sfn rocket-r.png "$APPDIR/.DirIcon"
+python3 "$PROJECT_ROOT/scripts/stage_release_docs.py" --root "$PROJECT_ROOT" --output "$APPDIR/usr/share/doc/rocket-r"
+>>>>>>> Stashed changes
 
 cat > "$APPDIR/AppRun" <<'RUNEOF'
 #!/usr/bin/env bash
@@ -70,6 +79,10 @@ for lib in "${libs[@]}"; do
   base="$(basename "$lib")"
   case "$base" in
     libc.so.*|libm.so.*|libdl.so.*|libpthread.so.*|librt.so.*|libresolv.so.*|libnss_*.so.*|ld-linux*.so.*|libvulkan.so.*) continue ;;
+    # Mesa/LLVM is loaded into this process by the host Vulkan loader. Its C++
+    # runtime must come from the same host: an Ubuntu 22.04 copy can shadow the
+    # newer GLIBCXX symbols required by SteamOS and newer distro drivers.
+    libstdc++.so.*|libgcc_s.so.*) continue ;;
     # Keep the host SteamOS/Mesa display/graphics stack together. Bundling these
     # Ubuntu copies ahead of the host libraries can break Vulkan driver loading.
     libX11.so.*|libX11-xcb.so.*|libXext.so.*|libXau.so.*|libXdmcp.so.*|libxcb*.so.*|libwayland*.so.*|libdrm*.so.*|libgbm.so.*|libGL.so.*|libGLX.so.*|libEGL.so.*|libGLES*.so.*|libOpenGL.so.*|libglapi.so.*|libxkbcommon*.so.*) continue ;;
@@ -118,14 +131,15 @@ if len(data) < 11 or data[8:11] != b"AI\x02":
     raise SystemExit(f"Invalid AppImage type-2 header: {p}")
 PY
 
-# Validate the exact embedded runtime/payload combination without requiring FUSE.
+# Validate the payload at the exact boundary of the hash-checked runtime.
+# AppImage's AI marker occupies ELF padding that Debian/Ubuntu's QEMU binfmt
+# mask expects to be zero. Invoking an ARM AppImage in an x86 container can
+# therefore fail before QEMU starts, even though the native runtime is valid.
+# Reading the embedded squashfs works for native and emulated builders alike.
 VERIFY_DIR="$(mktemp -d)"
 cleanup_verify() { rm -rf "$VERIFY_DIR"; }
 trap cleanup_verify EXIT
-(
-  cd "$VERIFY_DIR"
-  "$OUTPUT" --appimage-extract >/dev/null
-)
+unsquashfs -q -o "$(stat -c %s "$RUNTIME")" -d "$VERIFY_DIR/squashfs-root" "$OUTPUT" >/dev/null
 [[ -x "$VERIFY_DIR/squashfs-root/AppRun" ]] || { echo 'AppImage extraction validation did not produce executable AppRun.' >&2; exit 1; }
 [[ -x "$VERIFY_DIR/squashfs-root/usr/bin/Rocket-R" ]] || { echo 'AppImage extraction validation did not produce executable Rocket-R.' >&2; exit 1; }
 case "$ARCH" in

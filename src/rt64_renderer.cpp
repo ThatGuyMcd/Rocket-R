@@ -371,6 +371,7 @@ rocket::renderer::RT64Context::RT64Context(
         RT64::setDefaultSamplerAnisotropy(
             static_cast<std::uint32_t>(extra.anisotropy));
         RT64::setDefaultSamplerMipLODBias(extra.mip_lod_bias);
+        RT64::setTextureDetailAtDistance(extra.texture_detail_at_distance);
         RT64::setRocketCustomShaderBasePath(
             rocket::graphics::custom_shader_base_path());
         publish_rt64_rocket_controls(extra);
@@ -618,6 +619,7 @@ void rocket::renderer::RT64Context::apply_extra_graphics(bool force) {
         rocket::graphics::selected_aspect(4.0F / 3.0F);
 
     RT64::setDefaultSamplerMipLODBias(extra.mip_lod_bias);
+    RT64::setTextureDetailAtDistance(extra.texture_detail_at_distance);
     publish_rt64_rocket_controls(extra);
     if (application_->shaderLibrary != nullptr) {
         // Preserve RT64's driver-specific Automatic decision. Only explicit

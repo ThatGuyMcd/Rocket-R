@@ -10,6 +10,8 @@
 union SDL_Event;
 struct SDL_Window;
 
+namespace rocket::input { struct State; }
+
 namespace rocket::platform {
 
 bool initialise();
@@ -32,6 +34,8 @@ struct ControllerChoice {
 };
 
 bool controller_connected();
+std::int32_t controller_instance_id();
+input::State input_preview();
 std::string controller_name();
 std::vector<ControllerChoice> controller_choices();
 std::string preferred_controller_key();

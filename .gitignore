@@ -1,26 +1,33 @@
-# Private inputs
-roms/*
-!roms/README.md
-extern/
-build/
-dist/
+# Private game inputs and local toolchains
+/roms/*
+!/roms/README.md
+/extern/
+/build/
+/dist/
 
 # Generated recompilation output
-runtime-recomp/RecompiledFuncs/*
-!runtime-recomp/RecompiledFuncs/.gitkeep
-runtime-recomp/RecompiledRSP/*
-!runtime-recomp/RecompiledRSP/.gitkeep
-generated/*.generated.hpp
+/runtime-recomp/RecompiledFuncs/*
+!/runtime-recomp/RecompiledFuncs/.gitkeep
+/runtime-recomp/RecompiledPatches/
+/runtime-recomp/RecompiledRSP/*
+!/runtime-recomp/RecompiledRSP/.gitkeep
+/generated/*.generated.hpp
 
-# Rocket decomp private/generated files
-baserom*.z64
+# Local game data, signing material and diagnostics
 *.z64
 *.n64
 *.v64
 *.eep
 *.bin.save
+*.jks
+*.keystore
+*.log
+*.dmp
+imgui.ini
+/rocket-r-data/
+/rocket-r-android-*.txt
 
-# IDE / OS
+# Editors, operating systems and Python
 .vs/
 .vscode/
 .idea/
@@ -28,10 +35,9 @@ baserom*.z64
 *.suo
 .DS_Store
 Thumbs.db
-
-# Python
 __pycache__/
 *.pyc
+<<<<<<< Updated upstream
 APPLY-Rocket-R-GRAPHICS-v31-NO-DROP-CAPACITY.cmd
 APPLY-Rocket-R-GRAPHICS-v32-SINGLE-LIVE-QUEUE.cmd
 APPLY-Rocket-R-GRAPHICS-v33-SKYBOX-INTERPOLATION.cmd
@@ -134,3 +140,5 @@ scripts/Rocket-R-QUEUE-POOL-AUDIT.zip
 scripts/Rocket-R-RENDER-QUEUE-SNAPSHOT-COLLECTOR.zip
 scripts/Rocket-R-v30-EMERGENCY-ROLLBACK-AND-QUEUE-COLLECTOR.zip
 scripts/verify_interpolation_v35.py
+=======
+>>>>>>> Stashed changes

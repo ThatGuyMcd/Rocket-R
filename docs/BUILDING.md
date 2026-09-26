@@ -1,71 +1,88 @@
 # Building Rocket-R
 
-## Windows host — recommended multi-platform builder
+## Windows build
 
-Run `ONE-CLICK-BUILD.cmd` from Explorer or a normal Command Prompt. Do **not** start it from an elevated shell unless your normal Windows setup specifically requires that.
+Run `ONE-CLICK-BUILD.cmd` from the repository folder. Use a normal Windows session;
+the builder will tell you if a prerequisite needs installation or a restart.
 
-The builder handles the complete sequence and writes a transcript to `build/logs/`. Stage 5 also writes a dedicated `rocket-decomp-YYYYMMDD-HHMMSS.log` that records every Splat, legacy-tool and matching-ROM build command in full.
+Choose Windows x64, Linux x64, Linux ARM64, Android ARM64, or all four. Selecting
+Windows also selects Linux x64 so a matching AppImage is always produced.
+You'll be asked for your own unmodified US ROM.
 
-At startup, choose one or more targets: Windows x64, Linux x86-64 AppImage, Linux ARM64 AppImage, Android ARM64 APK, or all four. Static recompilation is shared across the selections; it is **not** rerun separately for each platform.
+The builder prepares the pinned dependencies, validates the ROM, builds the
+matching ELF, generates the CPU and audio code, then compiles each platform.
+The generated game code is shared between platforms. Desktop builds compile
+and run all four CTest suites before packaging.
 
-### Actions the builder may legitimately ask you to perform
+For a specific set of platforms, use PowerShell:
 
-- Approve installation of a missing prerequisite through `winget`.
-- Restart Windows after first-time WSL/Build Tools installation if Windows requires it.
-- Launch Ubuntu once and create its Linux username/password after a brand-new WSL install.
-- Enter that Linux password when `sudo` installs MIPS/decomp build packages.
-- Select your own unmodified Rocket USA ROM.
-- Optionally launch the freshly built executable at the end.
-
-Those are the only expected manual actions. The builder does not require you to copy ELF files, edit TOML, run N64Recomp manually, calculate hashes or hunt for DLLs.
-
-## Regeneration after a policy change
-
-`ONE-CLICK-BUILD.cmd -NoPackage -NoLaunch` is intentionally idempotent. It regenerates dependencies and translated output from clean pinned states. `Diagnose-Rocket-Recompile.cmd` is a convenience alias for that diagnostic path.
-
-## Android ARM64 APK
-
-When Android is selected, `scripts/Build-Android.ps1` provisions Java 17, Android API 34/build-tools, NDK 26.1, CMake 3.22.1 and Gradle 8.7 when missing. The APK contains only `arm64-v8a` native libraries. SDL2 is pinned to 2.26.3 and RT64 uses Vulkan/`ANativeWindow`.
-
-The Java launcher uses Android's Storage Access Framework to let the user select their own ROM and copies it to the application's private storage. The release scan opens the final APK and rejects ROM-like content before the build is accepted. A local release signing key is generated under `build/private/android-signing`; it is a local/development signing identity, not a store publishing key.
-
-## Build outputs
-
-Windows native executable and required DLLs:
-
-```text
-build/windows/bin/Release/
+```powershell
+& .\scripts\OneClickBuild.ps1 -Platforms Windows-x64,Linux-x86_64,Linux-aarch64,Android-arm64 -NoLaunch
 ```
 
-ROM-free distributables (only the selected targets are emitted):
+The Windows build uses Visual Studio C++ tools, the Windows SDK, clang-cl,
+CMake, Ninja and Python. The matching game build and Linux packages use WSL
+Ubuntu. If WSL is new, open Ubuntu once and finish its account setup before
+running the builder again.
 
-```text
-dist/Rocket-R-0.1.0-dev-Windows-x64.zip
-dist/Rocket-R-0.1.0-dev-Linux-x86_64.AppImage
-dist/Rocket-R-0.1.0-dev-Linux-aarch64.AppImage
-dist/Rocket-R-0.1.0-dev-Android-arm64-v8a.apk
-```
+Build logs are saved under `build/logs/`. Keep the log from a failed stage;
+it contains the command and error needed to investigate it.
 
-Private canonical ROM and identity metadata:
+## Linux packages
 
-```text
-build/private/rocket.us.z64
-build/private/rocket.us.json
-```
+Once the shared game code has been generated, the Linux helpers can be run
+from WSL or an appropriate Linux build environment:
 
-The private files are ignored and are not copied into `dist`.
-
-## Linux AppImage helpers
-
-`Build-Linux.sh` is now the platform stage used by the Windows One Click Builder after the shared CPU/RSP generation has completed. It accepts:
-
-```text
+```bash
+./Setup-Linux.sh
 ./Build-Linux.sh --arch x86_64
 ./Build-Linux.sh --arch aarch64
 ```
 
-The helper builds in an Ubuntu 22.04 Docker userspace and creates a ROM-free type-2 AppImage. On x86-64 hosts, the aarch64 selection uses QEMU/binfmt to execute the ARM64 container, then verifies that the produced ELF is genuinely ARM64 before packaging. `Setup-Linux.sh` installs the Docker/rsync/QEMU helper prerequisites on apt-based systems.
+The helpers need Docker, rsync and the generated CPU/RSP sources and headers.
+They build in Ubuntu 22.04 containers. ARM64 uses QEMU/binfmt on an x64 host.
+`Setup-Linux.sh` installs the helper prerequisites on apt-based systems.
 
-The helper expects `generated/*.generated.hpp`, `RecompiledFuncs` and `RecompiledRSP` to already exist. That is deliberate: all selected platforms consume exactly the same translation generated once by the main builder.
+Both architectures produce an AppImage and a portable archive. The x64 build
+also produces a Steam Deck archive that starts directly from its extracted files
+and does not need FUSE. An AppImage's filename identifies its CPU architecture.
 
-The Rocket-R root CMake minimum is intentionally 3.22.1 so it matches the pinned Android SDK CMake used by Gradle. Do not raise the root minimum without raising the Android package/version in the same revision.
+## Android package
+
+The Android builder uses Java 17, SDK/build-tools 34, NDK 26.1.10909125,
+CMake 3.22.1 and Gradle 8.7. It packages `arm64-v8a` only, using the pinned
+SDL2 2.26.3 source. The manifest targets SDK 34 with a minimum SDK of 24;
+the device must also meet the renderer's Vulkan requirements.
+
+The signing key is stored in `build/private/android-signing/`. Keep this key
+backed up and private. Updates need the same signing identity to install over
+an existing build. The local builder does not publish to an app store.
+
+## Files produced
+
+Release packages go in `dist/`, using the version from `VERSION`:
+
+```text
+Rocket-R-1.0.0-Windows-x64.zip
+Rocket-R-1.0.0-Linux-x86_64.AppImage
+Rocket-R-1.0.0-Linux-x86_64-Portable.tar.gz
+Rocket-R-1.0.0-Linux-x86_64-SteamDeck.tar.gz
+Rocket-R-1.0.0-Linux-aarch64.AppImage
+Rocket-R-1.0.0-Linux-aarch64-Portable.tar.gz
+Rocket-R-1.0.0-Android-arm64-v8a.apk
+```
+
+The Windows executable is in `build/windows/bin/Release/`. The private working
+ROM and its identity record are in `build/private/`; they are never packaged.
+Release scans reject ROM files and N64 ROM headers.
+
+`-NoLaunch` skips the final launch prompt. `-NoPackage` skips the Windows ZIP;
+Linux and Android selections still produce their native packages.
+
+## After changing the recompilation policy
+
+Run the builder again to regenerate from
+`runtime-recomp/rocket.us.recomp-policy.json`. `Diagnose-Rocket-Recompile.cmd`
+runs the builder with `-NoPackage -NoLaunch`.
+Do not edit the generated CPU/RSP files or dependency checkouts.
+See [development](DEVELOPMENT.md) and [testing](TESTING.md).

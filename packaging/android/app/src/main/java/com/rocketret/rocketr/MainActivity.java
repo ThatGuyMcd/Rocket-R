@@ -36,14 +36,14 @@ public final class MainActivity extends Activity {
         root.setPadding(pad, pad, pad, pad);
 
         TextView title = new TextView(this);
-        title.setText("Rocket-R\nRocket: Robot on Wheels Recompiled");
+        title.setText("ROCKET-R\nRocket: Robot on wheels Recompiled");
         title.setTextSize(34.0f);
         title.setTypeface(Typeface.create("Comic Sans MS", Typeface.BOLD));
         title.setGravity(Gravity.CENTER);
         root.addView(title);
 
         TextView note = new TextView(this);
-        note.setText("Select your own unmodified Rocket: Robot on Wheels (USA) ROM. The ROM is copied only into this app's private storage and is never included in Rocket-R builds.");
+        note.setText("Choose your unmodified US ROM of Rocket: Robot on Wheels. A copy is saved on this device for future play.");
         note.setTextSize(20.0f);
         note.setTypeface(Typeface.create("Comic Sans MS", Typeface.NORMAL));
         note.setGravity(Gravity.CENTER);
@@ -60,7 +60,7 @@ public final class MainActivity extends Activity {
         }
 
         Button choose = new Button(this);
-        choose.setText(privateRom.isFile() ? "Choose / Replace ROM" : "Choose Rocket USA ROM");
+        choose.setText(privateRom.isFile() ? "Replace ROM" : "Choose ROM");
         choose.setTextSize(20.0f);
         choose.setTypeface(Typeface.create("Comic Sans MS", Typeface.BOLD));
         choose.setOnClickListener(v -> chooseRom());
@@ -84,7 +84,7 @@ public final class MainActivity extends Activity {
         Uri uri = data.getData();
         try (InputStream input = getContentResolver().openInputStream(uri);
              FileOutputStream output = new FileOutputStream(privateRom, false)) {
-            if (input == null) throw new IllegalStateException("Android could not open the selected file");
+            if (input == null) throw new IllegalStateException("Could not open the selected file.");
             byte[] buffer = new byte[1024 * 1024];
             int read;
             while ((read = input.read(buffer)) > 0) output.write(buffer, 0, read);
@@ -92,7 +92,7 @@ public final class MainActivity extends Activity {
             launchGame();
         } catch (Exception ex) {
             privateRom.delete();
-            Toast.makeText(this, "Could not import ROM: " + ex.getMessage(), Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "Could not import the ROM: " + ex.getMessage(), Toast.LENGTH_LONG).show();
             showLauncher();
         }
     }

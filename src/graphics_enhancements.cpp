@@ -254,6 +254,8 @@ void rocket::graphics::set_settings(const Settings& value, bool mark_custom) {
     normalized.custom_aspect = std::clamp(normalized.custom_aspect, 1.0F, 4.0F);
     normalized.anisotropy = std::clamp(normalized.anisotropy, 1, 16);
     normalized.mip_lod_bias = std::clamp(normalized.mip_lod_bias, -2.0F, 2.0F);
+    normalized.texture_detail_at_distance = std::isfinite(normalized.texture_detail_at_distance)
+        ? std::clamp(normalized.texture_detail_at_distance, 0.0F, 1.0F) : 0.0F;
     normalized.fov_offset_degrees = std::clamp(normalized.fov_offset_degrees, -20.0F, 40.0F);
     normalized.draw_distance_multiplier = static_cast<float>(std::clamp(static_cast<int>(std::lround(normalized.draw_distance_multiplier)), 1, 6));
     normalized.preserve_cutscene_fov = false;

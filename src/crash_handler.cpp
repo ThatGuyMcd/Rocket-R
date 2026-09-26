@@ -1,4 +1,5 @@
 #include "crash_handler.hpp"
+#include "runtime_log.hpp"
 
 #include <cstdio>
 #include <filesystem>
@@ -77,6 +78,7 @@ void rocket::diagnostics::install(const std::filesystem::path& config_directory)
     g_log_directory = config_directory / "logs";
     std::error_code ec;
     std::filesystem::create_directories(g_log_directory, ec);
+    start_log(g_log_directory);
 #if defined(_WIN32)
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
     SetUnhandledExceptionFilter(RocketUnhandledExceptionFilter);

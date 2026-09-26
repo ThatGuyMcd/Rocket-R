@@ -1,116 +1,96 @@
-# Rocket: Robot on Wheels — Recompiled (Rocket-R)
+# ROCKET-R
 
-A local-first static recompilation project for the **Nintendo 64 US release of Rocket: Robot on Wheels** (`NSUE`). The project intentionally follows the same core engineering pattern as DKR-R: a matching decompilation ELF supplies symbols, N64Recomp translates the original MIPS CPU program, RSPRecomp translates the game's audio microcode, N64ModernRuntime supplies the N64 host environment, and RT64 renders the original F3DEX2 graphics tasks natively.
+Rocket: Robot on wheels Recompiled
 
-## One-click multi-platform build
+Rocket-R brings Rocket: Robot on Wheels to Windows, Linux and Android. You can
+play at higher resolutions, use smoother frame rates and set up the controls how
+you like. You'll need your own unmodified US ROM to play. The game is not included.
 
+<<<<<<< Updated upstream
 Double-click:
+=======
+Recompilation project by **ThatGuyMcd**.
 
-```text
-ONE-CLICK-BUILD.cmd
-```
+## Getting started
+>>>>>>> Stashed changes
 
+Download the 1.0.0 package for your device and extract it where needed.
+
+<<<<<<< Updated upstream
 The builder now starts with a **multi-select platform question**. Pick any combination of:
+=======
+| Device | Package | Start the game |
+| --- | --- | --- |
+| Windows x64 | `Rocket-R-1.0.0-Windows-x64.zip` | Extract the ZIP and open `Rocket-R.exe`. Keep its DLLs and assets alongside it. |
+| Steam Deck | `Rocket-R-1.0.0-Linux-x86_64-SteamDeck.tar.gz` | Extract the archive and run `START-ROCKET-R.sh`. |
+| Linux x64 | `Rocket-R-1.0.0-Linux-x86_64.AppImage` | Make the AppImage executable, then open it. |
+| Linux ARM64 | `Rocket-R-1.0.0-Linux-aarch64.AppImage` | Make the AppImage executable, then open it. This build still needs gameplay testing on an ARM64 Linux device. |
+| Android ARM64 | `Rocket-R-1.0.0-Android-arm64-v8a.apk` | Install the APK, open Rocket-R and choose your ROM. |
+>>>>>>> Stashed changes
 
-- **Windows x64** — `Rocket-R-<version>-Windows-x64.zip`
-- **Linux x86-64 / x64** — `Rocket-R-<version>-Linux-x86_64.AppImage`
-- **Linux ARM64 / aarch64** — `Rocket-R-<version>-Linux-aarch64.AppImage`
-- **Android ARM64 / arm64-v8a** — `Rocket-R-<version>-Android-arm64-v8a.apk`
-- **All four**
+Linux portable archives are also available. Extract one and run
+`Launch-Rocket-R.sh` if your system cannot launch the AppImage normally.
+Steam Deck uses the **x86_64** package, not ARM64.
 
-The ROM-derived work is performed **once**. The matching NSUE ELF, CPU recompilation and RSP recompilation are then reused by every selected platform, so the four packages contain the same Rocket game translation and runtime feature set. Platform-specific stages only compile/package that shared source for the target OS/architecture.
+The desktop launcher accepts `.z64`, `.n64` and `.v64` files. Choose your ROM or
+drag it onto the launcher, then select **Play Rocket-R**. Android keeps a private
+copy of the ROM you select so you don't need to choose it again each time.
 
-The script checks or offers to install its Windows, WSL, Linux-container and Android prerequisites as needed. It then prepares exact pinned dependencies, validates your own unmodified Rocket USA ROM, builds RocketRet's matching `NSUE.elf`, runs N64Recomp/RSPRecomp once, and produces only the platform packages you selected. Every distributable is scanned to reject ROM data.
+Only the US release is supported: game code `NSUE`, 12 MiB, canonical SHA-1
+`622D71A44DA0B81EA68092CAC9198C66154A4F4A`.
 
-Linux x86-64 and ARM64 are packaged as type-2 AppImages in architecture-native Ubuntu 22.04 Docker userspaces. ARM64 uses QEMU/binfmt when the Windows/WSL host is x86-64. Android is built as an ARM64-only SDL2/RT64 Vulkan APK with a small Java launcher that imports the user's ROM through Android's document picker into app-private storage; the ROM is never placed in the APK.
+## Settings and controls
 
-If Windows/WSL installation needs a reboot or Ubuntu's first-run username setup, the builder stops cleanly and tells you exactly what to do. Rerunning safely regenerates protected dependency/generated work areas.
+Press **F1** or **Escape** to open settings during play. **F11** or **Alt+Enter**
+switches fullscreen. F1 and F11 can be rebound in **Controls > Shortcuts**;
+Escape and Alt+Enter remain available.
 
-### Supported ROM
+**Controls > N64 Controls** opens Controller Studio. Select an N64 button and
+choose its keyboard or controller input. **Guided Setup** takes you through each
+control, and **Test Inputs** lets you check your setup. See the
+[controls guide](docs/CONTROLS.md) for the default bindings and touch controls.
 
-Initial target only:
+On Android, tap **Settings** or press Android Back to open the overlay.
+**Hide Controls** hides the gameplay buttons when you're using a controller.
+The Settings and Show Controls buttons remain available.
 
-- Rocket: Robot on Wheels (USA)
-- Product/game code: `NSUE`
-- ROM size: 12 MiB
-- canonical SHA-1: `622D71A44DA0B81EA68092CAC9198C66154A4F4A`
+Graphics settings include widescreen, resolution, frame rate and filtering.
+**Distant texture detail** lets you keep the original texture changes at 0%, use
+the highest available detail at 100%, or choose something in between.
 
-The ROM is **not** part of this repository and is never included in release packages.
+Comic Sans is used where it is installed. A shared fallback font is used where
+it isn't available; Microsoft font files are not included in the packages.
 
-## Launcher, overlay and runtime controls
+## Platform notes
 
-Rocket-R now opens a native launcher before the game starts. You can browse for or drag-and-drop your own `.z64`, `.n64` or `.v64` Rocket US ROM, choose RT64 graphics settings, adjust master volume and review the controls. A ROM passed with `--rom` is preselected and still goes through the launcher so the same frontend owns every launch path.
+Windows and Steam Deck have been tested in gameplay. Android gameplay, speakers
+and touch controls have been tested on the Honor Magic V5. The Android target
+is lower-cost phones with 3 GB RAM, but that hardware still needs testing.
+The current renderer needs an ARM64 device with the required Vulkan 1.2 features.
 
-While the game is running:
+Linux ARM64 builds and automated tests pass, but gameplay on native ARM64 Linux
+hardware has not been confirmed. See [testing](docs/TESTING.md) for the details.
 
-- F1 or Escape — open/close the Rocket-R overlay
-- F11 or Alt+Enter — toggle fullscreen
-- WASD — analogue stick
-- X or Space — A
-- Z or Left Ctrl — B
-- Shift — Z trigger
-- Enter — Start
-- Arrow keys — D-pad
-- Q / E — L / R
-- I / J / K / L — C-Up / C-Left / C-Down / C-Right
+If something goes wrong, **Graphics > Diagnostics** shows the live log.
+The [troubleshooting guide](docs/TROUBLESHOOTING.md) covers log locations and
+common build and launch problems.
 
-Gamepads are detected automatically. The launcher and overlay also feed SDL gamepad buttons into ImGui navigation, so the D-pad and face buttons can be used throughout the frontend. The runtime advertises a 4 Kbit EEPROM and Rumble Pak to the original game.
+## Building and development
 
-## Linux helpers
+Run `ONE-CLICK-BUILD.cmd` to build from source on Windows. It can produce Windows,
+Linux x64, Linux ARM64 and Android ARM64 packages. Windows builds also produce
+a matching Linux x64 AppImage.
 
-The normal path is still `ONE-CLICK-BUILD.cmd`, which generates the shared Rocket CPU/RSP translation first and then invokes the Linux helpers for any selected AppImage targets. After that shared generation exists, the helpers can also be run manually:
+- [Build instructions](docs/BUILDING.md)
+- [Development rules](docs/DEVELOPMENT.md)
+- [Runtime architecture](docs/ARCHITECTURE.md)
+- [Custom shaders](docs/CUSTOM_SHADERS.md)
 
-```bash
-./Setup-Linux.sh
-./Build-Linux.sh --arch x86_64
-./Build-Linux.sh --arch aarch64
-```
+## Credits and licences
 
-Both outputs are ROM-free AppImages under `dist/`. The ARM64 AppImage contains a genuine aarch64 executable, not an x86 binary with an ARM filename.
+Rocket-R uses RocketRet's matching decompilation, N64Recomp, RSPRecomp,
+N64ModernRuntime, RT64 and SDL2. Thanks to their authors and contributors.
 
-## Important project status
-
-**FIXED34 deliberately rolls the runtime/interpolation stack back to the user-qualified FIXED27 baseline.** The FIXED28-31 transform-identity/dynamic-vertex experiments have been removed because they introduced substantial interpolation artefacts and a gameplay crash. The original FIXED27 RT64 interpolation patches, immutable graphics-task snapshots, safe-area presentation crop and widescreen CPU-frustum fix are retained. The only runtime-source differences from FIXED27 are compile-time platform bridges for Linux/Android; Windows and Linux continue through the same FIXED27 interpolation code path.
-
-The Windows pipeline produces a complete native `Rocket-R.exe`. User testing confirmed the FIXED25 audio/video/full-viewport path and FIXED26 high-refresh interpolation path were smooth and correct, and FIXED27 kept those paths intact while adding **aspect-aware CPU frustum expansion in Expand to window mode**, preventing Rocket's original 4:3 object culling from visibly popping models at the wider left/right edges. The Graphics page now offers **Original 30 FPS**, **Match display**, and a **Custom 30-500 FPS** target. Rocket itself still authors one new game frame every two NTSC retraces (30 Hz); interpolation creates presentation frames between those authored frames and does not speed up the simulation, input polling or audio clock.
-
-The bootstrap/runtime architecture is unchanged: N64ModernRuntime keeps Rocket's retail `0x80000400` for initial ROM placement, generated code enters `game_init` at `0x80000E64` through the recreated retail caller stack (`0x803FFFF0`), SDL/window ownership stays on the main thread, game start is deferred until RT64's first safe VI presentation, and queued graphics tasks use immutable RDRAM snapshots. FIXED27 retains FIXED26's source-frame cadence pin to the known 30 Hz producer whenever interpolation is enabled and carries DKR-R's exact early-present/interpolation framebuffer approval patches so Rocket's alternating color buffers cannot race the asynchronous present queue. The build environment still cannot include the retail ROM or execute the final Windows/WSL/GPU runtime here. User testing has already qualified the interpolation path; for FIXED27 the focused runtime check is **Expand to window at 16:9 and then ultrawide**, watching the old 4:3 side boundaries for any remaining model/segment pop. Original 4:3 remains the regression baseline. If it faults, Windows writes a text crash report and minidump under `%APPDATA%\Rocket-R\logs` (or the directory selected with `--config`).
-
-See `docs/STATUS.md` and `docs/ARCHITECTURE.md`.
-
-## Protected work areas
-
-Do not hand-edit:
-
-- `extern/`
-- `runtime-recomp/RecompiledFuncs/`
-- `runtime-recomp/RecompiledRSP/`
-- `generated/*.generated.hpp`
-
-Changes to translated game behaviour belong in `runtime-recomp/rocket.us.recomp-policy.json`. Dependency changes belong in `dependencies.lock.json` / `patches/manifest.json`.
-
-## Privacy / publishing
-
-The project is intentionally local-only. The ZIP does not contain a Git remote for this project, and the build scripts never create or push a GitHub repository. External dependency repositories naturally have their upstream remotes inside ignored `extern/` checkouts.
-
-## FIXED26 high-refresh presentation: DKR-R-style RT64 interpolation
-FIXED26 adds an opt-in frame-rate control without changing Rocket's game clock. The retail scheduler counts 60 Hz VI retraces and submits a new graphics task every two retraces, so the authored presentation rate is 30 Hz. When Match Display or Custom is selected, Rocket-R explicitly reports that 30 Hz source cadence to RT64 and asks RT64 to synthesize the extra presentation frames between authored workloads.
-
-The RT64 patch set now includes DKR-R's proven early-present interpolation fixes: per-workload framebuffer ownership, exact target preapproval before asynchronous rendering, creation of a preapproved target in the workload that first produces it, and an interpolated-presentation counter used for runtime confirmation. Rocket keeps `PresentEarly`, triple buffering, immutable graphics-task snapshots, the FIXED24 independent AI clock and the FIXED25 safe-area/VI crop. **Original 30 FPS remains available at all times and disables interpolation.**
-
-This first Rocket-specific interpolation pass deliberately relies on RT64's standard F3DEX2 transform matching. DKR-R needs extra game-specific identity rules because it translates Rare's custom F3DDKR microcode; Rocket uses standard F3DEX2, so those DKR-only bridge rules are not copied blindly. If a particular Rocket camera cut, particle, HUD element or animation ghosts at high refresh, that should be fixed with a narrow Rocket-specific interpolation identity/exclusion rather than changing simulation timing.
-
-## FIXED27 widescreen visibility: expand Rocket's CPU object frustum
-FIXED26 proved that RT64 can render and interpolate the wider Expand-to-window view cleanly, but Rocket still rejected objects using the retail 4:3 CPU frustum before those objects reached RT64. FIXED27 hooks the verified `frustum_test` entry at `0x8003C764` and widens only the camera's two horizontal side planes when **Expand to window** is active. The vertical planes, object culling radii, render-distance/fade logic, simulation and Original 4:3 path are unchanged.
-
-The hook derives the active horizontal FOV from Rocket's own camera fields (`fovY` at `+0xA0`, authored aspect at `+0xA4`) and the current SDL window aspect. It identifies the left/right planes geometrically rather than assuming their array order, then adds the same small **5% edge guard** philosophy used by DKR-R so objects do not flicker exactly on a widened screen edge. A defensive ownership check restores the prior plane values before the next frustum call when they have not already been refreshed by the game, so repeated calls are idempotent and live aspect changes cannot accumulate widening.
-
-
-## FIXED34 multi-platform packaging + FIXED27 interpolation rollback
-FIXED34 keeps the user-qualified FIXED27 gameplay/interpolation code untouched while fixing two platform build blockers: the Android Gradle toolchain uses CMake 3.22.1, so the Rocket-R root now advertises the same compatible minimum; and the Ubuntu 22.04 AppImage container installs `tomli` so the source self-check works on Python 3.10. The launcher also uses a larger UI and requests Comic Sans MS from the host system, with an enlarged built-in fallback when that font is not installed.
-
-FIXED34 includes the FIXED33 RT64 file-dialog EOF correction and adds the Android/Linux build repairs above. No renderer, interpolation, culling, audio or gameplay code has changed from the restored FIXED27 baseline.
-
-FIXED34 is intentionally **not** another interpolation experiment. It removes the FIXED28-31 identity/vertex-interpolation sidecar and returns gameplay rendering to FIXED27, which was the smoothest/most stable user-tested Rocket interpolation revision. Platform support is layered around that baseline.
-
-The One Click Builder can emit four packages from one static-recomp generation: Windows x64 ZIP, Linux x86-64 AppImage, Linux ARM64 AppImage and Android ARM64 APK. Linux packages are built in native-architecture Ubuntu containers; Android cross-compiles with the pinned NDK and SDL2 2.26.3. RT64 receives the Android `ANativeWindow`, has Android-native refresh/window handling, and its build-host shader embedding tools remain host executables during NDK cross-compilation.
+See [the project licence notice](LICENSE.md), [GPL licence text](LICENSE) and
+[third-party components](THIRD_PARTY.md). Rocket: Robot on Wheels and its original
+game data remain the property of their respective owners.

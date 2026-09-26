@@ -12,7 +12,15 @@ $Version = (Get-Content (Join-Path $ProjectRoot 'VERSION') -Raw).Trim()
 $BuildRoot = Join-Path $ProjectRoot 'build'
 $AndroidProject = Join-Path $BuildRoot 'android-project'
 $ToolRoot = Join-Path $BuildRoot 'tools'
-Write-Host 'Android build helper: FIXED34 robust-native v18' -ForegroundColor DarkGray
+function Assert-ChildPath([string]$Path, [string]$Parent) {
+    $resolvedBuild = [IO.Path]::GetFullPath($Parent).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    $resolvedTarget = [IO.Path]::GetFullPath($Path)
+    if (-not $resolvedTarget.StartsWith($resolvedBuild, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to clean a path outside ${Parent}: $resolvedTarget"
+    }
+}
+function Assert-BuildPath([string]$Path) { Assert-ChildPath $Path $BuildRoot }
+Write-Host 'Android build helper: V48 checked patch pipeline' -ForegroundColor DarkGray
 $SdkRoot = if ($env:ANDROID_SDK_ROOT) { $env:ANDROID_SDK_ROOT } elseif ($env:ANDROID_HOME) { $env:ANDROID_HOME } elseif ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Android\Sdk' } else { Join-Path $ToolRoot 'android-sdk' }
 
 function Refresh-Path {
@@ -94,7 +102,7 @@ function Invoke-GradleStable {
         $process = Start-Process -FilePath $env:ComSpec `
             -ArgumentList @('/d','/c',$runnerName) `
             -WorkingDirectory $WorkingDirectory `
-            -NoNewWindow -Wait -PassThru `
+            -WindowStyle Hidden -Wait -PassThru `
             -RedirectStandardOutput $stdoutPath `
             -RedirectStandardError $stderrPath
 
@@ -196,13 +204,16 @@ if (-not (Test-Path $SdkManager)) {
         Invoke-WebRequest -UseBasicParsing -Uri 'https://dl.google.com/android/repository/commandlinetools-win-11076708_latest.zip' -OutFile $Zip
     }
     $Extract = Join-Path $ToolRoot 'android-commandlinetools-extract'
-    Remove-Item $Extract -Recurse -Force -ErrorAction SilentlyContinue
+    Assert-BuildPath $Extract
+    Remove-Item -LiteralPath $Extract -Recurse -Force -ErrorAction SilentlyContinue
     Expand-Archive -LiteralPath $Zip -DestinationPath $Extract -Force
     $Latest = Join-Path $SdkRoot 'cmdline-tools\latest'
-    Remove-Item $Latest -Recurse -Force -ErrorAction SilentlyContinue
+    Assert-ChildPath $Latest (Join-Path $SdkRoot 'cmdline-tools')
+    Remove-Item -LiteralPath $Latest -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path (Split-Path $Latest -Parent) | Out-Null
-    Move-Item (Join-Path $Extract 'cmdline-tools') $Latest
-    Remove-Item $Extract -Recurse -Force
+    Assert-BuildPath (Join-Path $Extract 'cmdline-tools')
+    Move-Item -LiteralPath (Join-Path $Extract 'cmdline-tools') -Destination $Latest
+    Remove-Item -LiteralPath $Extract -Recurse -Force
 }
 if (-not (Test-Path $SdkManager)) { throw "sdkmanager was not installed at $SdkManager" }
 
@@ -234,6 +245,8 @@ if (-not (Test-Path $Gradle)) {
         Invoke-WebRequest -UseBasicParsing -Uri 'https://services.gradle.org/distributions/gradle-8.7-bin.zip' -OutFile $GradleZip
     }
     $GradleExtract = Join-Path $ToolRoot 'gradle-extract'
+    Assert-BuildPath $GradleExtract
+    Assert-BuildPath $GradleRoot
     Remove-Item $GradleExtract -Recurse -Force -ErrorAction SilentlyContinue
     Expand-Archive -LiteralPath $GradleZip -DestinationPath $GradleExtract -Force
     Remove-Item $GradleRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -243,7 +256,8 @@ if (-not (Test-Path $Gradle)) {
 
 $SdlJava = Join-Path $ProjectRoot 'extern\sdl2\android-project\app\src\main\java\org\libsdl\app'
 if (-not (Test-Path $SdlJava)) { throw 'Pinned SDL2 Android Java sources are missing. Run dependency bootstrap first.' }
-Remove-Item $AndroidProject -Recurse -Force -ErrorAction SilentlyContinue
+Assert-BuildPath $AndroidProject
+Remove-Item -LiteralPath $AndroidProject -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path (Join-Path $AndroidProject 'app\src\main\java\org\libsdl\app') | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $AndroidProject 'app\src\main\java\com\rocketret\rocketr') | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $AndroidProject 'app\src\main\res\values') | Out-Null
@@ -253,105 +267,10 @@ Copy-Item (Join-Path $ProjectRoot 'packaging\android\settings.gradle') (Join-Pat
 Copy-Item (Join-Path $ProjectRoot 'packaging\android\app-build.gradle') (Join-Path $AndroidProject 'app\build.gradle') -Force
 Copy-Item (Join-Path $ProjectRoot 'packaging\android\app\proguard-rules.pro') (Join-Path $AndroidProject 'app\proguard-rules.pro') -Force
 Copy-Item (Join-Path $ProjectRoot 'packaging\android\app\jni\CMakeLists.txt') (Join-Path $AndroidProject 'app\jni\CMakeLists.txt') -Force
-# RT64's Android cross-platform patch reuses the already-created SDL2 target, but
-# its legacy global include_directories() call still expects SDL2_INCLUDE_DIRS.
-# Seed that variable in the temporary JNI wrapper only; do not mutate pinned RT64.
-$GeneratedJniCMake = Join-Path $AndroidProject 'app\jni\CMakeLists.txt'
-$SdlIncludeDir = Join-Path $ProjectRoot 'extern\sdl2\include'
-if (-not (Test-Path -LiteralPath $SdlIncludeDir)) {
-    throw "Pinned SDL2 include directory is missing: $SdlIncludeDir"
-}
-$jniText = [IO.File]::ReadAllText($GeneratedJniCMake)
-$sdlAddLine = 'add_subdirectory("${ROCKET_ROOT}/extern/sdl2" "${CMAKE_BINARY_DIR}/sdl2")'
-$sdlIncludeLine = 'set(SDL2_INCLUDE_DIRS "${ROCKET_ROOT}/extern/sdl2/include" CACHE STRING "Rocket-R Android SDL2 headers" FORCE)'
-if (-not $jniText.Contains($sdlIncludeLine)) {
-    if (-not $jniText.Contains($sdlAddLine)) {
-        throw 'Android JNI CMake wrapper no longer contains the expected pinned SDL2 add_subdirectory line.'
-    }
-    $jniText = $jniText.Replace($sdlAddLine, $sdlAddLine + [Environment]::NewLine + $sdlIncludeLine)
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [IO.File]::WriteAllText($GeneratedJniCMake, $jniText, $utf8NoBom)
-}
-Write-Host "Android SDL2 include path: $SdlIncludeDir" -ForegroundColor DarkGray
-
-# The RT64-pinned zstd revision predates the complete Android qsort fix. Merely
-# preventing this file from defining _GNU_SOURCE is insufficient because the
-# Android toolchain or other headers may already define it. The pinned source
-# later selects qsort_r() directly from defined(_GNU_SOURCE). Force Android onto
-# zstd's existing C90 qsort() fallback at every decision point for this Gradle
-# build, then restore the exact pinned file afterward.
-$ZstdCoverPath = Join-Path $ProjectRoot 'extern\rt64\src\contrib\zstd\lib\dictBuilder\cover.c'
-if (-not (Test-Path -LiteralPath $ZstdCoverPath)) {
-    throw "Pinned RT64 zstd cover.c is missing: $ZstdCoverPath"
-}
-$ZstdCoverOriginal = [IO.File]::ReadAllText($ZstdCoverPath)
-$ZstdCoverPatched = $false
-$patchedZstd = $ZstdCoverOriginal
-
-# 1) Do not make Android define _GNU_SOURCE from zstd's Linux guard.
-$zstdGuardPattern = '(?m)^#if defined\(__linux\) \|\| defined\(__linux__\) \|\| defined\(linux\) \|\| defined\(__gnu_linux__\) \|\| \\\r?\n    defined\(__CYGWIN__\) \|\| defined\(__MSYS__\)$'
-$zstdGuardReplacement = '#if (((defined(__linux) || defined(__linux__) || defined(linux) || defined(__gnu_linux__)) && !defined(__ANDROID__)) || \' + [Environment]::NewLine + '    defined(__CYGWIN__) || defined(__MSYS__))'
-$patchedZstd2 = [regex]::Replace($patchedZstd, $zstdGuardPattern, $zstdGuardReplacement, 1)
-if ($patchedZstd2 -eq $patchedZstd) {
-    throw 'Pinned RT64 zstd cover.c no longer contains the expected Linux _GNU_SOURCE guard.'
-}
-$patchedZstd = $patchedZstd2
-
-# 2) Android needs the global context used by the ordinary qsort() fallback even
-#    when _GNU_SOURCE arrived from elsewhere in the NDK/toolchain environment.
-$oldCtxGuard = '#if !defined(_GNU_SOURCE) && !defined(__APPLE__) && !defined(_MSC_VER)'
-$newCtxGuard = '#if (!defined(_GNU_SOURCE) || defined(__ANDROID__)) && !defined(__APPLE__) && !defined(_MSC_VER)'
-if (-not $patchedZstd.Contains($oldCtxGuard)) {
-    throw 'Pinned RT64 zstd cover.c no longer contains the expected global-context qsort guard.'
-}
-$patchedZstd = $patchedZstd.Replace($oldCtxGuard, $newCtxGuard)
-
-# 3/4) There are three GNU qsort branches in this pinned file: two comparator
-#      declarations and stableSort(). Exclude Android from all three so their
-#      signatures and the call site consistently use standard qsort().
-$gnuBranch = '#elif defined(_GNU_SOURCE)'
-$gnuAndroidSafe = '#elif defined(_GNU_SOURCE) && !defined(__ANDROID__)'
-$gnuMatches = ([regex]::Matches($patchedZstd, [regex]::Escape($gnuBranch))).Count
-if ($gnuMatches -ne 3) {
-    throw "Pinned RT64 zstd cover.c expected exactly 3 GNU qsort branches; found $gnuMatches."
-}
-$patchedZstd = $patchedZstd.Replace($gnuBranch, $gnuAndroidSafe)
-
-# Verify the transformed source selects the fallback coherently on Android.
-if (-not $patchedZstd.Contains($newCtxGuard) -or
-    ([regex]::Matches($patchedZstd, [regex]::Escape($gnuAndroidSafe))).Count -ne 3 -or
-    $patchedZstd -match '(?m)^#elif defined\(_GNU_SOURCE\)\s*$') {
-    throw 'Android zstd qsort compatibility transformation verification failed.'
-}
-
-$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-[IO.File]::WriteAllText($ZstdCoverPath, $patchedZstd, $utf8NoBom)
-$ZstdCoverPatched = $true
-Write-Host 'Android zstd qsort compatibility: applied temporary full Android qsort fallback.' -ForegroundColor DarkGray
-
-# The cross-platform RT64 patch adds a Python replacement for file_to_c.cpp.
-# pathlib.Path.write_text() only gained its `newline=` keyword in Python 3.10,
-# while CMake may legitimately discover Python 3.9 on Windows. The generated
-# C/H files do not require a particular host newline convention, so temporarily
-# remove only those two Python-3.10-only keyword arguments for the Gradle build.
-$FileToCPath = Join-Path $ProjectRoot 'extern\rt64\src\tools\file_to_c\file_to_c.py'
-if (-not (Test-Path -LiteralPath $FileToCPath)) {
-    throw "RT64 file_to_c.py is missing: $FileToCPath"
-}
-$FileToCOriginal = [IO.File]::ReadAllText($FileToCPath)
-$FileToCPatched = $false
-$fileToCNewlinePattern = '(?m)^\s*newline="\\n",\r?\n'
-$fileToCMatches = ([regex]::Matches($FileToCOriginal, $fileToCNewlinePattern)).Count
-if ($fileToCMatches -ne 2) {
-    throw "RT64 file_to_c.py expected exactly 2 Python-3.10-only newline= arguments; found $fileToCMatches."
-}
-$patchedFileToC = [regex]::Replace($FileToCOriginal, $fileToCNewlinePattern, '')
-if ($patchedFileToC -eq $FileToCOriginal -or $patchedFileToC -match '(?m)^\s*newline="\\n",\s*$') {
-    throw 'Android RT64 file_to_c Python compatibility transformation verification failed.'
-}
-[IO.File]::WriteAllText($FileToCPath, $patchedFileToC, $utf8NoBom)
-$FileToCPatched = $true
-Write-Host 'Android RT64 file_to_c compatibility: temporarily removed Python 3.10-only newline= arguments for Python 3.9.' -ForegroundColor DarkGray
+# All dependency compatibility changes must be present before building.
+# Never transform or restore files in extern/ from a build helper.
+$patchCheck = Invoke-NativeVisible 'python' @((Join-Path $ProjectRoot 'scripts\bootstrap_dependencies.py'), '--root', $ProjectRoot)
+if ($patchCheck -ne 0) { throw 'The checked dependency patch pipeline failed.' }
 
 # Repository-owned Android renderer handling is installed permanently by repair v15.
 # Build-Android only verifies it; it never rewrites src\rt64_renderer.cpp.
@@ -364,69 +283,9 @@ if ($RocketRendererText -notmatch '(?m)^#elif defined\(__linux__\)[ \t]*&&[ \t]*
     $RocketRendererText -notmatch '(?m)^#elif defined\(__ANDROID__\)[ \t]*\r?$' -or
     $RocketRendererText -notmatch 'android_native_window\(\)' -or
     $RocketRendererText -notmatch 'app_config\.detectDataPath[ \t]*=[ \t]*false;') {
-    throw 'Rocket-R permanent Android renderer/data-path guards are missing. Re-run APPLY-Rocket-R-PLATFORM-REPAIR-v17.cmd.'
+    throw 'Rocket-R Android renderer/data-path guards are missing. Restore the checked source and rerun the build.'
 }
 Write-Host 'Android Rocket renderer compatibility: permanent ANativeWindow/data-path guards verified.' -ForegroundColor DarkGray
-
-# FIXED34's RT64 Android patch added an Android ApplicationWindow path, but the
-# pinned RT64 source checks __linux__ first in several places. Android Clang
-# defines __linux__, so the file still enters X11 code before reaching its
-# Android branches. Exclude Android from every *plain* Linux-only branch in this
-# translation unit. Branches written as "__linux__ || __APPLE__" are intentionally
-# left alone because an explicit Android branch precedes them.
-$Rt64WindowPath = Join-Path $ProjectRoot 'extern\rt64\src\hle\rt64_application_window.cpp'
-if (-not (Test-Path -LiteralPath $Rt64WindowPath)) {
-    throw "Pinned RT64 ApplicationWindow source is missing: $Rt64WindowPath"
-}
-$Rt64WindowOriginal = [IO.File]::ReadAllText($Rt64WindowPath)
-$Rt64WindowPatched = $false
-$rt64LinuxPattern = '(?m)^#\s*elif defined\(__linux__\)\s*$'
-$rt64LinuxMatches = ([regex]::Matches($Rt64WindowOriginal, $rt64LinuxPattern)).Count
-if ($rt64LinuxMatches -lt 3) {
-    throw "Pinned RT64 ApplicationWindow expected at least 3 plain __linux__ branches; found $rt64LinuxMatches."
-}
-$patchedRt64Window = [regex]::Replace(
-    $Rt64WindowOriginal,
-    $rt64LinuxPattern,
-    '#elif defined(__linux__) && !defined(__ANDROID__)'
-)
-if ($patchedRt64Window -eq $Rt64WindowOriginal -or
-    $patchedRt64Window -match '(?m)^#\s*elif defined\(__linux__\)\s*$' -or
-    $patchedRt64Window -notmatch 'SDL_SYSWM_ANDROID' -or
-    $patchedRt64Window -match 'Android unimplemented') {
-    throw 'RT64 Android ApplicationWindow transformation verification failed.'
-}
-[IO.File]::WriteAllText($Rt64WindowPath, $patchedRt64Window, $utf8NoBom)
-$Rt64WindowPatched = $true
-Write-Host "Android RT64 window compatibility: excluded Android from $rt64LinuxMatches Linux/X11-only branches." -ForegroundColor DarkGray
-
-# RT64_SDL_WINDOW_VULKAN is also defined for Rocket-R's Android build. In the
-# pinned RT64 ApplicationWindow implementation, several generic SDL/Vulkan
-# branches occur before the explicit __ANDROID__ branches. On Android that can
-# feed an ANativeWindow* to SDL functions expecting SDL_Window*. In particular,
-# Application::setup() always calls detectRefreshRate(), which otherwise calls
-# SDL_GetWindowDisplayIndex(windowHandle) with an ANativeWindow*. Exclude Android
-# from every *plain* RT64_SDL_WINDOW_VULKAN branch so the Android-native paths
-# added by the FIXED34 RT64 patch are reachable.
-$rt64VulkanPattern = '(?m)^(#\s*(?:if|elif)\s+defined\(RT64_SDL_WINDOW_VULKAN\))\s*$'
-$rt64VulkanMatches = ([regex]::Matches($patchedRt64Window, $rt64VulkanPattern)).Count
-if ($rt64VulkanMatches -lt 5) {
-    throw "Pinned RT64 ApplicationWindow expected at least 5 plain RT64_SDL_WINDOW_VULKAN branches; found $rt64VulkanMatches."
-}
-$patchedRt64WindowVulkanSafe = [regex]::Replace(
-    $patchedRt64Window,
-    $rt64VulkanPattern,
-    '$1 && !defined(__ANDROID__)'
-)
-if ($patchedRt64WindowVulkanSafe -eq $patchedRt64Window -or
-    $patchedRt64WindowVulkanSafe -match '(?m)^#\s*(?:if|elif)\s+defined\(RT64_SDL_WINDOW_VULKAN\)\s*$' -or
-    $patchedRt64WindowVulkanSafe -notmatch '(?m)^#\s*elif defined\(__ANDROID__\)\s*$' -or
-    $patchedRt64WindowVulkanSafe -notmatch 'refreshRate\s*=\s*60') {
-    throw 'RT64 Android SDL/Vulkan window-pointer transformation verification failed.'
-}
-[IO.File]::WriteAllText($Rt64WindowPath, $patchedRt64WindowVulkanSafe, $utf8NoBom)
-$patchedRt64Window = $patchedRt64WindowVulkanSafe
-Write-Host "Android RT64 SDL/Vulkan compatibility: excluded Android from $rt64VulkanMatches generic SDL_Window branches." -ForegroundColor DarkGray
 
 # The Android direct-ROM handoff is installed permanently by repair v15.
 # Do not mutate src\main.cpp during builds: verify the guard and continue.
@@ -438,12 +297,20 @@ $MainCppText = [IO.File]::ReadAllText($MainCppPath)
 if ($MainCppText -notmatch 'bypassing desktop launcher and starting Rocket directly' -or
     $MainCppText -notmatch 'rocket::select_rom\(options\.rom' -or
     $MainCppText -notmatch '(?s)#if defined\(__ANDROID__\).*?#else.*?rocket::ui::run_launcher') {
-    throw 'Rocket-R permanent Android direct-ROM launcher guard is missing. Re-run APPLY-Rocket-R-PLATFORM-REPAIR-v17.cmd.'
+    throw 'Rocket-R Android direct-ROM launcher guard is missing. Restore the checked source and rerun the build.'
 }
 Write-Host 'Android launcher compatibility: permanent direct-ROM handoff verified; no build-time main.cpp rewrite required.' -ForegroundColor DarkGray
 
 Copy-Item (Join-Path $ProjectRoot 'packaging\android\app\src\main\AndroidManifest.xml') (Join-Path $AndroidProject 'app\src\main\AndroidManifest.xml') -Force
+<<<<<<< Updated upstream
 Copy-Item (Join-Path $ProjectRoot 'packaging\android\app\src\main\res\values\strings.xml') (Join-Path $AndroidProject 'app\src\main\res\values\strings.xml') -Force
+=======
+# Copy the complete resource tree, including the icon referenced by the manifest.
+Copy-Item (Join-Path $ProjectRoot 'packaging\android\app\src\main\res\*') (Join-Path $AndroidProject 'app\src\main\res') -Recurse -Force
+Copy-Item (Join-Path $ProjectRoot 'packaging\android\app\src\main\assets') (Join-Path $AndroidProject 'app\src\main') -Recurse -Force
+$docsExit = Invoke-NativeVisible 'python' @((Join-Path $ProjectRoot 'scripts\stage_release_docs.py'), '--root', $ProjectRoot, '--output', (Join-Path $AndroidProject 'app\src\main\assets\rocket-r-docs'))
+if ($docsExit -ne 0) { throw 'Could not stage Android release documentation.' }
+>>>>>>> Stashed changes
 Copy-Item (Join-Path $ProjectRoot 'packaging\android\app\src\main\java\com\rocketret\rocketr\*.java') (Join-Path $AndroidProject 'app\src\main\java\com\rocketret\rocketr') -Force
 Copy-Item (Join-Path $SdlJava '*.java') (Join-Path $AndroidProject 'app\src\main\java\org\libsdl\app') -Force
 "sdk.dir=$($SdkRoot.Replace('\','/').Replace(':','\:'))" | Set-Content -Encoding ASCII (Join-Path $AndroidProject 'local.properties')
@@ -469,19 +336,7 @@ try {
 }
 finally {
     Pop-Location
-    if ($Rt64WindowPatched) {
-        [IO.File]::WriteAllText($Rt64WindowPath, $Rt64WindowOriginal, $utf8NoBom)
-        Write-Host 'Android RT64 window compatibility: restored pinned source.' -ForegroundColor DarkGray
-    }
-    if ($FileToCPatched) {
-        [IO.File]::WriteAllText($FileToCPath, $FileToCOriginal, $utf8NoBom)
-        Write-Host 'Android RT64 file_to_c compatibility: restored pinned/generated helper.' -ForegroundColor DarkGray
-    }
-    if ($ZstdCoverPatched) {
-        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-        [IO.File]::WriteAllText($ZstdCoverPath, $ZstdCoverOriginal, $utf8NoBom)
-        Write-Host 'Android zstd qsort compatibility: restored pinned source.' -ForegroundColor DarkGray
-    }
+
 }
 
 $Unsigned = Join-Path $AndroidProject 'app\build\outputs\apk\release\app-release-unsigned.apk'
@@ -527,7 +382,8 @@ try {
 finally { $archive.Dispose() }
 
 $ScanDir = Join-Path $BuildRoot 'android-apk-scan'
-Remove-Item $ScanDir -Recurse -Force -ErrorAction SilentlyContinue
+Assert-BuildPath $ScanDir
+Remove-Item -LiteralPath $ScanDir -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $ScanDir | Out-Null
 [IO.Compression.ZipFile]::ExtractToDirectory($Final, $ScanDir)
 $Python = Get-Command python.exe -ErrorAction SilentlyContinue
@@ -535,5 +391,5 @@ if ($Python) {
     $scanExit = Invoke-NativeVisible $Python.Source @((Join-Path $ProjectRoot 'scripts\scan_release.py'),$ScanDir)
     if ($scanExit -ne 0) { throw "ROM-free APK release scan failed (exit $scanExit)." }
 }
-Remove-Item $ScanDir -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $ScanDir -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host "Android ARM64 APK: $Final" -ForegroundColor Green

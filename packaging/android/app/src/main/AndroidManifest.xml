@@ -16,6 +16,8 @@
 
         <activity
             android:name=".RocketActivity"
+            android:enableOnBackInvokedCallback="true"
+            android:screenOrientation="sensorLandscape"
             android:alwaysRetainTaskState="true"
             android:launchMode="singleInstance"
             android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"

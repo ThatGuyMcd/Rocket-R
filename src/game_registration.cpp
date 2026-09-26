@@ -113,15 +113,15 @@ bool rocket::select_rom(const std::filesystem::path& rom_path, std::string& erro
             g_rom_ready.store(true, std::memory_order_release);
             return true;
         case recomp::RomValidationError::FailedToOpen:
-            error = "Could not open the selected ROM."; break;
+            error = "Could not open this file. Check that it is still available and try again."; break;
         case recomp::RomValidationError::NotARom:
             error = "The selected file is not a recognised N64 ROM."; break;
         case recomp::RomValidationError::IncorrectVersion:
-            error = "This is Rocket: Robot on Wheels, but it is not the supported US NSUE dump."; break;
+            error = "This version is not supported. Choose an unmodified US ROM of Rocket: Robot on Wheels."; break;
         case recomp::RomValidationError::IncorrectRom:
-            error = "The selected ROM is not the supported Rocket: Robot on Wheels US release."; break;
+            error = "Choose an unmodified US ROM of Rocket: Robot on Wheels."; break;
         default:
-            error = "N64ModernRuntime rejected the selected ROM."; break;
+            error = "Could not load this ROM. Check the log for details."; break;
     }
     return false;
 }

@@ -93,7 +93,12 @@ python3 scripts/self_check.py --root .
 rm -rf "build/linux-${ROCKET_TARGET_ARCH}"
 cmake -S . -B "build/linux-${ROCKET_TARGET_ARCH}" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release
+<<<<<<< Updated upstream
 cmake --build "build/linux-${ROCKET_TARGET_ARCH}" --target RocketR --parallel
+=======
+cmake --build "build/linux-${ROCKET_TARGET_ARCH}" --target RocketR RocketPresentationTests RocketRuntimeLogTests RocketControlsTests RocketControlsUiTests --parallel
+ctest --test-dir "build/linux-${ROCKET_TARGET_ARCH}" --output-on-failure
+>>>>>>> Stashed changes
 BINARY="build/linux-${ROCKET_TARGET_ARCH}/bin/Rocket-R"
 if [[ ! -x "$BINARY" ]]; then
   BINARY="$(find "build/linux-${ROCKET_TARGET_ARCH}" -type f -name Rocket-R -perm -111 | head -n1)"

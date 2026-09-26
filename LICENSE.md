@@ -1,7 +1,10 @@
-# Project-authored code
+# Project licence
 
-The new Rocket-R glue/build code in this repository is intended to be distributed under **GPL-3.0-or-later** when the project is made public, so it remains compatible with the GPL-licensed runtime components it links against.
+Rocket-R's project-authored glue and build code uses **GPL-3.0-or-later**.
+The full GPL text is in [LICENSE](LICENSE).
 
-This notice does not relicense Rocket: Robot on Wheels, its ROM/assets, the RocketRet decompilation, RT64, N64Recomp, SDL or any other third-party component. Their own upstream licences and rights apply.
+This does not relicense Rocket: Robot on Wheels, its ROM or assets, the RocketRet
+decompilation, RT64, N64Recomp, SDL or other third-party components. Their own
+licences and rights apply. See [THIRD_PARTY.md](THIRD_PARTY.md).
 
-No Nintendo 64 ROM or extracted commercial game assets are licensed or distributed by this repository.
+No Nintendo 64 ROM or extracted commercial game assets are distributed here.

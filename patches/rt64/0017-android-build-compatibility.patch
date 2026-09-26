@@ -1,0 +1,147 @@
+diff --git a/src/contrib/zstd/lib/dictBuilder/cover.c b/src/contrib/zstd/lib/dictBuilder/cover.c
+--- a/src/contrib/zstd/lib/dictBuilder/cover.c
++++ b/src/contrib/zstd/lib/dictBuilder/cover.c
+@@ -22,8 +22,8 @@
+ *  Dependencies
+ ***************************************/
+ /* qsort_r is an extension. */
+-#if defined(__linux) || defined(__linux__) || defined(linux) || defined(__gnu_linux__) || \
+-    defined(__CYGWIN__) || defined(__MSYS__)
++#if (((defined(__linux) || defined(__linux__) || defined(linux) || defined(__gnu_linux__)) && !defined(__ANDROID__)) || \
++    defined(__CYGWIN__) || defined(__MSYS__))
+ #if !defined(_GNU_SOURCE)
+ #define _GNU_SOURCE
+ #endif
+@@ -241,7 +241,7 @@
+   unsigned d;
+ } COVER_ctx_t;
+ 
+-#if !defined(_GNU_SOURCE) && !defined(__APPLE__) && !defined(_MSC_VER)
++#if (!defined(_GNU_SOURCE) || defined(__ANDROID__)) && !defined(__APPLE__) && !defined(_MSC_VER)
+ /* C90 only offers qsort() that needs a global context. */
+ static COVER_ctx_t *g_coverCtx = NULL;
+ #endif
+@@ -290,7 +290,7 @@
+  */
+ #if (defined(_WIN32) && defined(_MSC_VER)) || defined(__APPLE__)
+ static int WIN_CDECL COVER_strict_cmp(void* g_coverCtx, const void* lp, const void* rp) {
+-#elif defined(_GNU_SOURCE)
++#elif defined(_GNU_SOURCE) && !defined(__ANDROID__)
+ static int COVER_strict_cmp(const void *lp, const void *rp, void *g_coverCtx) {
+ #else /* C90 fallback.*/
+ static int COVER_strict_cmp(const void *lp, const void *rp) {
+@@ -306,7 +306,7 @@
+  */
+ #if (defined(_WIN32) && defined(_MSC_VER)) || defined(__APPLE__)
+ static int WIN_CDECL COVER_strict_cmp8(void* g_coverCtx, const void* lp, const void* rp) {
+-#elif defined(_GNU_SOURCE)
++#elif defined(_GNU_SOURCE) && !defined(__ANDROID__)
+ static int COVER_strict_cmp8(const void *lp, const void *rp, void *g_coverCtx) {
+ #else /* C90 fallback.*/
+ static int COVER_strict_cmp8(const void *lp, const void *rp) {
+@@ -328,7 +328,7 @@
+     qsort_r(ctx->suffix, ctx->suffixSize, sizeof(U32),
+             ctx,
+             (ctx->d <= 8 ? &COVER_strict_cmp8 : &COVER_strict_cmp));
+-#elif defined(_GNU_SOURCE)
++#elif defined(_GNU_SOURCE) && !defined(__ANDROID__)
+     qsort_r(ctx->suffix, ctx->suffixSize, sizeof(U32),
+             (ctx->d <= 8 ? &COVER_strict_cmp8 : &COVER_strict_cmp),
+             ctx);
+diff --git a/src/tools/file_to_c/file_to_c.py b/src/tools/file_to_c/file_to_c.py
+--- a/src/tools/file_to_c/file_to_c.py
++++ b/src/tools/file_to_c/file_to_c.py
+@@ -29,7 +29,6 @@
+         f"extern const size_t {array_name}_size;\n"
+         f"const size_t {array_name}_size = sizeof({array_name}) / sizeof({array_name}[0]);\n",
+         encoding="utf-8",
+-        newline="\n",
+     )
+     output_h.write_text(
+         "#ifdef __cplusplus\n"
+@@ -42,7 +41,6 @@
+         "  }\n"
+         "#endif\n",
+         encoding="utf-8",
+-        newline="\n",
+     )
+     return 0
+ 
+diff --git a/src/hle/rt64_application_window.cpp b/src/hle/rt64_application_window.cpp
+--- a/src/hle/rt64_application_window.cpp
++++ b/src/hle/rt64_application_window.cpp
+@@ -11,7 +11,7 @@
+ #if defined(_WIN32)
+ #   include <Windows.h>
+ #   include <ShellScalingAPI.h>
+-#elif defined(__linux__)
++#elif defined(__linux__) && !defined(__ANDROID__)
+ #   define Status int
+ #   if !defined(RT64_SDL_WINDOW_VULKAN)
+ #      include <X11/extensions/Xrandr.h>
+@@ -53,7 +53,7 @@
+ 
+         windowHandle = window;
+ 
+-#   if defined(RT64_SDL_WINDOW_VULKAN)
++#   if defined(RT64_SDL_WINDOW_VULKAN) && !defined(__ANDROID__)
+         sdlWindow = window;
+ #   endif
+ 
+@@ -159,7 +159,7 @@
+         SDL_GetWindowWMInfo(sdlWindow, &wmInfo);
+ #   if defined(_WIN32)
+         windowHandle = wmInfo.info.win.window;
+-#   elif defined(RT64_SDL_WINDOW_VULKAN)
++#   elif defined(RT64_SDL_WINDOW_VULKAN) && !defined(__ANDROID__)
+         windowHandle = sdlWindow;
+ #   elif defined(__ANDROID__)
+         if (wmInfo.subsystem != SDL_SYSWM_ANDROID || wmInfo.info.android.window == nullptr) {
+@@ -167,7 +167,7 @@
+             return;
+         }
+         windowHandle = wmInfo.info.android.window;
+-#   elif defined(__linux__)
++#   elif defined(__linux__) && !defined(__ANDROID__)
+         windowHandle.display = wmInfo.info.x11.display;
+         windowHandle.window = wmInfo.info.x11.window;
+ #   elif defined(__APPLE__)
+@@ -247,7 +247,7 @@
+         fullScreen = newFullScreen;
+ #   elif defined(__APPLE__)
+         windowWrapper->toggleFullscreen();
+-#   elif defined(RT64_SDL_WINDOW_VULKAN)
++#   elif defined(RT64_SDL_WINDOW_VULKAN) && !defined(__ANDROID__)
+         if (newFullScreen) {
+             SDL_SetWindowFullscreen(windowHandle, SDL_WINDOW_FULLSCREEN_DESKTOP);
+         } else {
+@@ -297,7 +297,7 @@
+         if ((refreshRate % 10) == 9) {
+             refreshRate++;
+         }
+-#   elif defined(RT64_SDL_WINDOW_VULKAN)
++#   elif defined(RT64_SDL_WINDOW_VULKAN) && !defined(__ANDROID__)
+         int displayIndex = SDL_GetWindowDisplayIndex(windowHandle);
+         if (displayIndex < 0) {
+             fprintf(stderr, "SDL_GetWindowDisplayIndex failed. Error: %s.\n", SDL_GetError());
+@@ -314,7 +314,7 @@
+         refreshRate = displayMode.refresh_rate;
+ #   elif defined(__ANDROID__)
+         refreshRate = 60;
+-#   elif defined(__linux__)
++#   elif defined(__linux__) && !defined(__ANDROID__)
+         // Sourced from: https://stackoverflow.com/a/66865623
+         XRRScreenResources *screenResources = XRRGetScreenResources(windowHandle.display, windowHandle.window);
+         if (screenResources == nullptr) {
+@@ -367,9 +367,9 @@
+         GetWindowRect(windowHandle, &rect);
+         newWindowLeft = rect.left;
+         newWindowTop = rect.top;
+-#   elif defined(RT64_SDL_WINDOW_VULKAN)
++#   elif defined(RT64_SDL_WINDOW_VULKAN) && !defined(__ANDROID__)
+         SDL_GetWindowPosition(windowHandle, &newWindowLeft, &newWindowTop);
+-#   elif defined(__linux__)
++#   elif defined(__linux__) && !defined(__ANDROID__)
+         XWindowAttributes attributes;
+         XGetWindowAttributes(windowHandle.display, windowHandle.window, &attributes);
+         newWindowLeft = attributes.x;

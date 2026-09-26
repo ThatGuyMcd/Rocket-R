@@ -3,6 +3,7 @@
 #include "platform.hpp"
 #include "rt64_renderer.hpp"
 #include "runtime_ui.hpp"
+#include "runtime_log.hpp"
 #include "widescreen_culling.hpp"
 
 #include "librecomp/game.hpp"
@@ -11,6 +12,9 @@
 
 #if defined(__ANDROID__)
 #include <SDL_system.h>
+#elif defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <Windows.h>
 #endif
 
 #include <atomic>
@@ -85,6 +89,8 @@ struct Options {
     std::filesystem::path rom;
     std::filesystem::path config = default_config_directory();
     bool help = false;
+    bool launch = false;
+    std::string error;
 };
 
 bool parse_options(int argc, char** argv, Options& out) {
@@ -94,12 +100,14 @@ bool parse_options(int argc, char** argv, Options& out) {
             out.rom = std::filesystem::u8path(argv[++i]);
         } else if (arg == "--config" && i + 1 < argc) {
             out.config = std::filesystem::u8path(argv[++i]);
+        } else if (arg == "--launch") {
+            out.launch = true;
         } else if (!arg.empty() && arg.front() != '-' && out.rom.empty()) {
             out.rom = std::filesystem::u8path(argv[i]);
         } else if (arg == "--help" || arg == "-h") {
             out.help = true;
         } else {
-            std::fprintf(stderr, "Unknown or incomplete argument: %s\n", argv[i]);
+            out.error = std::string("Unknown or incomplete argument: ") + argv[i];
             return false;
         }
     }
@@ -121,13 +129,22 @@ bool valid_window_handle(const ultramodern::renderer::WindowHandle& handle) {
 int rocket_main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::setvbuf(stderr, nullptr, _IONBF, 0);
+<<<<<<< Updated upstream
     std::fprintf(stderr, "Rocket: Robot on Wheels - Recompiled %s (FIXED34 runtime; FIXED27 interpolation baseline)\n",
                  ROCKET_R_VERSION);
 
+=======
+>>>>>>> Stashed changes
     Options options{};
-    if (!parse_options(argc, argv, options) || options.help) {
+    const bool parsed = parse_options(argc, argv, options);
+    rocket::diagnostics::install(options.config);
+    std::fprintf(stderr, "Rocket-R %s\n",
+                 ROCKET_R_VERSION);
+    if (!parsed || options.help) {
+        if (!parsed) std::fprintf(stderr, "%s\n", options.error.c_str());
         std::fprintf(stderr,
-                     "Usage: Rocket-R [--rom <your Rocket US ROM>] [--config <folder>]\n"
+                     "Usage: Rocket-R [--rom <your Rocket US ROM>] [--config <folder>] [--launch]\n"
+                     "--launch starts the supplied ROM directly, using saved settings.\n"
                      "Without --rom, the Rocket-R launcher will ask for your ROM.\n");
         return options.help ? 0 : 2;
     }
@@ -138,7 +155,6 @@ int rocket_main(int argc, char** argv) {
         std::fprintf(stderr, "Could not create config directory: %s\n", ec.message().c_str());
         return 3;
     }
-    rocket::diagnostics::install(options.config);
 
     std::string error;
     if (!rocket::register_game(options.config, error)) {
@@ -172,8 +188,18 @@ int rocket_main(int argc, char** argv) {
     startup.rom_path = options.rom;
     std::fprintf(stderr, "[android] private ROM verified; bypassing desktop launcher and starting Rocket directly\n");
 #else
-    startup = rocket::ui::run_launcher(
-        rocket::platform::sdl_window(), options.rom);
+    if (options.launch) {
+        if (options.rom.empty() || !rocket::select_rom(options.rom, error)) {
+            std::fprintf(stderr, "[boot] --launch requires a valid --rom: %s\n", error.c_str());
+            rocket::platform::shutdown();
+            return 5;
+        }
+        startup.launch = true;
+        startup.rom_path = options.rom;
+    } else {
+        startup = rocket::ui::run_launcher(
+            rocket::platform::sdl_window(), options.rom);
+    }
 #endif
     if (!startup.launch || startup.exit_requested) {
         rocket::platform::shutdown();
@@ -291,6 +317,19 @@ extern "C" int SDL_main(int argc, char** argv) {
 }
 #else
 int main(int argc, char** argv) {
-    return rocket_main(argc, argv);
+#if defined(_WIN32)
+    const HANDLE inherited_error = GetStdHandle(STD_ERROR_HANDLE);
+    const bool show_errors = inherited_error == nullptr || inherited_error == INVALID_HANDLE_VALUE;
+#endif
+    const int result = rocket_main(argc, argv);
+    rocket::diagnostics::stop_log();
+#if defined(_WIN32)
+    if (result != 0 && show_errors) {
+        const auto message = L"Rocket-R could not start. See the log for details:\n\n" +
+                             rocket::diagnostics::log_path().wstring();
+        MessageBoxW(nullptr, message.c_str(), L"Rocket-R", MB_OK | MB_ICONERROR);
+    }
+#endif
+    return result;
 }
 #endif

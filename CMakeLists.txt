@@ -1,15 +1,16 @@
 cmake_minimum_required(VERSION 3.22.1)
-project(RocketR VERSION 0.1.0 LANGUAGES C CXX)
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" ROCKET_R_VERSION LIMIT_COUNT 1)
+if(NOT ROCKET_R_VERSION MATCHES "^([0-9]+[.][0-9]+[.][0-9]+)([-+][0-9A-Za-z._-]+)?$")
+    message(FATAL_ERROR "VERSION must contain a semantic version")
+endif()
+project(RocketR VERSION ${CMAKE_MATCH_1} LANGUAGES C CXX)
 
 # This project can be the top-level desktop build or a subdirectory of the
 # SDL2 Android Gradle project. CMAKE_SOURCE_DIR points at the Gradle JNI
 # wrapper in the latter case, so keep one canonical path to Rocket-R itself.
 set(ROCKET_SOURCE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
-
-file(STRINGS "${ROCKET_SOURCE_ROOT}/VERSION" ROCKET_R_VERSION LIMIT_COUNT 1)
-if(ROCKET_R_VERSION STREQUAL "")
-    set(ROCKET_R_VERSION "0.1.0-dev")
-endif()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${ROCKET_SOURCE_ROOT}/VERSION")
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_CXX_STANDARD 20)
@@ -17,6 +18,32 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+<<<<<<< Updated upstream
+=======
+if(NOT ANDROID)
+    enable_testing()
+    add_executable(RocketPresentationTests tests/presentation_identity_tests.cpp
+        extern/rt64/src/common/rt64_math.cpp
+        extern/rt64/src/hle/rt64_rigid_body.cpp)
+    target_include_directories(RocketPresentationTests PRIVATE
+        "${ROCKET_SOURCE_ROOT}/extern/n64-modern-runtime/N64Recomp/include"
+        "${ROCKET_SOURCE_ROOT}/extern/rt64/src"
+        "${ROCKET_SOURCE_ROOT}/extern/rt64/include"
+        "${ROCKET_SOURCE_ROOT}/extern/rt64/src/contrib/hlslpp/include")
+    add_test(NAME presentation_identity COMMAND RocketPresentationTests)
+    find_package(Threads REQUIRED)
+    add_executable(RocketRuntimeLogTests tests/runtime_log_tests.cpp src/runtime_log.cpp)
+    target_include_directories(RocketRuntimeLogTests PRIVATE "${ROCKET_SOURCE_ROOT}/src")
+    target_link_libraries(RocketRuntimeLogTests PRIVATE Threads::Threads)
+    if(WIN32)
+        set_target_properties(RocketRuntimeLogTests PROPERTIES WIN32_EXECUTABLE TRUE)
+        target_link_options(RocketRuntimeLogTests PRIVATE /ENTRY:mainCRTStartup)
+    endif()
+    add_test(NAME runtime_log COMMAND RocketRuntimeLogTests)
+    set_tests_properties(runtime_log PROPERTIES TIMEOUT 60)
+endif()
+
+>>>>>>> Stashed changes
 if(WIN32)
     add_compile_definitions(NOMINMAX _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
 endif()
@@ -90,6 +117,8 @@ set(ROCKET_RUNTIME_SOURCES
     src/main.cpp
     src/platform.cpp
     src/runtime_input.cpp
+    src/binding_capture.cpp
+    src/controls_studio.cpp
     src/graphics_enhancements.cpp
     src/runtime_ui.cpp
     src/rt64_renderer.cpp
@@ -99,6 +128,7 @@ set(ROCKET_RUNTIME_SOURCES
     src/widescreen_culling.cpp
     src/game_registration.cpp
     src/crash_handler.cpp
+    src/runtime_log.cpp
     src/register_overlays.cpp
     "${ROCKET_RT64_DIR}/src/contrib/imgui/backends/imgui_impl_sdlrenderer2.cpp"
     ${ROCKET_RSP_CXX})
@@ -112,6 +142,12 @@ if(ANDROID)
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 else()
     add_executable(RocketR ${ROCKET_RUNTIME_SOURCES})
+    if(WIN32)
+        # Start as a GUI process without creating/flashing a console. Keep the
+        # normal CRT main(argc, argv) startup and inherited redirected streams.
+        set_target_properties(RocketR PROPERTIES WIN32_EXECUTABLE TRUE)
+        target_link_options(RocketR PRIVATE /ENTRY:mainCRTStartup)
+    endif()
     set_target_properties(RocketR PROPERTIES
         OUTPUT_NAME "Rocket-R"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
@@ -184,4 +220,41 @@ else()
     find_package(SDL2 REQUIRED)
     target_include_directories(RocketR PRIVATE ${SDL2_INCLUDE_DIRS})
     target_link_libraries(RocketR PRIVATE ${SDL2_LIBRARIES})
+endif()
+
+if(NOT ANDROID)
+    add_executable(RocketControlsTests tests/controls_tests.cpp src/runtime_input.cpp src/binding_capture.cpp)
+    target_include_directories(RocketControlsTests PRIVATE "${ROCKET_SOURCE_ROOT}/src")
+    if(WIN32)
+        target_include_directories(RocketControlsTests PRIVATE
+            "${ROCKET_RT64_DIR}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/include")
+        target_link_directories(RocketControlsTests PRIVATE
+            "${ROCKET_RT64_DIR}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/lib/x64")
+        target_link_libraries(RocketControlsTests PRIVATE SDL2)
+        add_custom_command(TARGET RocketControlsTests POST_BUILD COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${ROCKET_RT64_DIR}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/lib/x64/SDL2.dll"
+            "$<TARGET_FILE_DIR:RocketControlsTests>/SDL2.dll")
+    else()
+        target_include_directories(RocketControlsTests PRIVATE ${SDL2_INCLUDE_DIRS})
+        target_link_libraries(RocketControlsTests PRIVATE ${SDL2_LIBRARIES})
+    endif()
+    add_test(NAME controls COMMAND RocketControlsTests)
+    set_tests_properties(controls PROPERTIES TIMEOUT 30)
+    add_executable(RocketControlsUiTests tests/controls_ui_tests.cpp src/controls_studio.cpp src/runtime_input.cpp
+        "${ROCKET_RT64_DIR}/src/contrib/imgui/imgui.cpp"
+        "${ROCKET_RT64_DIR}/src/contrib/imgui/imgui_draw.cpp"
+        "${ROCKET_RT64_DIR}/src/contrib/imgui/imgui_tables.cpp"
+        "${ROCKET_RT64_DIR}/src/contrib/imgui/imgui_widgets.cpp")
+    target_compile_definitions(RocketControlsUiTests PRIVATE IMGUI_ENABLE_TEST_ENGINE)
+    target_include_directories(RocketControlsUiTests PRIVATE
+        "$<TARGET_PROPERTY:RocketControlsTests,INCLUDE_DIRECTORIES>"
+        "${ROCKET_RT64_DIR}/src/contrib/imgui")
+    if(WIN32)
+        target_link_directories(RocketControlsUiTests PRIVATE
+            "$<TARGET_PROPERTY:RocketControlsTests,LINK_DIRECTORIES>")
+    endif()
+    target_link_libraries(RocketControlsUiTests PRIVATE "$<TARGET_PROPERTY:RocketControlsTests,LINK_LIBRARIES>")
+    add_dependencies(RocketControlsUiTests RocketControlsTests)
+    add_test(NAME controls_ui COMMAND RocketControlsUiTests)
+    set_tests_properties(controls_ui PROPERTIES TIMEOUT 30)
 endif()
