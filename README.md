@@ -1,5 +1,7 @@
 # ROCKET-R
 
+<img width="1254" height="1254" alt="Rocket-R-green-full-resolution" src="https://github.com/user-attachments/assets/6f59e8e5-6d00-424c-81e1-7b93c6fee169" />
+
 Rocket: Robot on wheels Recompiled
 
 Rocket-R brings Rocket: Robot on Wheels to Windows, Linux and Android. You can
