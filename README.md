@@ -6,13 +6,12 @@ Rocket-R brings Rocket: Robot on Wheels to Windows, Linux and Android. You can
 play at higher resolutions, use smoother frame rates and set up the controls how
 you like. You'll need your own unmodified US ROM to play. The game is not included.
 
-=======
 Recompilation project by **ThatGuyMcd**.
 
 ## Getting started
 
 The builder now starts with a **multi-select platform question**. Pick any combination of:
-=======
+
 | Device | Package | Start the game |
 | --- | --- | --- |
 | Windows x64 | `Rocket-R-1.0.0-Windows-x64.zip` | Extract the ZIP and open `Rocket-R.exe`. Keep its DLLs and assets alongside it. |
