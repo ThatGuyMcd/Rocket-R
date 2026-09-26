@@ -10,6 +10,13 @@ you like. You'll need your own unmodified US ROM to play. The game is not includ
 
 Recompilation project by **ThatGuyMcd**.
 
+To keep up to date with news, Join the Discord!
+<p align="center">
+  <a href="https://discord.com/invite/AMWfXdBjNP">
+    <img src="https://img.shields.io/badge/JOIN%20OUR%20DISCORD-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join our Discord">
+  </a>
+</p>
+
 ## Getting started
 
 The builder now starts with a **multi-select platform question**. Pick any combination of:
