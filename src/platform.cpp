@@ -33,11 +33,13 @@
 namespace {
 
 SDL_Window* g_window = nullptr;
+bool g_game_input_active = false; // SDL owner thread; the launcher never captures relative motion.
 #if defined(__ANDROID__)
 void* g_android_native_window = nullptr;
 std::atomic<int> g_android_display_rate{60};
 std::mutex g_touch_mutex;
 rocket::input::State g_touch_state{};
+rocket::platform::CameraInput g_touch_camera{};
 std::atomic<bool> g_touch_overlay_request{false};
 std::atomic<int> g_android_output_rate{48000};
 std::atomic<float> g_android_focus_gain{1.0F};
@@ -76,6 +78,8 @@ std::size_t g_audio_prime_target_frames = 0;
 std::uint64_t g_audio_buffer_count = 0;
 std::uint64_t g_audio_underrun_count = 0;
 std::atomic<float> g_master_volume{0.65F};
+// Full slider volume uses the old 70% PCM level, leaving output headroom.
+constexpr float kMaximumOutputGain = 0.70F;
 std::vector<std::int16_t> g_audio_swap;
 
 constexpr std::uint32_t AI_STATUS_FIFO_FULL = 0x80000000U;
@@ -370,6 +374,7 @@ bool rocket::platform::initialise() {
 }
 
 void rocket::platform::shutdown() {
+    g_game_input_active = false;
     close_controller();
     {
         std::lock_guard lock(g_audio_mutex);
@@ -571,6 +576,20 @@ int rocket::platform::android_display_refresh_rate() {
 }
 #endif
 
+namespace {
+rocket::platform::CameraInput g_camera_input;
+#if defined(__ANDROID__)
+bool g_camera_mouse_present = false;
+#else
+bool g_camera_mouse_present = true;
+#endif
+}
+rocket::platform::CameraInput rocket::platform::camera_input() {
+    std::lock_guard lock(g_input_mutex);
+    auto result = g_camera_input;
+    g_camera_input.mouse_yaw = g_camera_input.mouse_pitch = 0;
+    return result;
+}
 void rocket::platform::sample_input() {
     // This function must only run on the SDL/window owner thread. Gameplay
     // sees a protected snapshot; rebinding and UI capture never run on the
@@ -580,6 +599,15 @@ void rocket::platform::sample_input() {
     const bool include_keyboard = focused;
     const bool include_controller = focused || rocket::input::background_input_enabled();
     const bool testing = rocket::ui::bindings_test_active();
+    const bool camera_mouse = rocket::input::camera_mouse_supported() && rocket::input::camera_mouse_enabled() && rocket::input::camera_input_owned();
+    const bool capture_mouse = g_game_input_active && focused && g_camera_mouse_present && (camera_mouse || rocket::input::mouse_motion_bound()) && !rocket::ui::overlay_visible() &&
+        !rocket::ui::input_capture_active() && !testing;
+    const bool mouse_mode_changed = capture_mouse != (SDL_GetRelativeMouseMode() == SDL_TRUE);
+    if (mouse_mode_changed) SDL_SetRelativeMouseMode(capture_mouse ? SDL_TRUE : SDL_FALSE);
+    int mouse_dx=0, mouse_dy=0;
+    const auto mouse_buttons = SDL_GetRelativeMouseState(&mouse_dx, &mouse_dy);
+    if (!focused || (!testing && (rocket::ui::overlay_visible() || rocket::ui::input_capture_active())) || mouse_mode_changed)
+        rocket::input::clear_mouse_transients();
     rocket::input::State preview{};
     auto state = rocket::input::poll(
         g_controller, include_keyboard, include_controller,
@@ -600,6 +628,25 @@ void rocket::platform::sample_input() {
     }
 #endif
     std::lock_guard lock(g_input_mutex);
+    const auto camera = rocket::input::poll_camera(g_controller, include_keyboard, include_controller,
+        rocket::ui::overlay_visible() || testing || rocket::ui::input_capture_active());
+    g_camera_input.x = camera.x; g_camera_input.y = camera.y; g_camera_input.recenter = camera.recenter;
+    if (capture_mouse && camera_mouse && !mouse_mode_changed && SDL_GetRelativeMouseMode() == SDL_TRUE) {
+        const float scale = rocket::input::camera_mouse_sensitivity() * 0.01745329252F;
+        g_camera_input.mouse_yaw += mouse_dx * scale;
+        g_camera_input.mouse_pitch += mouse_dy * scale;
+        const int recenter = rocket::input::camera_mouse_recenter_button();
+        g_camera_input.recenter |= recenter > 0 && (mouse_buttons & SDL_BUTTON(recenter)) != 0;
+    } else g_camera_input.mouse_yaw = g_camera_input.mouse_pitch = 0;
+#if defined(__ANDROID__)
+    {
+        std::lock_guard touch_lock(g_touch_mutex);
+        if (focused && !rocket::ui::overlay_visible() && !testing) {
+            if (g_touch_camera.x != 0 || g_touch_camera.y != 0 || g_touch_camera.recenter)
+                g_camera_input = g_touch_camera;
+        } else g_touch_camera = {};
+    }
+#endif
     g_input_preview = preview;
     g_buttons = state.buttons;
     g_stick_x = state.stick_x;
@@ -607,6 +654,7 @@ void rocket::platform::sample_input() {
 }
 
 void rocket::platform::pump_runtime_events() {
+    g_game_input_active = true;
 #if defined(__ANDROID__)
     if (g_touch_overlay_request.exchange(false, std::memory_order_acq_rel)) {
         rocket::ui::toggle_overlay();
@@ -614,6 +662,9 @@ void rocket::platform::pump_runtime_events() {
 #endif
     SDL_Event event{};
     while (SDL_PollEvent(&event)) {
+        rocket::input::mouse_event(event);
+        if (event.type == SDL_MOUSEMOTION && event.motion.which != SDL_TOUCH_MOUSEID)
+            g_camera_mouse_present = true;
 #if defined(__ANDROID__)
         if (event.type == SDL_APP_WILLENTERBACKGROUND) {
             plume::setAndroidNativeWindow(nullptr);
@@ -797,16 +848,13 @@ void rocket::platform::queue_samples(std::int16_t* samples, std::size_t sample_c
     }
 
     g_audio_swap.resize(sample_count);
-    const float gain = std::clamp(
+    const float volume = std::clamp(
         g_master_volume.load(std::memory_order_acquire), 0.0F, 1.0F);
-<<<<<<< Updated upstream
-=======
     const float gain = volume * kMaximumOutputGain
 #if defined(__ANDROID__)
         * g_android_focus_gain.load(std::memory_order_acquire)
 #endif
         ;
->>>>>>> Stashed changes
     int peak = 0;
     for (std::size_t i = 0; i + 1 < sample_count; i += 2) {
         const auto scale = [gain, &peak](std::int16_t value) {
@@ -861,12 +909,12 @@ void rocket::platform::queue_samples(std::int16_t* samples, std::size_t sample_c
     if (g_audio_buffer_count <= 8U || (g_audio_buffer_count % 120U) == 0U) {
         const std::size_t host_queued_after = queued_audio_frames_locked();
         std::fprintf(stderr,
-                     "[audio] block=%llu frames=%zu host=%zu/%zu fifo=%zu active=%zu peak=%d volume=%.2f underruns=%llu\n",
+                     "[audio] block=%llu frames=%zu host=%zu/%zu fifo=%zu active=%zu peak=%d volume=%.2f gain=%.2f underruns=%llu\n",
                      static_cast<unsigned long long>(g_audio_buffer_count),
                      submitted_frames, host_queued_after,
                      g_audio_prime_target_frames, g_ai_fifo_frames.size(),
                      g_ai_fifo_frames.empty() ? 0U : g_ai_fifo_frames.front(),
-                     peak, static_cast<double>(gain),
+                     peak, static_cast<double>(volume), static_cast<double>(gain),
                      static_cast<unsigned long long>(g_audio_underrun_count));
     }
 }
@@ -955,6 +1003,18 @@ Java_com_rocketret_rocketr_RocketActivity_nativeTouchState(JNIEnv*, jclass, jint
     g_touch_state.buttons = static_cast<std::uint16_t>(buttons);
     g_touch_state.stick_x = std::isfinite(x) ? std::clamp(x, -1.0F, 1.0F) : 0.0F;
     g_touch_state.stick_y = std::isfinite(y) ? std::clamp(y, -1.0F, 1.0F) : 0.0F;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_rocketret_rocketr_RocketActivity_nativeTouchLook(JNIEnv*, jclass, jfloat x, jfloat y, jboolean recenter) {
+    std::lock_guard lock(g_touch_mutex);
+    g_touch_camera.x = std::isfinite(x) ? std::clamp(x,-1.0F,1.0F) : 0.0F;
+    g_touch_camera.y = std::isfinite(y) ? std::clamp(y,-1.0F,1.0F) : 0.0F;
+    g_touch_camera.recenter = recenter;
+}
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_rocketret_rocketr_RocketActivity_nativeCameraActive(JNIEnv*, jclass) {
+    return rocket::input::camera_input_owned();
 }
 
 extern "C" JNIEXPORT void JNICALL

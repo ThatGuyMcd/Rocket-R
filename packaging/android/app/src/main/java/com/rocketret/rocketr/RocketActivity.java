@@ -27,6 +27,8 @@ public final class RocketActivity extends SDLActivity {
     };
 
     static native void nativeTouchState(int buttons, float x, float y);
+    static native void nativeTouchLook(float x, float y, boolean recenter);
+    static native boolean nativeCameraActive();
     static native void nativeToggleOverlay();
     static native boolean nativeOverlayVisible();
     private static native void nativeOutputRate(int rate);

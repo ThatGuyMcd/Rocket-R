@@ -16,6 +16,7 @@ import struct
 import subprocess
 import tarfile
 import tempfile
+import tomllib
 import zipfile
 
 from stage_release_docs import release_documents
@@ -76,6 +77,26 @@ def main() -> None:
     documents = {name: path.read_bytes() for name, path in release_documents(root).items()}
     artifacts = []
     binaries = {}
+    camera_payload = None
+    camera_manifest = root / 'modding/examples/modern-camera/mod.toml'
+    if camera_manifest.is_file():
+        path = dist / 'rocket_modern_camera.nrm'
+        expected = tomllib.loads(camera_manifest.read_text(encoding='utf-8'))['manifest']
+        with zipfile.ZipFile(path) as package:
+            require(package.testzip() is None, 'Corrupt camera mod package')
+            manifest = json.loads(package.read('mod.json'))
+            require(manifest['id'] == expected['id'] and manifest['version'] == expected['version'],
+                    'Camera mod package does not match the source manifest')
+            for item in package.infolist():
+                if not item.is_dir():
+                    with package.open(item) as stream:
+                        rom_check(item.filename, stream.read(4))
+        camera_payload = path.read_bytes()
+        artifacts.append(path)
+
+    def embedded_mod(data: bytes, platform: str) -> None:
+        if camera_payload is not None:
+            require(camera_payload in data, f'Outdated or missing built-in camera mod: {platform}')
 
     def docs(read, base: str = '') -> None:
         for name, expected in documents.items():
@@ -100,6 +121,7 @@ def main() -> None:
                 for name in ('SDL2.dll', 'dxcompiler.dll', 'dxil.dll', 'assets/ui/Rocket-R-green-full-resolution.png'):
                     require(bool(package.read(name)), f'Missing runtime file: {name}')
                 binaries['Windows-x64'] = hashlib.sha256(data).hexdigest()
+                embedded_mod(data, 'Windows-x64')
             else:
                 docs(package.read, 'assets/rocket-r-docs/')
                 libs = {name for name in package.namelist() if name.startswith('lib/') and name.endswith('.so')}
@@ -118,6 +140,8 @@ def main() -> None:
                                     f'Android library is not 16 KiB aligned: {name}')
                     require(bool(loads), f'No ELF load segments: {name}')
                     binaries[name] = hashlib.sha256(data).hexdigest()
+                    if name.endswith('/libmain.so'):
+                        embedded_mod(data, 'Android-arm64-v8a')
         artifacts.append(path)
 
     for arch, machine in (('x86_64', 62), ('aarch64', 183)):
@@ -147,6 +171,7 @@ def main() -> None:
             binary = (extracted / 'usr/bin/Rocket-R').read_bytes()
             elf(binary, machine)
             binaries[f'Linux-{arch}'] = hashlib.sha256(binary).hexdigest()
+            embedded_mod(binary, f'Linux-{arch}')
             docs(lambda name: (extracted / 'usr/share/doc/rocket-r' / name).read_bytes())
             require(not any(p.name.startswith(('libstdc++.so', 'libgcc_s.so')) for p in extracted.rglob('*')),
                     'AppImage must use the host C++ driver runtime')
@@ -186,7 +211,8 @@ def main() -> None:
         'binarySha256': binaries,
         'checks': ['ZIP integrity', 'ROM scans', 'CPU architectures', 'Windows GUI subsystem',
                    'Android 16 KiB ELF alignment', 'AppImage extraction', 'portable binary equality',
-                   'current guides and dependency notices'],
+                   'current guides and dependency notices'] +
+                  (['camera mod version and embedded package equality'] if camera_payload is not None else []),
         'coverageNote': 'These are packaging checks. See docs/TESTING.md for separate test and gameplay coverage. APK signing is checked by the Android builder.',
         'artifacts': [{'file': p.name, 'bytes': p.stat().st_size, 'sha256': digest(p)} for p in artifacts],
     }

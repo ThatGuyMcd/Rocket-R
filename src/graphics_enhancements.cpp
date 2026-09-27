@@ -1,4 +1,5 @@
 #include "graphics_enhancements.hpp"
+#include "presentation_identity.hpp"
 
 #include "recomp.h"
 
@@ -8,6 +9,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <mutex>
 
@@ -29,6 +31,8 @@ constexpr std::uint32_t kRdramEnd = 0x80800000U;
 constexpr std::uint32_t kCameraBytes = 0xB0U;
 constexpr int kViewMatrixOffset = 0x30;
 constexpr int kFovRadiansOffset = 0xA0;
+constexpr int kAspectOffset = 0xA4;
+constexpr int kNearOffset = 0xA8;
 constexpr int kFarOffset = 0xAC;
 constexpr float kPi = 3.14159265358979323846F;
 constexpr float kRadToDeg = 180.0F / kPi;
@@ -59,6 +63,8 @@ struct CameraOwnedState {
     std::uint32_t address = 0U;
     float saved_fov = 0.0F;
     float written_fov = 0.0F;
+    float saved_near = 0.0F;
+    float written_near = 0.0F;
     float saved_far = 0.0F;
     float written_far = 0.0F;
     std::array<float, 16> saved_matrix{};
@@ -81,6 +87,7 @@ struct CameraHistory {
 };
 
 thread_local CameraHistory g_camera_history{};
+thread_local bool g_camera_presentation_discontinuity_v36 = false;
 
 void RestoreOwnedCamera(std::uint8_t* rdram) {
     if (!g_camera_owned.active) return;
@@ -100,6 +107,11 @@ void RestoreOwnedCamera(std::uint8_t* rdram) {
         WriteFloat(rdram, camera, kFarOffset,
                    g_camera_owned.saved_far);
     }
+    if (SameBits(ReadFloat(rdram, camera, kNearOffset),
+                 g_camera_owned.written_near)) {
+        WriteFloat(rdram, camera, kNearOffset,
+                   g_camera_owned.saved_near);
+    }
     if (g_camera_owned.matrix_owned) {
         bool ours = true;
         for (int index = 0; index < 16; ++index) {
@@ -118,6 +130,31 @@ void RestoreOwnedCamera(std::uint8_t* rdram) {
         }
     }
     g_camera_owned = {};
+}
+
+float PresentationNear(float near_distance, float authored_fov,
+                       float effective_fov, float authored_aspect,
+                       float output_aspect) {
+    if (!std::isfinite(near_distance) || near_distance <= 0.0F ||
+        !std::isfinite(authored_aspect) || authored_aspect <= 0.1F ||
+        !std::isfinite(output_aspect) || output_aspect <= 0.1F) {
+        return near_distance;
+    }
+
+    // Retail func_80039C34 derives the camera's collision radius from the
+    // authored near-plane rectangle (near * tan(fov/2) * sqrt(1+aspect^2)).
+    // Increasing FOV/aspect without moving the near plane makes that rectangle
+    // reach beyond the original clearance, cutting open nearby walls. Keep
+    // BOTH half-extents within their authored sizes, including viewport corners.
+    // RT64 expands aspect later, so use the selected output aspect here without
+    // changing the guest aspect a second time. Narrower views keep retail near.
+    const float vertical_growth = std::tan(effective_fov * 0.5F) /
+                                  std::tan(authored_fov * 0.5F);
+    const float horizontal_growth = vertical_growth * output_aspect / authored_aspect;
+    const float growth = std::max({1.0F, vertical_growth, horizontal_growth});
+    if (!std::isfinite(growth)) return near_distance;
+    const float adjusted = near_distance / growth;
+    return std::isfinite(adjusted) && adjusted > 0.0F ? adjusted : near_distance;
 }
 
 [[nodiscard]] bool DetectCutscene(std::uint32_t camera_address,
@@ -174,6 +211,8 @@ void RestoreOwnedCamera(std::uint8_t* rdram) {
     } else if (history.cinematic_frames > 0) {
         --history.cinematic_frames;
     }
+    g_camera_presentation_discontinuity_v36 =
+        fov_cinematic || discontinuity;
     return fov_cinematic || history.cinematic_frames > 0;
 }
 
@@ -256,6 +295,8 @@ void rocket::graphics::set_settings(const Settings& value, bool mark_custom) {
     normalized.mip_lod_bias = std::clamp(normalized.mip_lod_bias, -2.0F, 2.0F);
     normalized.texture_detail_at_distance = std::isfinite(normalized.texture_detail_at_distance)
         ? std::clamp(normalized.texture_detail_at_distance, 0.0F, 1.0F) : 0.0F;
+    normalized.sky_dither_reduction = std::isfinite(normalized.sky_dither_reduction)
+        ? std::clamp(normalized.sky_dither_reduction, 0.0F, 1.0F) : 0.0F;
     normalized.fov_offset_degrees = std::clamp(normalized.fov_offset_degrees, -20.0F, 40.0F);
     normalized.draw_distance_multiplier = static_cast<float>(std::clamp(static_cast<int>(std::lround(normalized.draw_distance_multiplier)), 1, 6));
     normalized.preserve_cutscene_fov = false;
@@ -419,6 +460,7 @@ extern "C" void rocket_graphics_camera_begin(std::uint8_t* rdram,
 
     const Settings s = rocket::graphics::settings();
     const float authored_fov = ReadFloat(rdram, camera, kFovRadiansOffset);
+    const float authored_near = ReadFloat(rdram, camera, kNearOffset);
     const float authored_far = ReadFloat(rdram, camera, kFarOffset);
     if (!std::isfinite(authored_fov) || authored_fov <= 0.05F ||
         authored_fov >= kPi - 0.05F || !std::isfinite(authored_far)) return;
@@ -434,11 +476,15 @@ extern "C" void rocket_graphics_camera_begin(std::uint8_t* rdram,
     const bool cinematic = DetectCutscene(camera_address, authored_fov_deg,
                                           raw_matrix);
     g_cutscene_active.store(cinematic, std::memory_order_release);
+    rocket_presentation_camera_source(
+        rdram, context, g_camera_presentation_discontinuity_v36 ? 1U : 0U);
 
     g_camera_owned.active = true;
     g_camera_owned.address = camera_address;
     g_camera_owned.saved_fov = authored_fov;
     g_camera_owned.written_fov = authored_fov;
+    g_camera_owned.saved_near = authored_near;
+    g_camera_owned.written_near = authored_near;
     g_camera_owned.saved_far = authored_far;
     g_camera_owned.written_far = authored_far;
 
@@ -448,6 +494,23 @@ extern "C" void rocket_graphics_camera_begin(std::uint8_t* rdram,
         g_camera_owned.written_fov = effective_fov;
         WriteFloat(rdram, camera, kFovRadiansOffset,
                    g_camera_owned.written_fov);
+    }
+
+    const float authored_aspect = ReadFloat(rdram, camera, kAspectOffset);
+    const float output_aspect = rocket::graphics::selected_aspect(authored_aspect);
+    g_camera_owned.written_near = PresentationNear(
+        authored_near, authored_fov, effective_fov, authored_aspect, output_aspect);
+    if (!SameBits(g_camera_owned.written_near, authored_near)) {
+        WriteFloat(rdram, camera, kNearOffset, g_camera_owned.written_near);
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true, std::memory_order_relaxed)) {
+            std::fprintf(stderr,
+                "[graphics] near-plane clearance: %.3f -> %.3f world units "
+                "(vertical FOV %.1f -> %.1f, aspect %.3f -> %.3f)\n",
+                authored_near, g_camera_owned.written_near,
+                authored_fov * kRadToDeg, effective_fov * kRadToDeg,
+                authored_aspect, output_aspect);
+        }
     }
 
     if (s.draw_distance_multiplier > 1.0001F) {
@@ -465,13 +528,20 @@ extern "C" void rocket_graphics_camera_begin(std::uint8_t* rdram,
     ApplyShakeReduction(rdram, camera, camera_address, 100.0F, raw_matrix);
 }
 
+extern "C" void rocket_graphics_camera_end(std::uint8_t* rdram,
+                                         recomp_context* context) {
+    if (rdram == nullptr || context == nullptr) return;
+    // guPerspective and the task's matrix copies have consumed the temporary
+    // values. Restore them before camera collision/room logic can run again,
+    // even on frames with no frustum tests. The matrices retain the correction.
+    RestoreOwnedCamera(rdram);
+}
+
 extern "C" void rocket_graphics_frustum_begin(std::uint8_t* rdram,
                                                  recomp_context* context) {
     if (rdram == nullptr || context == nullptr) return;
 
-    // func_8003ACD4 has already consumed the temporary presentation camera.
-    // Restore the guest camera before object tests so graphics-only changes do
-    // not leak back into authored simulation/camera state.
+    // Defensive fallback; the projection-return hook normally restores these.
     RestoreOwnedCamera(rdram);
     const Settings s = rocket::graphics::settings();
 

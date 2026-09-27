@@ -11,6 +11,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from generate_recomp_config import validate_policy
+
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10 in Ubuntu 22.04 containers
@@ -81,7 +83,8 @@ def main() -> int:
         "scripts/validate_rom.py", "scripts/scan_release.py", "scripts/OneClickBuild.ps1",
         "scripts/Build-Android.ps1", "scripts/package_appimage.sh",
         "scripts/stage_release_docs.py", "scripts/verify_release.py",
-        "docs/CONTROLS.md", "docs/TESTING.md",
+        "README.md", "CHANGELOG.md", "docs/CONTROLS.md", "docs/TESTING.md", "docs/modding.md",
+        "scripts/build_mod.py", "modding/examples/modern-camera/mod.toml", "modding/include/rocket/mod.h",
         "src/binding_capture.cpp", "src/binding_capture.hpp",
         "src/controls_studio.cpp", "src/controls_studio.hpp",
         "src/runtime_log.cpp", "src/runtime_log.hpp",
@@ -90,6 +93,11 @@ def main() -> int:
         "packaging/android/app/src/main/java/com/rocketret/rocketr/TouchControlsModel.java",
         "packaging/android/app/src/main/java/com/rocketret/rocketr/TouchControlsView.java",
         "scripts/build_rocket_decomp.sh", "Build-Linux.sh",
+        "scripts/verify_recomp_policy_v42.py", "scripts/verify_interpolation_v35.py",
+        "scripts/verify_global_interpolation_ui_v36.py", "scripts/verify_shared_mode0_v43_3.py",
+        "scripts/verify_presentation_policy.py", "tests/presentation_identity_tests.cpp",
+        "tests/test_recomp_policy.py", "src/rocket-r.rc",
+        "packaging/android/app/src/main/res/drawable/rocket_r_icon.png",
         "packaging/android/build.gradle", "packaging/android/settings.gradle",
         "packaging/android/app-build.gradle", "packaging/android/app/jni/CMakeLists.txt",
         "packaging/android/app/src/main/AndroidManifest.xml",
@@ -108,9 +116,16 @@ def main() -> int:
         text = (root / builder).read_text(encoding="utf-8-sig")
         build_lines = [line for line in text.splitlines() if '--target' in line and 'RocketR' in line]
         require(any(all(target in line for target in (
-            'RocketPresentationTests', 'RocketRuntimeLogTests', 'RocketControlsTests', 'RocketControlsUiTests'
-        )) for line in build_lines), f"{builder} must compile all four test executables before CTest")
+            'RocketPresentationTests', 'RocketRuntimeLogTests', 'RocketControlsTests', 'RocketControlsUiTests',
+            'RocketModsTests', 'RocketCameraModTests', 'RocketGraphicsCameraTests'
+        )) for line in build_lines), f"{builder} must compile all seven test executables before CTest")
     require(bool(VERSION_RE.fullmatch(version)), f"invalid VERSION value: {version!r}")
+    camera = tomllib.loads((root / "modding/examples/modern-camera/mod.toml").read_text(encoding="utf-8"))["manifest"]
+    minimum = camera["minimum_recomp_version"]
+    require(bool(VERSION_RE.fullmatch(minimum)), "invalid bundled camera minimum version")
+    numeric_version = lambda value: tuple(map(int, re.split(r"[-+]", value)[0].split(".")))
+    require(numeric_version(minimum) <= numeric_version(version),
+            "the bundled camera requires a newer game version than this release")
 
     lock = json.loads((root / "dependencies.lock.json").read_text(encoding="utf-8"))
     require(lock.get("schemaVersion") == 1, "unsupported dependencies.lock.json schema")
@@ -135,6 +150,10 @@ def main() -> int:
 
     manifest = json.loads((root / "patches/manifest.json").read_text(encoding="utf-8"))
     require(manifest.get("schemaVersion") == 1, "unsupported patch manifest schema")
+    listed_patches = [p["path"] for d in manifest.get("dependencies", []) for p in d.get("patches", [])]
+    require(len(listed_patches) == len(set(listed_patches)), "duplicate dependency patch in manifest")
+    actual_patches = {p.relative_to(root).as_posix() for p in (root / "patches").rglob("*.patch")}
+    require(set(listed_patches) == actual_patches, "patch folder contains missing or unlisted patches")
     for dep in manifest.get("dependencies", []):
         require(str(dep.get("expectedCommit", "")) in {str(x["commit"]) for x in deps},
                 f"patch manifest commit for {dep.get('name')} is not dependency-pinned")
@@ -149,6 +168,7 @@ def main() -> int:
             validate_patch_syntax(patch_path)
 
     policy = json.loads((root / "runtime-recomp/rocket.us.recomp-policy.json").read_text(encoding="utf-8"))
+    validate_policy(policy)
     require(policy.get("schemaVersion") == 1, "unsupported Rocket recomp policy schema")
     for field in ("functionSizes", "manualFunctions", "functionHooks", "instructionPatches",
                   "stubs", "renamed", "ignored"):
@@ -227,13 +247,8 @@ def main() -> int:
     builder = (root / "scripts/OneClickBuild.ps1").read_text(encoding="utf-8-sig")
     require('Banner "Rocket-R ${Version}: local static recompilation builder"' in builder,
             "OneClickBuild.ps1 must delimit Version before a literal colon for Windows PowerShell 5.1")
-<<<<<<< Updated upstream
-    require("$BuilderRevision = 'FIXED34'" in builder,
-            "OneClickBuild.ps1 must identify this multi-platform FIXED27-baseline source as FIXED34")
-=======
-    require("$BuilderRevision = 'RELEASE-1.0.0'" in builder,
+    require("$BuilderRevision = 'RELEASE-1.0.1'" in builder,
             "OneClickBuild.ps1 must identify the current stabilization pipeline")
->>>>>>> Stashed changes
     require(".Replace([char]0,'')" not in builder and '.Replace([char]0,"")' not in builder,
             "OneClickBuild.ps1 contains the PowerShell 5.1 Replace(char,char) empty-string trap")
     require("ROCKET_R_BUILDER_WINPATH" in builder and "$bridgeName + '/p'" in builder,
@@ -290,8 +305,8 @@ def main() -> int:
             "N64Recomp patch must retain deterministic configured entrypoint selection")
 
     modern_manifest = next((d for d in manifest.get("dependencies", []) if d.get("name") == "N64ModernRuntime"), None)
-    require(modern_manifest is not None and len(modern_manifest.get("patches", [])) == 12,
-            "FIXED34 must carry the FIXED27 N64ModernRuntime stability set plus the Android thread portability patch")
+    require(modern_manifest is not None and len(modern_manifest.get("patches", [])) == 13,
+            "Runtime must carry the stability, Android portability and mod profile/protected hook patches")
     modern_patch_text = "\n".join(
         (root / patch["path"]).read_text(encoding="utf-8")
         for patch in modern_manifest["patches"])
@@ -302,19 +317,14 @@ def main() -> int:
                 f"N64ModernRuntime stability patch set is missing marker: {marker}")
 
     rt64_manifest = next((d for d in manifest.get("dependencies", []) if d.get("name") == "RT64"), None)
-<<<<<<< Updated upstream
-    require(rt64_manifest is not None and len(rt64_manifest.get("patches", [])) == 14,
-            "Rocket-R self-check RT64 patch count must match the current manifest, including the DKR-R semantic identity patch")
-=======
-    require(rt64_manifest is not None and len(rt64_manifest.get("patches", [])) == 20,
-            "Rocket-R self-check requires all 20 RT64 patches, including Android and texture detail repairs")
+    require(rt64_manifest is not None and len(rt64_manifest.get("patches", [])) == 26,
+            "Rocket-R self-check requires all 26 RT64 patches, including sky and player wheel interpolation")
     require(any(p.get("path") == "patches/rt64/0015-rocket-rigid-interpolation.patch"
                 for p in rt64_manifest["patches"]),
             "Rocket-R rigid interpolation patch is missing from the manifest")
     require(any(p.get("path") == "patches/rt64/0016-rocket-projected-shadow-interpolation.patch"
                 for p in rt64_manifest["patches"]),
             "Rocket-R projected shadow interpolation patch is missing from the manifest")
->>>>>>> Stashed changes
     rt64_patch_text = "\n".join(
         (root / patch["path"]).read_text(encoding="utf-8")
         for patch in rt64_manifest["patches"])

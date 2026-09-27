@@ -13,6 +13,9 @@ struct MatrixBinding {
     bool interpolate_vertices = false;
     bool interpolate_texcoords = false;
     bool interpolate_tiles = false;
+    // v37: only exact, proven collectible model matrices opt into RT64 rigid decomposition.
+    bool rigid_decompose = false;
+    bool interpolate_shape = false;
 };
 
 struct CoverageStats {
@@ -59,10 +62,30 @@ extern "C" void rocket_presentation_render_entry(std::uint8_t* rdram,
 extern "C" void rocket_presentation_task_submitted(std::uint8_t* rdram,
                                                      recomp_context* context);
 
+// Explicit call provenance supplied by checked N64Recomp policy hooks.
+extern "C" void rocket_presentation_callsite(
+    recomp_context* context, std::uint32_t target, std::uint32_t address);
+extern "C" void rocket_presentation_enter_call(
+    recomp_context* context, std::uint32_t target);
+
 // ROCKET-R INTERPOLATION V35: exact GameObject/Submodel matrix ownership hooks.
 extern "C" void rocket_presentation_submodel_matrix_begin(
     std::uint8_t* rdram, recomp_context* context);
 extern "C" void rocket_presentation_submodel_matrix_end(
+    std::uint8_t* rdram, recomp_context* context);
+
+// ROCKET-R INTERPOLATION V36 GLOBAL MATRIX OWNERSHIP
+extern "C" void rocket_presentation_model_range_begin(
+    std::uint8_t* rdram, recomp_context* context);
+extern "C" void rocket_presentation_model_range_end(
+    std::uint8_t* rdram, recomp_context* context);
+extern "C" void rocket_presentation_direct_begin(
+    std::uint8_t* rdram, recomp_context* context, std::uint32_t kind);
+extern "C" void rocket_presentation_direct_end(
+    std::uint8_t* rdram, recomp_context* context, std::uint32_t kind);
+extern "C" void rocket_presentation_camera_source(
+    std::uint8_t* rdram, recomp_context* context, std::uint32_t discontinuity);
+extern "C" void rocket_presentation_camera_matrices(
     std::uint8_t* rdram, recomp_context* context);
 
 // ROCKET-R SKYBOX INTERPOLATION V33

@@ -9,12 +9,25 @@
 #include <mutex>
 
 namespace {
+std::atomic<bool> g_camera_input_owned{false};
+std::atomic<bool> g_camera_runtime_enabled{true};
+std::atomic<bool> g_camera_actions_active{false};
+std::atomic<bool> g_camera_mouse_enabled{true};
+std::atomic<bool> g_camera_mouse_supported{false};
+std::atomic<float> g_camera_mouse_sensitivity{0.15F};
+std::atomic<int> g_camera_mouse_recenter{SDL_BUTTON_MIDDLE};
 
 using rocket::input::Action;
 using rocket::input::BindingSlot;
 using rocket::input::ShortcutAction;
 
 constexpr int kAxisSourceBase = 1000;
+constexpr int kMouseButtonBase = 2000, kMouseWheelBase = 2100, kMouseMotionBase = 2200;
+Uint32 g_mouse_buttons = 0;
+std::array<Uint64, 5> g_mouse_click_until{};
+std::array<Uint64, 4> g_mouse_wheel_until{};
+float g_mouse_x = 0, g_mouse_y = 0;
+Uint64 g_mouse_motion_until = 0;
 constexpr std::uint16_t kButtonA = 0x8000;
 constexpr std::uint16_t kButtonB = 0x4000;
 constexpr std::uint16_t kButtonZ = 0x2000;
@@ -73,6 +86,31 @@ constexpr std::array<BindingSet, static_cast<std::size_t>(Action::Count)> kDefau
 
 std::array<BindingSet, static_cast<std::size_t>(Action::Count)> g_bindings = kDefaults;
 std::mutex g_binding_mutex;
+struct CameraBinding { int keyboard; int controller; };
+using CameraBindings = std::array<CameraBinding, static_cast<std::size_t>(rocket::input::CameraAction::Count)>;
+constexpr CameraBindings kCameraDefaults{{
+    {SDL_SCANCODE_I, kAxisSourceBase + SDL_CONTROLLER_AXIS_RIGHTY * 2},
+    {SDL_SCANCODE_K, kAxisSourceBase + SDL_CONTROLLER_AXIS_RIGHTY * 2 + 1},
+    {SDL_SCANCODE_J, kAxisSourceBase + SDL_CONTROLLER_AXIS_RIGHTX * 2},
+    {SDL_SCANCODE_L, kAxisSourceBase + SDL_CONTROLLER_AXIS_RIGHTX * 2 + 1},
+    {SDL_SCANCODE_U, SDL_CONTROLLER_BUTTON_RIGHTSTICK},
+    {SDL_SCANCODE_O, SDL_CONTROLLER_BUTTON_LEFTSTICK},
+    {SDL_SCANCODE_P, SDL_CONTROLLER_BUTTON_Y},
+}};
+auto g_camera_bindings = kCameraDefaults;
+constexpr std::array<const char*, kCameraDefaults.size()> kCameraIdentifiers{{"up", "down", "left", "right", "recenter", "cycle_zoom", "first_person"}};
+constexpr std::array<const char*, kCameraDefaults.size()> kCameraLabels{{"Look up", "Look down", "Look left", "Look right", "Recenter camera", "Cycle zoom", "Toggle first person"}};
+
+bool CameraUses(const CameraBindings& bindings, int source, bool keyboard) {
+    if (source < 0) return false;
+    for (std::size_t i=0; i<bindings.size(); ++i) {
+        const bool mode_button = i >= static_cast<std::size_t>(rocket::input::CameraAction::CycleZoom);
+        if (!(mode_button ? g_camera_actions_active.load() && g_camera_runtime_enabled.load() : rocket::input::camera_input_owned())) continue;
+        const auto& b = bindings[i];
+        if ((keyboard ? b.keyboard : b.controller) == source) return true;
+    }
+    return false;
+}
 
 constexpr std::array<const char*, static_cast<std::size_t>(Action::Count)> kIdentifiers{{
     "stick_up", "stick_down", "stick_left", "stick_right", "a", "b", "z",
@@ -148,9 +186,24 @@ float SourceValue(SDL_GameController* controller, int source,
     return positive ? std::max(value, 0.0F) : std::max(-value, 0.0F);
 }
 
+float DesktopValue(const Uint8* keys, int source) {
+    if (!keys) return 0;
+    if (source >= 0 && source < SDL_NUM_SCANCODES) return keys[source] ? 1.0F : 0.0F;
+    const auto now = SDL_GetTicks64();
+    const int button = source - kMouseButtonBase;
+    if (button >= 1 && button <= 5)
+        return (g_mouse_buttons & SDL_BUTTON(button)) || now < g_mouse_click_until[button-1] ? 1.0F : 0.0F;
+    const int wheel = source - kMouseWheelBase;
+    if (wheel >= 0 && wheel < 4) return now < g_mouse_wheel_until[wheel] ? 1.0F : 0.0F;
+    const int motion = source - kMouseMotionBase;
+    if (motion >= 0 && motion < 4 && now < g_mouse_motion_until) {
+        const float values[] = {-g_mouse_y, g_mouse_y, -g_mouse_x, g_mouse_x};
+        return std::clamp(values[motion] / 24.0F, 0.0F, 1.0F);
+    }
+    return 0;
+}
 bool KeyboardHeld(const Uint8* keys, int source) {
-    return keys != nullptr && source >= 0 && source < SDL_NUM_SCANCODES &&
-           keys[source] != 0;
+    return DesktopValue(keys, source) > 0.5F;
 }
 
 float ShapeStick(float value, bool inverted) {
@@ -315,6 +368,15 @@ int rocket::input::encode_controller_axis(int axis, bool positive) {
 }
 
 std::string rocket::input::keyboard_binding_name(int scancode) {
+    const int button = scancode - kMouseButtonBase;
+    if (button >= 1 && button <= 5) {
+        constexpr const char* names[] = {"Mouse left click", "Mouse middle click", "Mouse right click", "Mouse side button 1", "Mouse side button 2"};
+        return names[button-1];
+    }
+    constexpr const char* directions[] = {"up", "down", "left", "right"};
+    if (scancode >= kMouseWheelBase && scancode < kMouseWheelBase + 4)
+        return std::string("Mouse wheel ") + directions[scancode-kMouseWheelBase];
+    if (is_mouse_motion(scancode)) return std::string("Mouse move ") + directions[scancode-kMouseMotionBase];
     if (scancode < 0 || scancode >= SDL_NUM_SCANCODES) return "Not assigned";
     const char* name = SDL_GetScancodeName(static_cast<SDL_Scancode>(scancode));
     return name != nullptr && *name != '\0' ? name : "Unknown key";
@@ -359,9 +421,11 @@ rocket::input::State rocket::input::poll(SDL_GameController* controller,
     if (blocked && preview == nullptr) return state;
 
     std::array<BindingSet, static_cast<std::size_t>(Action::Count)> bindings;
+    CameraBindings camera_bindings;
     {
         std::scoped_lock lock(g_binding_mutex);
         bindings = g_bindings;
+        camera_bindings = g_camera_bindings;
     }
 
     const auto controller_suppressed = [&](int source) {
@@ -376,6 +440,8 @@ rocket::input::State rocket::input::poll(SDL_GameController* controller,
     };
     const auto keyboard_suppressed = [&](int source) {
         if (source == kUnbound) return false;
+        if (preview == nullptr && is_mouse_motion(source) && camera_input_owned() && camera_mouse_enabled() && camera_mouse_supported()) return true;
+        if (preview == nullptr && CameraUses(camera_bindings, source, true)) return true;
         for (std::size_t i = 0; i < g_shortcut_held.size(); ++i) {
             if (g_shortcut_held[i].load(std::memory_order_relaxed) &&
                 g_shortcut_keyboard[i].load(std::memory_order_relaxed) == source) {
@@ -389,18 +455,20 @@ rocket::input::State rocket::input::poll(SDL_GameController* controller,
         const bool analogue_stick = action == Action::StickUp ||
             action == Action::StickDown || action == Action::StickLeft ||
             action == Action::StickRight;
+        const auto suppressed = [&](int source) {
+            return controller_suppressed(source) || (
+                CameraUses(camera_bindings, source, false) && preview == nullptr);
+        };
         float result = 0.0F;
-        if (!controller_suppressed(b.controller_primary)) {
+        if (!suppressed(b.controller_primary)) {
             result = SourceValue(pad, b.controller_primary, analogue_stick);
         }
-        if (!controller_suppressed(b.controller_secondary)) {
+        if (!suppressed(b.controller_secondary)) {
             result = std::max(result, SourceValue(
                 pad, b.controller_secondary, analogue_stick));
         }
-        if ((!keyboard_suppressed(b.keyboard_primary) && KeyboardHeld(keys, b.keyboard_primary)) ||
-            (!keyboard_suppressed(b.keyboard_secondary) && KeyboardHeld(keys, b.keyboard_secondary))) {
-            result = 1.0F;
-        }
+        if (!keyboard_suppressed(b.keyboard_primary)) result = std::max(result, DesktopValue(keys, b.keyboard_primary));
+        if (!keyboard_suppressed(b.keyboard_secondary)) result = std::max(result, DesktopValue(keys, b.keyboard_secondary));
         return result;
     };
     // Rocket's old right-stick C-button path used a 12,000 raw deadzone and a
@@ -424,6 +492,13 @@ rocket::input::State rocket::input::poll(SDL_GameController* controller,
     press(Action::CDown, kCDown);
     press(Action::CLeft, kCLeft);
     press(Action::CRight, kCRight);
+    if (preview == nullptr && g_camera_actions_active.load() && g_camera_runtime_enabled.load()) {
+        // Feed the original held-button state. Rocket detects presses/releases,
+        // cycles its own zoom presets, and handles first-person transitions.
+        const auto camera = poll_camera(controller, include_keyboard, include_controller, blocked);
+        if (camera.cycle_zoom) state.buttons |= kCDown;
+        if (camera.first_person) state.buttons |= kCUp;
+    }
 
     state.stick_x = std::clamp(value(Action::StickRight) - value(Action::StickLeft), -1.0F, 1.0F);
     state.stick_y = std::clamp(value(Action::StickUp) - value(Action::StickDown), -1.0F, 1.0F);
@@ -436,4 +511,119 @@ rocket::input::State rocket::input::poll(SDL_GameController* controller,
     state.stick_y = ShapeStick(state.stick_y, stick_y_inverted());
     if (preview != nullptr) *preview = state;
     return blocked ? State{} : state;
+}
+
+void rocket::input::set_camera_input_owned(bool value) { g_camera_input_owned.store(value); }
+bool rocket::input::camera_input_owned() { return g_camera_input_owned.load() && g_camera_runtime_enabled.load(); }
+void rocket::input::set_camera_runtime_enabled(bool enabled) { g_camera_runtime_enabled.store(enabled); }
+void rocket::input::set_camera_actions_active(bool active) { g_camera_actions_active.store(active); }
+bool rocket::input::camera_mouse_enabled() { return g_camera_mouse_enabled.load(); }
+bool rocket::input::camera_mouse_supported() { return g_camera_mouse_supported.load(); }
+void rocket::input::set_camera_mouse_supported(bool value) { g_camera_mouse_supported.store(value); }
+void rocket::input::set_camera_mouse_enabled(bool value) { g_camera_mouse_enabled.store(value); }
+float rocket::input::camera_mouse_sensitivity() { return g_camera_mouse_sensitivity.load(); }
+void rocket::input::set_camera_mouse_sensitivity(float value) {
+    if (std::isfinite(value)) g_camera_mouse_sensitivity.store(std::clamp(value, 0.01F, 1.0F));
+}
+int rocket::input::camera_mouse_recenter_button() { return g_camera_mouse_recenter.load(); }
+void rocket::input::set_camera_mouse_recenter_button(int button) {
+    if (button >= 0 && button <= SDL_BUTTON_X2) g_camera_mouse_recenter.store(button);
+}
+
+std::size_t rocket::input::camera_action_count() { return kCameraDefaults.size(); }
+const char* rocket::input::camera_action_identifier(CameraAction action) {
+    return kCameraIdentifiers.at(static_cast<std::size_t>(action));
+}
+const char* rocket::input::camera_action_label(CameraAction action) {
+    return kCameraLabels.at(static_cast<std::size_t>(action));
+}
+int rocket::input::camera_binding(CameraAction action, bool keyboard) {
+    std::scoped_lock lock(g_binding_mutex);
+    const auto& b = g_camera_bindings.at(static_cast<std::size_t>(action));
+    return keyboard ? b.keyboard : b.controller;
+}
+void rocket::input::set_camera_binding(CameraAction action, bool keyboard, int source) {
+    const bool valid = source == kUnbound || (keyboard
+        ? (source >= 0 && source < SDL_NUM_SCANCODES) || is_mouse_source(source)
+        : (source >= 0 && source < SDL_CONTROLLER_BUTTON_MAX) ||
+          (source >= kAxisSourceBase && source < kAxisSourceBase + SDL_CONTROLLER_AXIS_MAX * 2));
+    if (!valid) return;
+    std::scoped_lock lock(g_binding_mutex);
+    auto& b = g_camera_bindings.at(static_cast<std::size_t>(action));
+    (keyboard ? b.keyboard : b.controller) = source;
+    if (keyboard && action != CameraAction::Recenter && source == encode_mouse_button(camera_mouse_recenter_button()))
+        set_camera_mouse_recenter_button(0);
+}
+void rocket::input::reset_camera_bindings() {
+    std::scoped_lock lock(g_binding_mutex);
+    g_camera_bindings = kCameraDefaults;
+}
+rocket::input::CameraState rocket::input::poll_camera(SDL_GameController* controller,
+    bool include_keyboard, bool include_controller, bool blocked) {
+    if (blocked) return {};
+    CameraBindings bindings;
+    { std::scoped_lock lock(g_binding_mutex); bindings = g_camera_bindings; }
+    const Uint8* keys = include_keyboard ? SDL_GetKeyboardState(nullptr) : nullptr;
+    auto* pad = include_controller ? controller : nullptr;
+    const auto reserved = [&](int source, bool keyboard) {
+        if (source < 0) return true;
+        for (std::size_t i=0; i<g_shortcut_keyboard.size(); ++i)
+            if (source == (keyboard ? g_shortcut_keyboard[i].load() : g_shortcut_controller[i].load())) return true;
+        return keyboard && source == SDL_SCANCODE_ESCAPE;
+    };
+    const auto value = [&](CameraAction action) {
+        const auto& b = bindings[static_cast<std::size_t>(action)];
+        const bool direct_mouse = is_mouse_motion(b.keyboard) && camera_mouse_enabled() && camera_mouse_supported() &&
+            static_cast<std::size_t>(action) < static_cast<std::size_t>(CameraAction::Recenter);
+        const float key = !reserved(b.keyboard, true) && !direct_mouse ? DesktopValue(keys, b.keyboard) : 0.0F;
+        return std::max(key, reserved(b.controller, false) ? 0.0F : SourceValue(pad, b.controller));
+    };
+    return {value(CameraAction::Right)-value(CameraAction::Left),
+            value(CameraAction::Down)-value(CameraAction::Up), value(CameraAction::Recenter)>0.5F,
+            value(CameraAction::CycleZoom)>0.5F, value(CameraAction::FirstPerson)>0.5F};
+}
+
+int rocket::input::encode_mouse_button(int button) { return button >= 1 && button <= 5 ? kMouseButtonBase + button : kUnbound; }
+int rocket::input::encode_mouse_wheel(MouseDirection direction) { return kMouseWheelBase + static_cast<int>(direction); }
+int rocket::input::encode_mouse_motion(MouseDirection direction) { return kMouseMotionBase + static_cast<int>(direction); }
+bool rocket::input::is_mouse_motion(int source) { return source >= kMouseMotionBase && source < kMouseMotionBase + 4; }
+bool rocket::input::is_mouse_source(int source) {
+    return (source > kMouseButtonBase && source <= kMouseButtonBase + 5) ||
+        (source >= kMouseWheelBase && source < kMouseWheelBase + 4) || is_mouse_motion(source);
+}
+bool rocket::input::mouse_motion_bound() {
+    std::scoped_lock lock(g_binding_mutex);
+    for (const auto& b : g_bindings)
+        if (is_mouse_motion(b.keyboard_primary) || is_mouse_motion(b.keyboard_secondary)) return true;
+    if (camera_input_owned()) for (const auto& b : g_camera_bindings) if (is_mouse_motion(b.keyboard)) return true;
+    return false;
+}
+void rocket::input::clear_mouse_transients() {
+    g_mouse_click_until.fill(0); g_mouse_wheel_until.fill(0);
+    g_mouse_x = g_mouse_y = 0; g_mouse_motion_until = 0;
+}
+void rocket::input::mouse_event(const SDL_Event& e) {
+    const auto now = SDL_GetTicks64();
+    if (e.type == SDL_MOUSEBUTTONDOWN || e.type == SDL_MOUSEBUTTONUP) {
+        if (e.button.which == SDL_TOUCH_MOUSEID || e.button.button < 1 || e.button.button > 5) return;
+        const auto mask = SDL_BUTTON(e.button.button);
+        if (e.type == SDL_MOUSEBUTTONDOWN) {
+            g_mouse_buttons |= mask;
+            // A quick click must survive until the next 30 Hz game update.
+            g_mouse_click_until[e.button.button-1] = now + 50;
+        } else g_mouse_buttons &= ~mask;
+    } else if (e.type == SDL_MOUSEWHEEL && e.wheel.which != SDL_TOUCH_MOUSEID) {
+        const int sign = e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -1 : 1;
+        if (e.wheel.y) g_mouse_wheel_until[e.wheel.y * sign > 0 ? 0 : 1] = now + 50;
+        if (e.wheel.x) g_mouse_wheel_until[e.wheel.x * sign < 0 ? 2 : 3] = now + 50;
+    } else if (e.type == SDL_MOUSEMOTION && e.motion.which != SDL_TOUCH_MOUSEID) {
+        if (now >= g_mouse_motion_until) g_mouse_x = g_mouse_y = 0;
+        if (g_mouse_x * e.motion.xrel < 0) g_mouse_x = 0;
+        if (g_mouse_y * e.motion.yrel < 0) g_mouse_y = 0;
+        g_mouse_x = std::clamp(g_mouse_x + e.motion.xrel, -240.0F, 240.0F);
+        g_mouse_y = std::clamp(g_mouse_y + e.motion.yrel, -240.0F, 240.0F);
+        g_mouse_motion_until = now + 50;
+    } else if ((e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_FOCUS_LOST) || e.type == SDL_APP_WILLENTERBACKGROUND) {
+        g_mouse_buttons = 0; clear_mouse_transients();
+    }
 }

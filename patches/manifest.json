@@ -65,6 +65,11 @@
           "path": "patches/n64-modern-runtime/0012-enable-android-thread-naming.patch",
           "purpose": "Use the Linux prctl thread-name path on Android/Bionic so ultramodern links on ARM64 Android.",
           "sha256": "4a528dd6003c589a0cc7eb86fe17e36ee72453788f6960bfdcfebc39c3ea9029"
+        },
+        {
+          "path": "patches/n64-modern-runtime/0013-profile-mod-paths-and-protected-hooks.patch",
+          "purpose": "Separate mod profiles and saves from ROM storage; protect built-in game fixes against hooks and forced replacements; synchronize patched instruction caches.",
+          "sha256": "6fd549a889dd3598c31a693bf0803cb3516562f6d2b8a170a2a8e4e1a192d534"
         }
       ]
     },
@@ -123,7 +128,7 @@
         {
           "path": "patches/rt64/0008-rocket-dkrr-semantic-presentation-identities.patch",
           "purpose": "Rocket-R global interpolation stability v5: carry RenderEntry semantic owners only across adjacent authored frames with mutual unambiguous continuity, bind exact FIFO task sidecars, and explicitly use G_EX_ID_IGNORE for ambiguous, conflicting or unrecognised model matrices so RT64 never falls back to anonymous transform matching. Rocket-R v33 additionally gives only the pre-world sky/background display-list subtree a task-owned semantic interpolation group, including topology-safe dynamic vertex interpolation.",
-          "sha256": "b80afcdc6dc3d6b35d37fb3b0ca5bc104b699a73691bcc8b240c85e2be0ab7f4"
+          "sha256": "0828d13e894a211e14fc548cc284f051c00ddcb46b1d44298a2fa99e51013bba"
         },
         {
           "path": "patches/rt64/0009-rocket-configurable-n64-dithering.patch",
@@ -154,8 +159,6 @@
           "path": "patches/rt64/0014-rocket-custom-vi-shader.patch",
           "purpose": "Add optional precompiled custom final-VI pixel shaders using RT64's existing fullscreen vertex shader, descriptor contract and backend-specific DXIL/SPIR-V binaries.",
           "sha256": "ce763904b126c054710ddbd0dd8e55d23a00610703bafc0c8f1df53bae42126c"
-<<<<<<< Updated upstream
-=======
         },
         {
           "path": "patches/rt64/0015-rocket-rigid-interpolation.patch",
@@ -186,7 +189,36 @@
           "path": "patches/rt64/0020-android-surface-lifecycle.patch",
           "purpose": "Retain and replace Android native Vulkan surfaces at the present-thread resize boundary after background/resume.",
           "sha256": "f564b1aaeca8969aa5670e784e2f6cc9bde38f902ca3e22293a502cb33b059ab"
->>>>>>> Stashed changes
+        },
+        {
+          "path": "patches/rt64/0021-rocket-sky-interpolation-and-dither-reduction.patch",
+          "purpose": "Preserve proven sky presentation identities, validate vertex connectivity, interpolate scrolling tiles across wraps, and expose live texture-space sky dithering reduction.",
+          "sha256": "4fc6c94a0430723c44634cccb7791bb1f8faca08c77cad18d4070c5dce26dc0e"
+        },
+        {
+          "path": "patches/rt64/0022-rocket-scrolling-sky-rectangle.patch",
+          "purpose": "Tag the retail camera-scrolled sky rectangle, apply texture-space dithering reduction, and interpolate its guarded source rows at presentation rate.",
+          "sha256": "e76e1814759f3506e6259f6e5918da496952aa9e69f1dd50e904ebd1493e4f5a"
+        },
+        {
+          "path": "patches/rt64/0023-rocket-player-wheel-shape-interpolation.patch",
+          "purpose": "Interpolate the proven player wheel rotation, scale and shear together; retain conservative handling of all other matrices.",
+          "sha256": "381c11559b0b9b35a966a057348888c8a7ee2cfc2ff78189d47e23f91a5c6314"
+        },
+        {
+          "path": "patches/rt64/0024-rocket-stable-sky-dither-filter.patch",
+          "purpose": "Remove repeating dither phases during sky scrolling with a complete texture-space filter; retain alpha and strong edges.",
+          "sha256": "cc8680ff772b38af41d39dcb8a91befd044e447c7b778c0d6a9f858c506336d1"
+        },
+        {
+          "path": "patches/rt64/0025-rocket-sky-shader-build-dependencies.patch",
+          "purpose": "Recompile raster shaders when sky filtering or shared raster parameters change in an incremental build.",
+          "sha256": "ef9970849544e5428beae82899ac4ef9a1dbd85473f490f5b6e73ccc775016f4"
+        },
+        {
+          "path": "patches/rt64/0026-rocket-full-width-sky-gradient-filter.patch",
+          "purpose": "Average the entire eight-column sky gradient so full dithering reduction is independent of texture sampling phase.",
+          "sha256": "91b2c0969d9f96859df3af63fb3866b2ffb15b55cb0a108a5119119b58d14aaf"
         }
       ]
     }

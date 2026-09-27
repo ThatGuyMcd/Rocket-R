@@ -8,10 +8,11 @@ from pathlib import Path
 import shutil
 
 DOCS = (
-    'README.md', 'LICENSE', 'LICENSE.md', 'THIRD_PARTY.md',
+    'README.md', 'CHANGELOG.md', 'LICENSE', 'LICENSE.md', 'THIRD_PARTY.md',
     'docs/BUILDING.md', 'docs/CONTROLS.md', 'docs/DEVELOPMENT.md',
     'docs/ARCHITECTURE.md', 'docs/TROUBLESHOOTING.md',
     'docs/CUSTOM_SHADERS.md', 'docs/TESTING.md',
+    'docs/modding.md',
     'docs/custom-shaders/example-rocket-postprocess.hlsl',
 )
 DEPENDENCIES = ('rt64', 'n64-modern-runtime', 'sdl2')

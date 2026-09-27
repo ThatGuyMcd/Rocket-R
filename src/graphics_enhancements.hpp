@@ -85,6 +85,7 @@ struct Settings {
     int anisotropy = 16;
     float mip_lod_bias = -0.25F;
     float texture_detail_at_distance = 0.0F;
+    float sky_dither_reduction = 0.0F;
 
     float fov_offset_degrees = 0.0F;
     bool preserve_cutscene_fov = true;
@@ -144,5 +145,6 @@ void request_renderer_refresh();
 
 extern "C" {
 void rocket_graphics_camera_begin(std::uint8_t* rdram, recomp_context* context);
+void rocket_graphics_camera_end(std::uint8_t* rdram, recomp_context* context);
 void rocket_graphics_frustum_begin(std::uint8_t* rdram, recomp_context* context);
 }

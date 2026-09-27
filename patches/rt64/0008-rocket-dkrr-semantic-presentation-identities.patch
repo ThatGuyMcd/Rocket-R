@@ -43,7 +43,7 @@ diff --git a/src/hle/rt64_rsp.cpp b/src/hle/rt64_rsp.cpp
 +                // Match DKR-R's stable matrix policy: do not decompose Rocket's
 +                // arbitrary N64 matrices as rigid bodies. Interpolate only the
 +                // components that are safe for an accepted semantic identity.
-+                group.decompose = false;
++                group.decompose = (semantic.reserved & 0x1U) != 0U;
 +                group.positionInterpolation = interpolateTransform
 +                    ? G_EX_COMPONENT_INTERPOLATE : G_EX_COMPONENT_SKIP;
 +                group.rotationInterpolation = interpolateTransform

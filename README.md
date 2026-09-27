@@ -19,15 +19,15 @@ To keep up to date with news, Join the Discord!
 
 ## Getting started
 
-The builder now starts with a **multi-select platform question**. Pick any combination of:
+Download the package for your device, then follow the steps below:
 
 | Device | Package | Start the game |
 | --- | --- | --- |
-| Windows x64 | `Rocket-R-1.0.0-Windows-x64.zip` | Extract the ZIP and open `Rocket-R.exe`. Keep its DLLs and assets alongside it. |
-| Steam Deck | `Rocket-R-1.0.0-Linux-x86_64-SteamDeck.tar.gz` | Extract the archive and run `START-ROCKET-R.sh`. |
-| Linux x64 | `Rocket-R-1.0.0-Linux-x86_64.AppImage` | Make the AppImage executable, then open it. |
-| Linux ARM64 | `Rocket-R-1.0.0-Linux-aarch64.AppImage` | Make the AppImage executable, then open it. This build still needs gameplay testing on an ARM64 Linux device. |
-| Android ARM64 | `Rocket-R-1.0.0-Android-arm64-v8a.apk` | Install the APK, open Rocket-R and choose your ROM. |
+| Windows x64 | `Rocket-R-1.0.1-Windows-x64.zip` | Extract the ZIP and open `Rocket-R.exe`. Keep its DLLs and assets alongside it. |
+| Steam Deck | `Rocket-R-1.0.1-Linux-x86_64-SteamDeck.tar.gz` | Extract the archive and run `START-ROCKET-R.sh`. |
+| Linux x64 | `Rocket-R-1.0.1-Linux-x86_64.AppImage` | Make the AppImage executable, then open it. |
+| Linux ARM64 | `Rocket-R-1.0.1-Linux-aarch64.AppImage` | Make the AppImage executable, then open it. This build still needs gameplay testing on an ARM64 Linux device. |
+| Android ARM64 | `Rocket-R-1.0.1-Android-arm64-v8a.apk` | Install the APK, open Rocket-R and choose your ROM. |
 
 
 Linux portable archives are also available. Extract one and run
@@ -48,7 +48,7 @@ switches fullscreen. F1 and F11 can be rebound in **Controls > Shortcuts**;
 Escape and Alt+Enter remain available.
 
 **Controls > N64 Controls** opens Controller Studio. Select an N64 button and
-choose its keyboard or controller input. **Guided Setup** takes you through each
+choose its keyboard, mouse or controller input. **Guided Setup** takes you through each
 control, and **Test Inputs** lets you check your setup. See the
 [controls guide](docs/CONTROLS.md) for the default bindings and touch controls.
 
@@ -59,9 +59,24 @@ The Settings and Show Controls buttons remain available.
 Graphics settings include widescreen, resolution, frame rate and filtering.
 **Distant texture detail** lets you keep the original texture changes at 0%, use
 the highest available detail at 100%, or choose something in between.
+**Sky dithering reduction** softens the sky pattern without blurring the level or
+HUD. Leave it at 0% for the original texture, or raise it for a smoother sky.
 
 Comic Sans is used where it is installed. A shared fallback font is used where
 it isn't available; Microsoft font files are not included in the packages.
+
+## Mods
+
+The **Mods** tab lets you add code mods and texture packs, choose a profile and
+adjust each mod's settings. **Browse** includes Modern Analogue Camera by
+ThatGuyMcd. It adds right-stick and mouse look, adjustable momentum, both axis
+inversions, the three original zoom levels and first-person controls. Its
+settings and on/off switch work during gameplay.
+
+Modded profiles have separate saves. **Original Game** uses your existing save
+and starts without mods. The catalogue is currently offline; add downloaded
+packages with **Add Mods**. See the [modding guide](docs/modding.md) for installing
+mods and making your own, and the [release notes](CHANGELOG.md) for v1.0.1.
 
 ## Platform notes
 

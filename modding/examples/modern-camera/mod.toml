@@ -1,0 +1,64 @@
+[manifest]
+id = "rocket_modern_camera"
+version = "1.0.0"
+display_name = "Modern Analogue Camera"
+short_description = "Smooth camera movement with a controller, keyboard or mouse."
+description = "Orbit Rocket with the right stick, keyboard or mouse, with the game's original obstacle avoidance. Cycle the three zoom levels and switch to first person with your chosen buttons. Adjust momentum, invert either axis, remap inputs and change mouse sensitivity here in Details and settings. Fixed views keep their original controls."
+authors = ["ThatGuyMcd"]
+game_id = "rocket"
+minimum_recomp_version = "1.0.1"
+dependencies = []
+
+[[manifest.config_options]]
+id = "sensitivity"
+name = "Camera speed"
+description = "How quickly the camera turns at full stick deflection."
+type = "Number"
+min = 0.5
+max = 5.0
+step = 0.1
+default = 2.4
+
+[[manifest.config_options]]
+id = "deadzone"
+name = "Stick deadzone"
+description = "Increase this if your right stick drifts."
+type = "Number"
+min = 0.05
+max = 0.4
+step = 0.01
+default = 0.15
+
+[[manifest.config_options]]
+id = "response"
+name = "Stick response"
+description = "How quickly stick or keyboard look reaches full speed. 30 responds immediately; lower values ease in."
+type = "Number"
+min = 4.0
+max = 30.0
+step = 1.0
+default = 16.0
+
+[[manifest.config_options]]
+id = "momentum"
+name = "Camera momentum"
+description = "0 gives direct camera movement with no added glide. Increase this for smoother following and more glide when you stop. Changes apply while playing."
+type = "Number"
+min = 0.0
+max = 100.0
+step = 1.0
+default = 0.0
+
+[[manifest.config_options]]
+id = "invert_x"
+name = "Invert horizontal look"
+type = "Enum"
+options = ["Off", "On"]
+default = "Off"
+
+[[manifest.config_options]]
+id = "invert_y"
+name = "Invert vertical look"
+type = "Enum"
+options = ["Off", "On"]
+default = "Off"

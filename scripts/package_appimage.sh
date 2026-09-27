@@ -20,22 +20,12 @@ mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib" "$APPDIR/usr/share/applications" "$
 install -m 0755 "$BINARY" "$APPDIR/usr/bin/Rocket-R"
 install -m 0644 "$PROJECT_ROOT/packaging/linux/rocket-r.desktop" "$APPDIR/rocket-r.desktop"
 install -m 0644 "$PROJECT_ROOT/packaging/linux/rocket-r.desktop" "$APPDIR/usr/share/applications/rocket-r.desktop"
-<<<<<<< Updated upstream
-install -m 0644 "$PROJECT_ROOT/packaging/linux/rocket-r.svg" "$APPDIR/rocket-r.svg"
-install -m 0644 "$PROJECT_ROOT/packaging/linux/rocket-r.svg" "$APPDIR/usr/share/icons/hicolor/scalable/apps/rocket-r.svg"
-ln -sfn rocket-r.svg "$APPDIR/.DirIcon"
-install -m 0644 "$PROJECT_ROOT/LICENSE.md" "$APPDIR/usr/share/doc/rocket-r/LICENSE.md"
-install -m 0644 "$PROJECT_ROOT/THIRD_PARTY.md" "$APPDIR/usr/share/doc/rocket-r/THIRD_PARTY.md"
-install -m 0644 "$PROJECT_ROOT/README.md" "$APPDIR/usr/share/doc/rocket-r/README.md"
-install -m 0644 "$PROJECT_ROOT/docs/STATUS.md" "$APPDIR/usr/share/doc/rocket-r/STATUS.md"
-=======
 mkdir -p "$APPDIR/usr/bin/assets/ui" "$APPDIR/usr/share/icons/hicolor/512x512/apps"
 install -m 0644 "$PROJECT_ROOT/src/UI/Rocket-R-green-full-resolution.png" "$APPDIR/usr/bin/assets/ui/Rocket-R-green-full-resolution.png"
 install -m 0644 "$PROJECT_ROOT/src/UI/Rocket-R-green-512x512.png" "$APPDIR/rocket-r.png"
 install -m 0644 "$PROJECT_ROOT/src/UI/Rocket-R-green-512x512.png" "$APPDIR/usr/share/icons/hicolor/512x512/apps/rocket-r.png"
 ln -sfn rocket-r.png "$APPDIR/.DirIcon"
 python3 "$PROJECT_ROOT/scripts/stage_release_docs.py" --root "$PROJECT_ROOT" --output "$APPDIR/usr/share/doc/rocket-r"
->>>>>>> Stashed changes
 
 cat > "$APPDIR/AppRun" <<'RUNEOF'
 #!/usr/bin/env bash

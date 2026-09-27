@@ -6,6 +6,8 @@
 #include "renderer_snapshot.hpp"
 #include "presentation_identity.hpp"
 #include "runtime_ui.hpp"
+#include "mods/mod_library.hpp"
+#include "render/rt64_texture_cache.h"
 #include "vi_presentation_policy.hpp"
 
 #if defined(_WIN32)
@@ -203,6 +205,7 @@ float z_fight_scale(rocket::graphics::ZFightingMode value) {
 }
 
 void publish_rt64_rocket_controls(const rocket::graphics::Settings& settings) {
+    RT64::setRocketSkyDitherReduction(settings.sky_dither_reduction);
     // Retired Image controls are pinned to stable/neutral values instead of
     // being kept as hidden configuration switches.
     RT64::setRocketFogDistanceMultiplier(1.0F);
@@ -434,6 +437,25 @@ rocket::renderer::RT64Context::RT64Context(
         return;
     }
 
+    std::vector<RT64::ReplacementDirectory> texture_packs;
+    const auto mods = rocket::mods::library().snapshot();
+    if (mods.active.contains("packages")) {
+        for (const auto& package : mods.active["packages"]) {
+            const auto path = std::filesystem::u8path(package.at("path").get<std::string>());
+            if (path.extension() == ".rtz") texture_packs.emplace_back(path);
+        }
+    }
+    if (!texture_packs.empty()) {
+#if defined(__ANDROID__)
+        constexpr std::uint64_t texture_budget = 128ULL * 1024 * 1024;
+#else
+        constexpr std::uint64_t texture_budget = 512ULL * 1024 * 1024;
+#endif
+        application_->textureCache->setReplacementPoolMaxSize(texture_budget);
+        if (!application_->textureCache->loadReplacementDirectories(texture_packs))
+            std::fprintf(stderr, "[mods] One or more replacement texture packs could not load.\n");
+        else std::fprintf(stderr, "[mods] Loaded %zu replacement texture packs.\n", texture_packs.size());
+    }
     application_->setFullScreen(
         graphics.wm_option == ultramodern::renderer::WindowMode::Fullscreen);
     const auto startup_extra = rocket::graphics::settings();

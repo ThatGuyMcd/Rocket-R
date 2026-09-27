@@ -1,4 +1,5 @@
 #include "game_registration.hpp"
+#include "mods/mod_runtime.hpp"
 
 #include "rom_identity.generated.hpp"
 #include "bootstrap.generated.hpp"
@@ -42,6 +43,7 @@ void InitialiseEntrypointContext(std::uint8_t* rdram, recomp_context* context) {
 }
 
 void RunRocketEntrypoint(std::uint8_t* rdram, recomp_context* context) {
+    rocket::mods::game_ready(rdram, context);
     // Do not execute Rocket's raw retail entry stub here. Under the static
     // runtime game_init legitimately returns after starting the idle thread;
     // the cartridge stub then executes its intentional BREAK at 0x80000438.

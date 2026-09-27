@@ -1,5 +1,12 @@
 apply plugin: 'com.android.application'
 
+def rocketVersion = (project.findProperty('ROCKET_VERSION') ?: '1.0.1').toString()
+def releaseParts = rocketVersion.split('[-+]')[0].split('\\.').collect { it.toInteger() }
+if (releaseParts.size() != 3 || releaseParts.any { it < 0 || it > 99 }) {
+    throw new GradleException('Rocket-R needs a three-part version with components from 0 to 99.')
+}
+def rocketVersionCode = releaseParts[0] * 10000 + releaseParts[1] * 100 + releaseParts[2]
+
 android {
     namespace 'com.rocketret.rocketr'
     compileSdk 34
@@ -9,8 +16,8 @@ android {
         applicationId 'com.rocketret.rocketr'
         minSdk 24
         targetSdk 34
-        versionCode 10000
-        versionName project.findProperty('ROCKET_VERSION') ?: '0.1.0-dev'
+        versionCode rocketVersionCode
+        versionName rocketVersion
 
         externalNativeBuild {
             cmake {

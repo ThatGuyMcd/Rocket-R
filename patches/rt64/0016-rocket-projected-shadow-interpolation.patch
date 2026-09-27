@@ -1,0 +1,23 @@
+diff --git a/src/hle/rt64_rigid_body.cpp b/src/hle/rt64_rigid_body.cpp
+--- a/src/hle/rt64_rigid_body.cpp
++++ b/src/hle/rt64_rigid_body.cpp
+@@ -95,14 +95,17 @@
+         }
+ 
+         // The first matched pair has only a current decomposition in its history.
+         // Decompose the supplied endpoints rather than flattening a rotating rigid
+-        // object for that frame. Invalid endpoints cannot be safely interpolated.
++        // object for that frame. Surface projections can be singular and still
++        // have valid identity/continuity; preserve their component interpolation.
+         const DecomposedTransform prevTransform = transforms[transformIndex ^ 1].valid
+             ? transforms[transformIndex ^ 1] : DecomposedTransform(fallbackPrev);
+         const DecomposedTransform curTransform = transforms[transformIndex].valid
+             ? transforms[transformIndex] : DecomposedTransform(fallbackCur);
+         if (!prevTransform.valid || !curTransform.valid) {
+-            return fallbackCur;
++            // Ownership rejection is handled by the presentation binding, not
++            // by the rank of a matrix (flat shadows intentionally have rank < 4).
++            return lerpMatrixComponents(fallbackPrev, fallbackCur, lerpTranslation, lerpRotation, lerpPerspective, weight);
+         }
+ 
+         DecomposedTransform prevTransformCopy = prevTransform;

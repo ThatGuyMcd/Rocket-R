@@ -18,11 +18,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-<<<<<<< Updated upstream
-=======
 if(NOT ANDROID)
     enable_testing()
     add_executable(RocketPresentationTests tests/presentation_identity_tests.cpp
+        src/graphics_enhancements.cpp
         extern/rt64/src/common/rt64_math.cpp
         extern/rt64/src/hle/rt64_rigid_body.cpp)
     target_include_directories(RocketPresentationTests PRIVATE
@@ -43,9 +42,10 @@ if(NOT ANDROID)
     set_tests_properties(runtime_log PROPERTIES TIMEOUT 60)
 endif()
 
->>>>>>> Stashed changes
 if(WIN32)
     add_compile_definitions(NOMINMAX _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
+    # ROCKET-R UI V36 WINDOWS ICON RESOURCE
+    enable_language(RC)
 endif()
 
 set(ROCKET_RUNTIME_DIR "${ROCKET_SOURCE_ROOT}/extern/n64-modern-runtime")
@@ -58,6 +58,8 @@ foreach(required_path
     "${ROCKET_RT64_DIR}/CMakeLists.txt"
     "${ROCKET_SOURCE_ROOT}/generated/rom_identity.generated.hpp"
     "${ROCKET_SOURCE_ROOT}/generated/bootstrap.generated.hpp"
+    "${ROCKET_SOURCE_ROOT}/generated/mod_protection.generated.hpp"
+    "${ROCKET_SOURCE_ROOT}/generated/mod_camera.generated.hpp"
     "${ROCKET_GENERATED_CPU}/recomp_overlays.inl")
     if(NOT EXISTS "${required_path}")
         message(FATAL_ERROR
@@ -86,6 +88,33 @@ add_subdirectory("${ROCKET_RT64_DIR}" "${CMAKE_BINARY_DIR}/rt64")
 # area fills the selected 4:3/Expand output instead of preserving overscan.
 target_compile_definitions(rt64 PRIVATE RT64_ROCKET_SAFE_AREA_CROP=1)
 add_subdirectory("${ROCKET_RUNTIME_DIR}" "${CMAKE_BINARY_DIR}/N64ModernRuntime")
+
+add_library(RocketModsCore STATIC src/mods/mod_library.cpp)
+target_include_directories(RocketModsCore PUBLIC "${ROCKET_SOURCE_ROOT}/src"
+    "${ROCKET_RUNTIME_DIR}/thirdparty")
+target_link_libraries(RocketModsCore PUBLIC miniz)
+if(NOT ANDROID)
+    add_executable(RocketModsTests tests/mods_tests.cpp)
+    target_link_libraries(RocketModsTests PRIVATE RocketModsCore)
+    add_test(NAME mods COMMAND RocketModsTests)
+    add_executable(RocketCameraModTests tests/camera_mod_tests.cpp tests/camera_mod_logic_tests.cpp src/mods/mod_runtime.cpp)
+    target_link_libraries(RocketCameraModTests PRIVATE RocketModsCore)
+    target_include_directories(RocketCameraModTests PRIVATE
+        "${ROCKET_SOURCE_ROOT}/modding/include"
+        "${ROCKET_SOURCE_ROOT}/generated"
+        "${ROCKET_RUNTIME_DIR}/N64Recomp/include"
+        "${ROCKET_RUNTIME_DIR}/ultramodern/include"
+        "${ROCKET_RUNTIME_DIR}/librecomp/include"
+        "$<TARGET_PROPERTY:ultramodern,INCLUDE_DIRECTORIES>"
+        "$<TARGET_PROPERTY:librecomp,INCLUDE_DIRECTORIES>")
+    add_test(NAME camera_mod COMMAND RocketCameraModTests)
+    add_executable(RocketGraphicsCameraTests tests/graphics_camera_tests.cpp src/graphics_enhancements.cpp)
+    target_include_directories(RocketGraphicsCameraTests PRIVATE
+        "${ROCKET_SOURCE_ROOT}/src"
+        "${ROCKET_RUNTIME_DIR}/N64Recomp/include")
+    target_link_libraries(RocketGraphicsCameraTests PRIVATE Threads::Threads)
+    add_test(NAME graphics_camera COMMAND RocketGraphicsCameraTests)
+endif()
 
 add_library(RocketRecompiled STATIC ${ROCKET_RECOMPILED_C} ${ROCKET_RECOMPILED_CXX})
 target_include_directories(RocketRecompiled PRIVATE
@@ -127,11 +156,18 @@ set(ROCKET_RUNTIME_SOURCES
     src/render_telemetry_compat.cpp
     src/widescreen_culling.cpp
     src/game_registration.cpp
+    src/mods/mod_runtime.cpp
+    src/mods/mod_ui.cpp
+    src/mods/mod_android.cpp
     src/crash_handler.cpp
     src/runtime_log.cpp
     src/register_overlays.cpp
     "${ROCKET_RT64_DIR}/src/contrib/imgui/backends/imgui_impl_sdlrenderer2.cpp"
     ${ROCKET_RSP_CXX})
+
+if(WIN32)
+    list(APPEND ROCKET_RUNTIME_SOURCES "${ROCKET_SOURCE_ROOT}/src/rocket-r.rc")
+endif()
 
 if(ANDROID)
     # SDLActivity loads libmain.so and calls its exported SDL_main entrypoint.
@@ -142,6 +178,7 @@ if(ANDROID)
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 else()
     add_executable(RocketR ${ROCKET_RUNTIME_SOURCES})
+    set(ROCKET_EXECUTABLE_NAME "Rocket-R" CACHE STRING "Executable name for side-by-side development tests")
     if(WIN32)
         # Start as a GUI process without creating/flashing a console. Keep the
         # normal CRT main(argc, argv) startup and inherited redirected streams.
@@ -149,7 +186,7 @@ else()
         target_link_options(RocketR PRIVATE /ENTRY:mainCRTStartup)
     endif()
     set_target_properties(RocketR PROPERTIES
-        OUTPUT_NAME "Rocket-R"
+        OUTPUT_NAME "${ROCKET_EXECUTABLE_NAME}"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     foreach(config Debug Release RelWithDebInfo MinSizeRel)
         string(TOUPPER "${config}" config_upper)
@@ -181,6 +218,9 @@ target_include_directories(RocketR PRIVATE
 
 target_compile_definitions(RocketR PRIVATE
     RT64_SDL_WINDOW_VULKAN=1
+    ROCKET_R_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+    ROCKET_R_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+    ROCKET_R_VERSION_PATCH=${PROJECT_VERSION_PATCH}
     ROCKET_R_VERSION="${ROCKET_R_VERSION}")
 # librecomp's generated RSP vector implementation uses SSSE3/SSE4.1
 # intrinsics on x86-64. clang-cl does not enable these intrinsics by default,
@@ -192,7 +232,7 @@ elseif(NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
 endif()
 
 # Generated code first: GNU ld scans static archives from left to right.
-target_link_libraries(RocketR PRIVATE RocketRecompiled ultramodern librecomp rt64)
+target_link_libraries(RocketR PRIVATE RocketRecompiled ultramodern librecomp rt64 RocketModsCore)
 
 if(WIN32)
     target_include_directories(RocketR PRIVATE
@@ -204,6 +244,11 @@ if(WIN32)
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${ROCKET_RT64_DIR}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/lib/x64/SDL2.dll"
             "$<TARGET_FILE_DIR:RocketR>/SDL2.dll"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory
+            "$<TARGET_FILE_DIR:RocketR>/assets/ui"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${ROCKET_SOURCE_ROOT}/src/UI/Rocket-R-green-full-resolution.png"
+            "$<TARGET_FILE_DIR:RocketR>/assets/ui/Rocket-R-green-full-resolution.png"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${ROCKET_RT64_DIR}/src/contrib/dxc/bin/x64/dxcompiler.dll"
             "$<TARGET_FILE_DIR:RocketR>/dxcompiler.dll"

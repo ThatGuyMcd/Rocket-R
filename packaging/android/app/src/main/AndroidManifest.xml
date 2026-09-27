@@ -9,11 +9,13 @@
     <uses-permission android:name="android.permission.VIBRATE" />
 
     <application
+        android:icon="@drawable/rocket_r_icon"
         android:allowBackup="true"
         android:label="Rocket-R"
         android:theme="@android:style/Theme.Material.Light.NoActionBar.Fullscreen"
         android:hardwareAccelerated="true">
 
+        <activity android:name=".ModActivity" android:exported="false" />
         <activity
             android:name=".RocketActivity"
             android:enableOnBackInvokedCallback="true"

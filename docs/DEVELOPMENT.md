@@ -17,9 +17,13 @@ RecompiledRSP or generated headers. Apply dependency patches through
 Keep dependency revisions in `dependencies.lock.json` and patch hashes in
 `patches/manifest.json` in sync.
 
-All 33 listed dependency patches are required in their current order. An older
+All 40 listed dependency patches are required in their current order. An older
 patch can still be needed by a later one. Some active verification scripts also
 retain version numbers in their names; the builder still calls them.
+
+Local build tools and caches belong in `build/`, and current release packages
+belong in `dist/`. Neither folder is source. Keep one-off experiments, recordings,
+old packages and planning notes out of the source tree.
 
 ## Working on a change
 

@@ -20,10 +20,16 @@ public final class TouchControlsView extends View {
     private final SharedPreferences preferences;
     private boolean shown, overlay, menuGesture;
     private float leftInset, rightInset, topInset, bottomInset;
+    private int lookPointer = -1;
+    private boolean cameraActive, recenter;
+    private float lookX, lookY, lookCenterX, lookCenterY;
+    private long lastLookTap;
 
     private final Runnable refresh = new Runnable() {
         @Override public void run() {
             boolean next = RocketActivity.nativeOverlayVisible();
+            boolean nextCamera = RocketActivity.nativeCameraActive();
+            if (nextCamera != cameraActive) { cameraActive=nextCamera; layoutControls(); }
             if (overlay != next) {
                 overlay = next;
                 release();
@@ -68,11 +74,13 @@ public final class TouchControlsView extends View {
 
     private void publish() {
         RocketActivity.nativeTouchState(model.mask(), model.stickX, model.stickY);
+        RocketActivity.nativeTouchLook(lookX, lookY, recenter);
         invalidate();
     }
 
     public void release() {
         model.clear();
+        lookPointer=-1;lookX=lookY=0;recenter=false;
         publish();
     }
 
@@ -89,8 +97,10 @@ public final class TouchControlsView extends View {
         menuGesture = false;
         float width = Math.max(1, getWidth() - leftInset - rightInset);
         float height = Math.max(1, getHeight() - topInset - bottomInset);
-        model.layout(width, height);
+        model.layout(width, height, cameraActive);
         float s = model.scale;
+        lookCenterX=width-98*s;lookCenterY=height-218*s;
+        lookPointer=-1;lookX=lookY=0;recenter=false;
         settings.set(width / 2 + 6*s, 12*s, width / 2 + 130*s, 58*s);
         visibility.set(width / 2 - 130*s, 12*s, width / 2 - 6*s, 58*s);
         publish();
@@ -135,7 +145,7 @@ public final class TouchControlsView extends View {
                     paint.setColor(Color.argb(170, 222, 240, 247));
                     canvas.drawCircle(button.x, button.y, button.radius, paint);
                     label(canvas, button.label, button.x, button.y,
-                          (button.label.equals("START") ? 11 : 19)*s);
+                          (button.label.length() > 2 ? 11 : 19)*s);
                 }
                 paint.setStyle(Paint.Style.FILL);
                 paint.setColor(Color.argb(80, 9, 34, 47));
@@ -148,6 +158,14 @@ public final class TouchControlsView extends View {
                 paint.setColor(Color.argb(165, 117, 207, 224));
                 canvas.drawCircle(model.stickCenterX + model.stickX * model.stickRadius * 0.65f,
                                   model.stickCenterY - model.stickY * model.stickRadius * 0.65f, 26*s, paint);
+                if(cameraActive) {
+                    paint.setColor(Color.argb(95,9,34,47));
+                    canvas.drawCircle(lookCenterX,lookCenterY,64*s,paint);
+                    paint.setColor(Color.argb(165,117,207,224));
+                    canvas.drawCircle(lookCenterX+lookX*42*s,lookCenterY+lookY*42*s,20*s,paint);
+                    label(canvas,"LOOK",lookCenterX,lookCenterY-80*s,16*s);
+                    label(canvas,"Double tap to recenter",lookCenterX,lookCenterY+82*s,10*s);
+                }
             }
         }
         canvas.restore();
@@ -182,15 +200,25 @@ public final class TouchControlsView extends View {
             return true;
         }
         if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
-            model.down(event.getPointerId(index), x, y);
+            float dx=x-lookCenterX,dy=y-lookCenterY;
+            if(cameraActive&&lookPointer==-1&&dx*dx+dy*dy<=64*64*model.scale*model.scale) {
+                lookPointer=event.getPointerId(index);
+                recenter=event.getEventTime()-lastLookTap<300;lastLookTap=event.getEventTime();
+                lookX=lookY=0;
+            } else model.down(event.getPointerId(index), x, y);
         } else if (action == MotionEvent.ACTION_MOVE) {
             for (int i = 0; i < event.getPointerCount(); ++i) {
-                model.move(event.getPointerId(i), event.getX(i) - leftInset, event.getY(i) - topInset);
+                if(event.getPointerId(i)==lookPointer) {
+                    lookX=Math.max(-1,Math.min(1,(event.getX(i)-leftInset-lookCenterX)/(64*model.scale)));
+                    lookY=Math.max(-1,Math.min(1,(event.getY(i)-topInset-lookCenterY)/(64*model.scale)));
+                } else model.move(event.getPointerId(i), event.getX(i) - leftInset, event.getY(i) - topInset);
             }
         } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) {
             model.up(event.getPointerId(index));
+            if(event.getPointerId(index)==lookPointer){lookPointer=-1;lookX=lookY=0;recenter=false;}
         } else if (action == MotionEvent.ACTION_CANCEL) {
             model.clear();
+            lookPointer=-1;lookX=lookY=0;recenter=false;
         }
         publish();
         return true;

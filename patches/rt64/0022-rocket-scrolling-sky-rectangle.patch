@@ -1,0 +1,151 @@
+--- a/src/gbi/rt64_gbi_rdp.cpp
++++ b/src/gbi/rt64_gbi_rdp.cpp
+@@ -7,6 +7,8 @@
+ #include "../include/rt64_extended_gbi.h"
+ 
+ #include "rt64_f3d.h"
++
++extern "C" bool rocket_presentation_sky_rectangle(uint32_t, float*, float*);
+ 
+ namespace RT64 {
+     namespace GBI_RDP {
+@@ -169,6 +171,16 @@
+         }
+ 
+         void texrect(State *state, DisplayList **dl) {
++            float currentRow = 0, previousRow = 0;
++            const uint32_t command = uint32_t(reinterpret_cast<uint8_t *>(*dl) - state->RDRAM) & 0x007FFFFFU;
++            const bool sky = rocket_presentation_sky_rectangle(command, &currentRow, &previousRow);
++            if (sky) {
++                state->flush();
++                state->rocketBackgroundPresentationActive = true;
++                state->drawCall.rocketSkyCurrentRow = currentRow;
++                state->drawCall.rocketSkyPreviousRow = previousRow;
++                state->updateDrawStatusAttribute(DrawAttribute::ExtendedFlags);
++            }
+             const int32_t ulx = (*dl)->p1(12, 12);
+             const int32_t uly = (*dl)->p1(0, 12);
+             const int32_t lrx = (*dl)->p0(12, 12);
+@@ -183,6 +195,12 @@
+             const int16_t dsdx = (*dl)->p1(16, 16);
+             const int16_t dtdy = (*dl)->p1(0, 16);
+             state->rdp->drawTexRect(ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, false);
++            if (sky) {
++                state->flush();
++                state->rocketBackgroundPresentationActive = false;
++                state->drawCall.rocketSkyCurrentRow = state->drawCall.rocketSkyPreviousRow = 0;
++                state->updateDrawStatusAttribute(DrawAttribute::ExtendedFlags);
++            }
+         }
+         
+         void texrectFlip(State *state, DisplayList **dl) {
+--- a/src/hle/rt64_draw_call.h
++++ b/src/hle/rt64_draw_call.h
+@@ -97,6 +97,8 @@
+         uint8_t textureLevels;
+         bool NoN;
+         bool rocketSkyBackground = false;
++        float rocketSkyCurrentRow = 0;
++        float rocketSkyPreviousRow = 0;
+ 
+         // RSP specific parameters.
+         uint32_t geometryMode;
+--- a/src/shared/rt64_raster_params.h
++++ b/src/shared/rt64_raster_params.h
+@@ -17,6 +17,8 @@
+         float2 screenScale;
+         float2 screenOffset;
+         float skyDitherReduction;
++        float skyRowOffset;
++        uint skyRectangle;
+     };
+ #ifdef HLSL_CPU
+ };
+--- a/src/render/rt64_framebuffer_renderer_call.h
++++ b/src/render/rt64_framebuffer_renderer_call.h
+@@ -40,6 +40,8 @@
+                 uint32_t faceCount;
+                 bool vertexTestZ : 1;
+                 bool rocketSky : 1;
++                float rocketSkyCurrentRow;
++                float rocketSkyPreviousRow;
+                 bool postBlendDitherNoise : 1;
+                 bool postBlendDitherNoiseNegative : 1;
+             } triangles;
+--- a/src/render/rt64_framebuffer_renderer.h
++++ b/src/render/rt64_framebuffer_renderer.h
+@@ -101,6 +101,7 @@
+         std::unique_ptr<RSPSmoothNormalDescriptorSet> smoothDescSet;
+         std::unique_ptr<RSPVertexTestZDescriptorSet> vertexTestZSet;
+         interop::FrameParams frameParams;
++        float rocketPresentationWeight = 1.0f;
+         const ShaderLibrary *shaderLibrary = nullptr;
+ 
+ #   if RT_ENABLED
+--- a/src/hle/rt64_workload_queue.cpp
++++ b/src/hle/rt64_workload_queue.cpp
+@@ -607,6 +607,7 @@
+             // Add all framebuffer pairs to the framebuffer renderer and setup the operations.
+             scratchFbChangePool.reset();
+             fbManager.resetOperations();
++            framebufferRenderer->rocketPresentationWeight = curFrameWeight;
+             framebufferRenderer->resetFramebuffers(ext.workloadGraphicsWorker, ubershadersVisible, workload.extended.ditherNoiseStrength, targetManager.multisampling);
+ 
+ #       if RT_ENABLED
+--- a/src/render/rt64_framebuffer_renderer.cpp
++++ b/src/render/rt64_framebuffer_renderer.cpp
+@@ -580,6 +580,9 @@
+                 rasterParams.screenScale = triangles.screenScale;
+                 rasterParams.screenOffset = triangles.screenOffset;
+                 rasterParams.skyDitherReduction = triangles.rocketSky ? skyDitherReduction : 0.0f;
++                rasterParams.skyRectangle = triangles.rocketSky;
++                rasterParams.skyRowOffset = triangles.rocketSky ?
++                    triangles.rocketSkyPreviousRow + (triangles.rocketSkyCurrentRow - triangles.rocketSkyPreviousRow) * rocketPresentationWeight : 0.0f;
+                 worker->commandList->setGraphicsPushConstants(0, &rasterParams);
+ 
+                 drawCallTriangles(drawCall);
+@@ -1515,6 +1518,8 @@
+             for (uint32_t d = 0; (d < proj.gameCallCount) && (globalCallIndex < p.maxGameCall); d++) {
+                 const GameCall &call = proj.gameCalls[d];
+                 triangles.rocketSky = call.callDesc.rocketSkyBackground;
++                triangles.rocketSkyCurrentRow = call.callDesc.rocketSkyCurrentRow;
++                triangles.rocketSkyPreviousRow = call.callDesc.rocketSkyPreviousRow;
+                 renderIndices.instanceIndex = call.callDesc.callIndex;
+                 renderIndices.faceIndicesStart = call.meshDesc.faceIndicesStart;
+                 renderIndices.rdpTileIndex = call.callDesc.tileIndex;
+--- a/src/shaders/RasterPS.hlsl
++++ b/src/shaders/RasterPS.hlsl
+@@ -144,7 +144,7 @@
+         
+         const GPUTile gpuTile = GPUTiles[globalTileIndex];
+         const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags) ? vertexUV : lowResUV;
+-        texVal0 = sampleRocketSkyTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, false, gConstants.mipLODBias, gConstants.textureDetailAtDistance, gConstants.skyDitherReduction);
++        texVal0 = sampleRocketSkyTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, false, gConstants.mipLODBias, gConstants.textureDetailAtDistance, gConstants.skyDitherReduction, gConstants.skyRowOffset, gConstants.skyRectangle != 0);
+     }
+     
+     if (renderFlagUsesTexture1(rp.flags)) {
+@@ -160,7 +160,7 @@
+         const GPUTile gpuTile = GPUTiles[globalTileIndex];
+         const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags) ? vertexUV : lowResUV;
+         const uint nativeSampler = renderFlagNativeSampler1(rp.flags);
+-        texVal1 = sampleRocketSkyTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, oneCycleHardwareBug, gConstants.mipLODBias, gConstants.textureDetailAtDistance, gConstants.skyDitherReduction);
++        texVal1 = sampleRocketSkyTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, oneCycleHardwareBug, gConstants.mipLODBias, gConstants.textureDetailAtDistance, gConstants.skyDitherReduction, gConstants.skyRowOffset, gConstants.skyRectangle != 0);
+     }
+     
+     // Color combiner.
+--- a/src/shaders/RocketSky.hlsli
++++ b/src/shaders/RocketSky.hlsli
+@@ -1,7 +1,12 @@
+ // A fixed texture-space filter: no frame history, random taps or framebuffer blur.
+ float4 sampleRocketSkyTexture(OtherMode otherMode, RenderFlags flags, float2 uv,
+     float2 dx, float2 dy, RDPTile tile, GPUTile gpuTile, bool nextPixelBug,
+-    float mipBias, float detail, float reduction) {
++    float mipBias, float detail, float reduction, float rowOffset, bool sky) {
++    if (sky) {
++        uv.y += rowOffset / max(abs(tile.shiftt), 0.0001f);
++        otherMode.H = (otherMode.H & ~(3U << G_MDSFT_TEXTFILT)) | G_TF_BILERP;
++        flags |= (1U << 4);
++    }
+     float4 center = sampleTexture(otherMode, flags, uv, dx, dy, tile, gpuTile, nextPixelBug, mipBias, detail);
+     [branch]
+     if (reduction <= 0.0f || gpuTileFlagHighRes(gpuTile.flags) || gpuTileFlagAlphaIsCvg(gpuTile.flags)) return center;

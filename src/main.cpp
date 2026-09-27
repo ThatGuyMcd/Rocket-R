@@ -1,4 +1,6 @@
 #include "crash_handler.hpp"
+#include "mods/mod_library.hpp"
+#include "mods/mod_runtime.hpp"
 #include "game_registration.hpp"
 #include "platform.hpp"
 #include "rt64_renderer.hpp"
@@ -27,7 +29,7 @@
 #include <thread>
 
 #ifndef ROCKET_R_VERSION
-#define ROCKET_R_VERSION "0.1.0-dev"
+#error "ROCKET_R_VERSION must be supplied by the build from VERSION"
 #endif
 
 extern RspUcodeFunc rocketAspMain;
@@ -90,6 +92,8 @@ struct Options {
     std::filesystem::path config = default_config_directory();
     bool help = false;
     bool launch = false;
+    bool without_mods = false;
+    std::filesystem::path install_mod;
     std::string error;
 };
 
@@ -100,6 +104,10 @@ bool parse_options(int argc, char** argv, Options& out) {
             out.rom = std::filesystem::u8path(argv[++i]);
         } else if (arg == "--config" && i + 1 < argc) {
             out.config = std::filesystem::u8path(argv[++i]);
+        } else if (arg == "--without-mods") {
+            out.without_mods = true;
+        } else if (arg == "--install-mod" && i + 1 < argc) {
+            out.install_mod = std::filesystem::u8path(argv[++i]);
         } else if (arg == "--launch") {
             out.launch = true;
         } else if (!arg.empty() && arg.front() != '-' && out.rom.empty()) {
@@ -129,12 +137,6 @@ bool valid_window_handle(const ultramodern::renderer::WindowHandle& handle) {
 int rocket_main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::setvbuf(stderr, nullptr, _IONBF, 0);
-<<<<<<< Updated upstream
-    std::fprintf(stderr, "Rocket: Robot on Wheels - Recompiled %s (FIXED34 runtime; FIXED27 interpolation baseline)\n",
-                 ROCKET_R_VERSION);
-
-=======
->>>>>>> Stashed changes
     Options options{};
     const bool parsed = parse_options(argc, argv, options);
     rocket::diagnostics::install(options.config);
@@ -144,7 +146,10 @@ int rocket_main(int argc, char** argv) {
         if (!parsed) std::fprintf(stderr, "%s\n", options.error.c_str());
         std::fprintf(stderr,
                      "Usage: Rocket-R [--rom <your Rocket US ROM>] [--config <folder>] [--launch]\n"
+                     "       [--install-mod <package>] [--without-mods]\n"
                      "--launch starts the supplied ROM directly, using saved settings.\n"
+                     "--install-mod adds a package to the selected profile before launch.\n"
+                     "--without-mods starts Original Game for this session.\n"
                      "Without --rom, the Rocket-R launcher will ask for your ROM.\n");
         return options.help ? 0 : 2;
     }
@@ -162,6 +167,14 @@ int rocket_main(int argc, char** argv) {
         return 4;
     }
 
+    try {
+        if (rocket::mods::library().root().empty()) rocket::mods::library().open(options.config, ROCKET_R_VERSION);
+        rocket::mods::configure_library();
+        if (!options.install_mod.empty()) rocket::mods::library().install(options.install_mod);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[mods] %s\n", e.what());
+        return 6;
+    }
     if (!rocket::platform::initialise()) return 5;
     rocket::ui::configure(options.config);
 
@@ -216,6 +229,14 @@ int rocket_main(int argc, char** argv) {
         return 5;
     }
 #endif
+    try {
+        const bool recover = rocket::mods::library().snapshot().recovery;
+        rocket::mods::prepare_runtime(options.without_mods || recover);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[mods] Launch blocked: %s\n", e.what());
+        rocket::platform::shutdown();
+        return 6;
+    }
     // Publish the launcher-selected aspect mode/window size before the guest
     // thread can execute its first object frustum test.
     rocket::widescreen::update_window_aspect(rocket::platform::sdl_window());
@@ -307,6 +328,7 @@ int rocket_main(int argc, char** argv) {
         result = 6;
     }
 
+    if (result == 0) rocket::mods::library().finish_session();
     rocket::platform::shutdown();
     return result;
 }

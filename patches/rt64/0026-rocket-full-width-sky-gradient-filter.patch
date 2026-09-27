@@ -1,0 +1,41 @@
+--- a/src/shaders/RocketSky.hlsli
++++ b/src/shaders/RocketSky.hlsli
+@@ -20,18 +20,23 @@
+     OtherMode filteredMode = otherMode;
+     filteredMode.H = (filteredMode.H & ~(3U << G_MDSFT_TEXTFILT)) | G_TF_BILERP;
+     RenderFlags filteredFlags = flags | (1U << 4); // true bilinear only for the smoothing taps
++    // Rocket's narrow CI8 sky is a colour gradient with horizontal dithering.
++    // Average all eight columns, independent of the rectangle's screen phase.
++    const bool narrowGradient = sky && abs((tile.lrs - tile.uls) - 28.0f) < 0.01f;
+     float3 sum = float3(0.0f, 0.0f, 0.0f);
+     float weightSum = 0.0f;
+     [unroll]
+     for (uint i = 0; i < 16; ++i) {
+         float2 offset = float2(rocketSkyFilterAxis(i & 3), rocketSkyFilterAxis(i >> 2));
+-        float4 tap = sampleTexture(filteredMode, filteredFlags, uv + offset * stepUV,
++        float2 tapUV = uv + offset * stepUV;
++        if (narrowGradient) tapUV.x = (rocketSkyGradientColumn(i & 3) + tile.uls / 4.0f) / tile.shifts;
++        float4 tap = sampleTexture(filteredMode, filteredFlags, tapUV,
+             dx, dy, tile, gpuTile, nextPixelBug, mipBias, detail);
+         float3 delta = abs(tap.rgb - center.rgb);
+         // Preserve stars/cloud edges and the source alpha. Small quantisation
+         // steps get full weight; large colour changes do not bleed into them.
+         float difference = max(delta.r, max(delta.g, delta.b));
+-        float weight = 1.0f - smoothstep(0.055f, 0.12f, difference);
++        float weight = narrowGradient ? 1.0f : 1.0f - smoothstep(0.055f, 0.12f, difference);
+         weight *= 1.0f - smoothstep(0.02f, 0.10f, abs(tap.a - center.a));
+         sum += tap.rgb * weight;
+         weightSum += weight;
+--- a/src/shared/rt64_rocket_sky_filter.h
++++ b/src/shared/rt64_rocket_sky_filter.h
+@@ -4,8 +4,10 @@
+ // every phase of a repeating 4x4 pattern, including while scrolling vertically.
+ #ifdef HLSL_CPU
+ namespace RT64 {
++inline float rocketSkyGradientColumn(unsigned i) { return 2.0f * float(i) + 0.5f; }
+ inline float rocketSkyFilterAxis(unsigned i) { return float(i) - 1.5f; }
+ }
+ #else
++float rocketSkyGradientColumn(uint i) { return 2.0f * float(i) + 0.5f; }
+ float rocketSkyFilterAxis(uint i) { return float(i) - 1.5f; }
+ #endif

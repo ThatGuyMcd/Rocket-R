@@ -1,0 +1,374 @@
+--- a/src/hle/rt64_transform_group.h
++++ b/src/hle/rt64_transform_group.h
+@@ -12,6 +12,8 @@
+     struct TransformGroup {
+         uint32_t matrixId = G_EX_ID_AUTO;
+         bool decompose = true;
++        // Proven Rocket pre-world background only; not inferred from material.
++        bool rocketSky = false;
+         uint8_t positionInterpolation = G_EX_COMPONENT_AUTO;
+         uint8_t rotationInterpolation = G_EX_COMPONENT_AUTO;
+         uint8_t scaleInterpolation = G_EX_COMPONENT_AUTO;
+--- a/src/hle/rt64_rsp.cpp
++++ b/src/hle/rt64_rsp.cpp
+@@ -560,7 +560,15 @@
+             uint32_t physicalAddress = modelMatrixPhysicalAddressStack[modelMatrixStackSize - 1];
+             uint32_t groupIndex = extended.curModelMatrixIdGroupIndex;
+             RocketPresentationMatrixBinding semantic{};
+-            if (rocket_presentation_matrix_binding(physicalAddress, &semantic)) {
++            if (state->rocketBackgroundPresentationActive) {
++                // The enclosing display-list range proves the background owner.
++                // A camera/unknown matrix lookup must not erase that identity.
++                TransformGroup group = workload.drawData.transformGroups[groupIndex];
++                group.rocketSky = true;
++                groupIndex = uint32_t(workload.drawData.transformGroups.size());
++                workload.drawData.transformGroups.emplace_back(group);
++            }
++            else if (rocket_presentation_matrix_binding(physicalAddress, &semantic)) {
+                 TransformGroup group = workload.drawData.transformGroups[groupIndex];
+                 group.matrixId = semantic.identity;
+                 group.ordering = G_EX_ORDER_LINEAR;
+--- a/src/gbi/rt64_gbi_f3d.cpp
++++ b/src/gbi/rt64_gbi_f3d.cpp
+@@ -96,6 +96,7 @@
+                     if (rocket_presentation_background_display_list(
+                             sourcePhysical, rdramAddress, &identity) &&
+                         identity != G_EX_ID_IGNORE && identity != G_EX_ID_AUTO) {
++                        state->flush();
+                         state->rsp->matrixId(
+                             identity, true, false, false,
+                             G_EX_COMPONENT_INTERPOLATE,
+@@ -104,8 +105,8 @@
+                             G_EX_COMPONENT_SKIP,
+                             G_EX_COMPONENT_INTERPOLATE,
+                             G_EX_COMPONENT_INTERPOLATE,
++                            G_EX_COMPONENT_INTERPOLATE,
+                             G_EX_COMPONENT_AUTO,
+-                            G_EX_COMPONENT_SKIP,
+                             G_EX_COMPONENT_SKIP,
+                             G_EX_ORDER_LINEAR,
+                             G_EX_ASPECT_AUTO,
+@@ -116,6 +117,7 @@
+                         // model matrix. Otherwise the vertices retain group 0.
+                         state->rsp->setModelViewProjChanged(true);
+                         state->rocketBackgroundPresentationActive = true;
++                        state->updateDrawStatusAttribute(DrawAttribute::ExtendedFlags);
+                         startedRocketBackgroundPresentation = true;
+                     }
+                 }
+@@ -135,9 +137,11 @@
+                     state->rocketBackgroundPresentationStack.back() != 0;
+                 state->rocketBackgroundPresentationStack.pop_back();
+                 if (startedRocketBackgroundPresentation) {
++                    state->flush();
+                     state->rsp->popMatrixId(1, false);
+                     state->rsp->setModelViewProjChanged(true);
+                     state->rocketBackgroundPresentationActive = false;
++                    state->updateDrawStatusAttribute(DrawAttribute::ExtendedFlags);
+                 }
+             }
+             *dl = state->popReturnAddress();
+--- a/src/hle/rt64_draw_call.h
++++ b/src/hle/rt64_draw_call.h
+@@ -96,6 +96,7 @@
+         uint8_t textureTile;
+         uint8_t textureLevels;
+         bool NoN;
++        bool rocketSkyBackground = false;
+ 
+         // RSP specific parameters.
+         uint32_t geometryMode;
+--- a/src/hle/rt64_state.cpp
++++ b/src/hle/rt64_state.cpp
+@@ -134,6 +134,7 @@
+         drawCall.cullBothMask = 0;
+         drawCall.shadingSmoothMask = 0;
+         drawCall.NoN = false;
++        drawCall.rocketSkyBackground = false;
+         drawCall.extendedType = DrawExtendedType::None;
+         drawCall.extendedFlags = {};
+         drawCall.drawStatusChanges = 0;
+@@ -157,6 +158,7 @@
+     }
+ 
+     void State::loadDrawState() {
++        drawCall.rocketSkyBackground = rocketBackgroundPresentationActive;
+         const bool gpuCopiesEnabled = ext.emulatorConfig->framebuffer.copyWithGPU;
+         bool textureCheck = false;
+         if (drawStatus.isChanged(DrawAttribute::Combine)) {
+--- /dev/null
++++ b/src/common/rt64_rocket_sky.h
+@@ -0,0 +1,41 @@
++#pragma once
++
++#include <cmath>
++#include <cstdint>
++#include <vector>
++
++namespace RT64 {
++    struct RocketSkyTopology {
++        uint64_t hash = 14695981039346656037ULL;
++        uint32_t triangles = 0;
++        bool valid = true;
++    };
++
++    // Compare connectivity relative to a transform, not positions or arena slots.
++    // Cross-transform triangles cannot prove vertex correspondence and snap.
++    inline RocketSkyTopology rocketSkyTopology(const std::vector<uint32_t> &indices,
++                                               uint32_t first, uint32_t count) {
++        RocketSkyTopology result;
++        result.valid = count > 0 && (indices.size() % 3) == 0;
++        for (size_t i = 0; result.valid && i + 2 < indices.size(); i += 3) {
++            unsigned inside = 0;
++            for (unsigned j = 0; j < 3; ++j) {
++                inside += indices[i+j] >= first && uint64_t(indices[i+j]) < uint64_t(first) + count;
++            }
++            if (inside == 0) continue;
++            if (inside != 3) { result.valid = false; break; }
++            ++result.triangles;
++            for (unsigned j = 0; j < 3; ++j) {
++                result.hash = (result.hash ^ (indices[i+j] - first)) * 1099511628211ULL;
++            }
++        }
++        result.valid = result.valid && result.triangles > 0;
++        return result;
++    }
++
++    inline float rocketSkyWrappedDelta(float now, float before, float period) {
++        float delta = now - before;
++        if (period > 0 && std::isfinite(period)) delta -= std::round(delta / period) * period;
++        return delta;
++    }
++}
+--- a/src/hle/rt64_game_frame.cpp
++++ b/src/hle/rt64_game_frame.cpp
+@@ -3,6 +3,7 @@
+ //
+ 
+ #include "common/rt64_math.h"
++#include "common/rt64_rocket_sky.h"
+ 
+ #include "rt64_game_frame.h"
+ #include "rt64_workload_queue.h"
+@@ -512,6 +513,7 @@
+         // FIXME: Transform set needs to be done per unique workload detected.
+         thread_local std::set<IndexPair> transformCheckSet;
+         thread_local std::set<IndexPair> tileCheckSet;
++        std::set<IndexPair> rocketSkyTilePairs;
+         thread_local std::set<IndexPair> lookAtCheckSet;
+         transformCheckSet.clear();
+         tileCheckSet.clear();
+@@ -554,7 +556,15 @@
+                     }
+                 }
+ 
+-                if ((curCall.callDesc.tileCount == prevCall.callDesc.tileCount) && (curIt.second.doTileInterpolation && prevIt->second.doTileInterpolation)) {
++                bool skyTransformsMatched = true;
++                if (curCall.callDesc.rocketSkyBackground || prevCall.callDesc.rocketSkyBackground) {
++                    skyTransformsMatched = curCall.callDesc.rocketSkyBackground && prevCall.callDesc.rocketSkyBackground;
++                    for (uint32_t m = curCall.callDesc.minWorldMatrix; m <= curCall.callDesc.maxWorldMatrix; ++m) {
++                        skyTransformsMatched = skyTransformsMatched &&
++                            frameMap.workloads[curProjIndices.workloadIndex].transforms[m].mapped;
++                    }
++                }
++                if (skyTransformsMatched && (curCall.callDesc.tileCount == prevCall.callDesc.tileCount) && (curIt.second.doTileInterpolation && prevIt->second.doTileInterpolation)) {
+                     for (uint32_t t = 0; t < curCall.callDesc.tileCount; t++) {
+                         const DrawCallTile &curCallTile = curWorkload.drawData.callTiles[curCall.callDesc.tileIndex + t];
+                         const DrawCallTile &prevCallTile = prevWorkload.drawData.callTiles[prevCall.callDesc.tileIndex + t];
+@@ -564,6 +574,9 @@
+                         }
+ 
+                         tileCheckSet.emplace(curCall.callDesc.tileIndex + t, prevCall.callDesc.tileIndex + t);
++                        if (curCall.callDesc.rocketSkyBackground) {
++                            rocketSkyTilePairs.emplace(curCall.callDesc.tileIndex + t, prevCall.callDesc.tileIndex + t);
++                        }
+                     }
+                 }
+ 
+@@ -685,6 +698,18 @@
+             curTileMap.deltaUlt = wrappedUlt || (abs(deltaUlt) >= curTile.maskt * 2) ? curTileMap.deltaUlt : deltaUlt;
+             curTileMap.deltaLrs = wrappedLrs || (abs(deltaLrs) >= curTile.masks * 2) ? curTileMap.deltaLrs : deltaLrs;
+             curTileMap.deltaLrt = wrappedLrt || (abs(deltaLrt) >= curTile.maskt * 2) ? curTileMap.deltaLrt : deltaLrt;
++            if (rocketSkyTilePairs.count(indices) != 0) {
++                const float uPeriod = curTile.cms == G_TX_WRAP ? curTile.masks * 4.0f : 0.0f;
++                const float vPeriod = curTile.cmt == G_TX_WRAP ? curTile.maskt * 4.0f : 0.0f;
++                curTileMap.deltaUls = rocketSkyWrappedDelta(curTile.uls, prevTile.uls, uPeriod);
++                curTileMap.deltaUlt = rocketSkyWrappedDelta(curTile.ult, prevTile.ult, vPeriod);
++                curTileMap.deltaLrs = rocketSkyWrappedDelta(curTile.lrs, prevTile.lrs, uPeriod);
++                curTileMap.deltaLrt = rocketSkyWrappedDelta(curTile.lrt, prevTile.lrt, vPeriod);
++                curTileMap.prevUls = curTile.uls - curTileMap.deltaUls;
++                curTileMap.prevUlt = curTile.ult - curTileMap.deltaUlt;
++                curTileMap.prevLrs = curTile.lrs - curTileMap.deltaLrs;
++                curTileMap.prevLrt = curTile.lrt - curTileMap.deltaLrt;
++            }
+             curTileMap.mapped = true;
+             firstCurWorkloadMap.prevTilesMapped[indices.second] = true;
+             tileInterpolationUsed = tileInterpolationUsed || tileScrolled;
+@@ -718,6 +743,18 @@
+     }
+ 
+     void GameFrame::matchTransform(Workload &curWorkload, const Workload &prevWorkload, GameFrameMap::WorkloadMap &curWorkloadMap, const GameFrameMap::WorkloadMap *prevWorkloadMap, uint32_t curTransformIndex, uint32_t prevTransformIndex, ModifiedBuffers &modifiedBuffers) {
++        const auto &cg = curWorkload.drawData.transformGroups[curWorkload.drawData.worldTransformGroups[curTransformIndex]];
++        const auto &pg = prevWorkload.drawData.transformGroups[prevWorkload.drawData.worldTransformGroups[prevTransformIndex]];
++        if (cg.rocketSky || pg.rocketSky) {
++            if (!cg.rocketSky || !pg.rocketSky) return;
++            const uint32_t count = curWorkload.drawData.worldTransformVertexCount(curTransformIndex);
++            if (count != prevWorkload.drawData.worldTransformVertexCount(prevTransformIndex)) return;
++            const auto ct = rocketSkyTopology(curWorkload.drawData.faceIndices,
++                curWorkload.drawData.worldTransformVertexIndices[curTransformIndex], count);
++            const auto pt = rocketSkyTopology(prevWorkload.drawData.faceIndices,
++                prevWorkload.drawData.worldTransformVertexIndices[prevTransformIndex], count);
++            if (!ct.valid || !pt.valid || ct.hash != pt.hash || ct.triangles != pt.triangles) return;
++        }
+         GameFrameMap::TransformMap &curTransformMap = curWorkloadMap.transforms[curTransformIndex];
+         if (prevWorkloadMap != nullptr) {
+             curTransformMap.rigidBody = prevWorkloadMap->transforms[prevTransformIndex].rigidBody;
+@@ -812,6 +849,12 @@
+                 doLookAtInterpolation = doLookAtInterpolation || (group.lookAtInterpolation != G_EX_COMPONENT_SKIP);
+             }
+ 
++            if (call.callDesc.rocketSkyBackground && call.callDesc.triangleCount > 0 &&
++                call.meshDesc.faceIndicesStart < workload.drawData.faceIndices.size()) {
++                const uint32_t first = workload.drawData.worldTransformVertexIndices[call.callDesc.minWorldMatrix];
++                const uint32_t vertex = workload.drawData.faceIndices[call.meshDesc.faceIndicesStart];
++                matrixIdHash = matrixIdHash * 33 ^ (vertex - first);
++            }
+             hashMap.emplace(hashFromCall(call, matrixIdHash), GameCallMap{ sceneProjIndex, c, doTransformMatching, doTileInterpolation, doTileMatching, doLookAtInterpolation });
+         }
+     }
+--- a/src/common/rt64_rocket_configuration.h
++++ b/src/common/rt64_rocket_configuration.h
+@@ -16,6 +16,7 @@
+         std::atomic<float> zFightToleranceScale{1.0f};
+         std::atomic<uint32_t> viFilterMode{0U};
+         std::atomic<float> debandStrength{0.0f};
++        std::atomic<float> skyDitherReduction{0.0f};
+         std::atomic<uint32_t> postProcessMode{0U};
+         std::atomic<float> postProcessStrength{0.70f};
+         std::atomic<uint32_t> hudAspectMode{0U};
+@@ -70,6 +71,14 @@
+             std::memory_order_acquire);
+     }
+ 
++    inline void setRocketSkyDitherReduction(float value) {
++        rocketGraphicsControls().skyDitherReduction.store(std::clamp(value, 0.0f, 1.0f), std::memory_order_release);
++    }
++
++    inline float getRocketSkyDitherReduction() {
++        return rocketGraphicsControls().skyDitherReduction.load(std::memory_order_acquire);
++    }
++
+     inline void setRocketPostProcess(uint32_t mode, float strength) {
+         rocketGraphicsControls().postProcessMode.store(
+             std::min(mode, 3U), std::memory_order_release);
+--- a/src/shared/rt64_raster_params.h
++++ b/src/shared/rt64_raster_params.h
+@@ -16,6 +16,7 @@
+         float textureDetailAtDistance;
+         float2 screenScale;
+         float2 screenOffset;
++        float skyDitherReduction;
+     };
+ #ifdef HLSL_CPU
+ };
+--- a/src/render/rt64_framebuffer_renderer_call.h
++++ b/src/render/rt64_framebuffer_renderer_call.h
+@@ -39,6 +39,7 @@
+                 uint32_t indexStart;
+                 uint32_t faceCount;
+                 bool vertexTestZ : 1;
++                bool rocketSky : 1;
+                 bool postBlendDitherNoise : 1;
+                 bool postBlendDitherNoiseNegative : 1;
+             } triangles;
+--- a/src/render/rt64_framebuffer_renderer.cpp
++++ b/src/render/rt64_framebuffer_renderer.cpp
+@@ -472,6 +472,7 @@
+         const RenderPipeline *previousPipeline = nullptr;
+         RenderRect previousScissor;
+         interop::RasterParams rasterParams{};
++        const float skyDitherReduction = getRocketSkyDitherReduction();
+         rasterParams.mipLODBias = getDefaultSamplerMipLODBias();
+         rasterParams.textureDetailAtDistance = getTextureDetailAtDistance();
+         rasterParams.zFightToleranceScale = getRocketZFightToleranceScale();
+@@ -578,6 +579,7 @@
+                 rasterParams.renderIndex = i;
+                 rasterParams.screenScale = triangles.screenScale;
+                 rasterParams.screenOffset = triangles.screenOffset;
++                rasterParams.skyDitherReduction = triangles.rocketSky ? skyDitherReduction : 0.0f;
+                 worker->commandList->setGraphicsPushConstants(0, &rasterParams);
+ 
+                 drawCallTriangles(drawCall);
+@@ -1512,6 +1514,7 @@
+ 
+             for (uint32_t d = 0; (d < proj.gameCallCount) && (globalCallIndex < p.maxGameCall); d++) {
+                 const GameCall &call = proj.gameCalls[d];
++                triangles.rocketSky = call.callDesc.rocketSkyBackground;
+                 renderIndices.instanceIndex = call.callDesc.callIndex;
+                 renderIndices.faceIndicesStart = call.meshDesc.faceIndicesStart;
+                 renderIndices.rdpTileIndex = call.callDesc.tileIndex;
+--- /dev/null
++++ b/src/shaders/RocketSky.hlsli
+@@ -0,0 +1,34 @@
++// A fixed texture-space filter: no frame history, random taps or framebuffer blur.
++float4 sampleRocketSkyTexture(OtherMode otherMode, RenderFlags flags, float2 uv,
++    float2 dx, float2 dy, RDPTile tile, GPUTile gpuTile, bool nextPixelBug,
++    float mipBias, float detail, float reduction) {
++    float4 center = sampleTexture(otherMode, flags, uv, dx, dy, tile, gpuTile, nextPixelBug, mipBias, detail);
++    [branch]
++    if (reduction <= 0.0f || gpuTileFlagHighRes(gpuTile.flags) || gpuTileFlagAlphaIsCvg(gpuTile.flags)) return center;
++
++    // Four bilinear taps cover the original 4x4 dither neighbourhood. Offsets
++    // are native texels, so output resolution/FOV cannot change the strength.
++    float correction = (otherMode.textPersp() == G_TP_PERSP || renderFlagRect(flags)) ? 1.0f : 0.5f;
++    float2 stepUV = 1.0f / max(abs(float2(tile.shifts, tile.shiftt) * correction), 0.0001f);
++    OtherMode filteredMode = otherMode;
++    filteredMode.H = (filteredMode.H & ~(3U << G_MDSFT_TEXTFILT)) | G_TF_BILERP;
++    RenderFlags filteredFlags = flags | (1U << 4); // true bilinear only for the smoothing taps
++    float3 sum = float3(0.0f, 0.0f, 0.0f);
++    float weightSum = 0.0f;
++    [unroll]
++    for (uint i = 0; i < 4; ++i) {
++        float2 offset = float2((i & 1) ? 1.0f : -1.0f, (i & 2) ? 1.0f : -1.0f);
++        float4 tap = sampleTexture(filteredMode, filteredFlags, uv + offset * stepUV,
++            dx, dy, tile, gpuTile, nextPixelBug, mipBias, detail);
++        float3 delta = abs(tap.rgb - center.rgb);
++        // Preserve stars/cloud edges and the source alpha. Small quantisation
++        // steps get full weight; large colour changes do not bleed into them.
++        float difference = max(delta.r, max(delta.g, delta.b));
++        float weight = 1.0f - smoothstep(0.055f, 0.12f, difference);
++        weight *= 1.0f - smoothstep(0.02f, 0.10f, abs(tap.a - center.a));
++        sum += tap.rgb * weight;
++        weightSum += weight;
++    }
++    if (weightSum > 0.0001f) center.rgb = lerp(center.rgb, sum / weightSum, saturate(reduction));
++    return center;
++}
+--- a/src/shaders/RasterPS.hlsl
++++ b/src/shaders/RasterPS.hlsl
+@@ -11,6 +11,7 @@
+ #include "Library.hlsli"
+ #include "Random.hlsli"
+ #include "TextureSampler.hlsli"
++#include "RocketSky.hlsli"
+ 
+ [[vk::push_constant]] ConstantBuffer<RasterParams> gConstants : register(b0, space0);
+ 
+@@ -143,7 +144,7 @@
+         
+         const GPUTile gpuTile = GPUTiles[globalTileIndex];
+         const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags) ? vertexUV : lowResUV;
+-        texVal0 = sampleTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, false, gConstants.mipLODBias, gConstants.textureDetailAtDistance);
++        texVal0 = sampleRocketSkyTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, false, gConstants.mipLODBias, gConstants.textureDetailAtDistance, gConstants.skyDitherReduction);
+     }
+     
+     if (renderFlagUsesTexture1(rp.flags)) {
+@@ -159,7 +160,7 @@
+         const GPUTile gpuTile = GPUTiles[globalTileIndex];
+         const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags) ? vertexUV : lowResUV;
+         const uint nativeSampler = renderFlagNativeSampler1(rp.flags);
+-        texVal1 = sampleTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, oneCycleHardwareBug, gConstants.mipLODBias, gConstants.textureDetailAtDistance);
++        texVal1 = sampleRocketSkyTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, oneCycleHardwareBug, gConstants.mipLODBias, gConstants.textureDetailAtDistance, gConstants.skyDitherReduction);
+     }
+     
+     // Color combiner.

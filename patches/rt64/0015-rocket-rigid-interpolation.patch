@@ -1,0 +1,85 @@
+diff --git a/src/common/rt64_math.cpp b/src/common/rt64_math.cpp
+--- a/src/common/rt64_math.cpp
++++ b/src/common/rt64_math.cpp
+@@ -444,21 +444,30 @@
+-        if (lerpRotation) {
+-            if (float(dot(a.rotation, b.rotation)) > 0.0f) {
+-                if (useSlerp) {
+-                    ret.rotation = slerp(a.rotation, b.rotation, 1.0f - weight);
+-                }
+-                else {
+-                    ret.rotation = lerp(a.rotation, b.rotation, weight);
+-                }
+-            }
+-            else {
+-                if (useSlerp) {
+-                    ret.rotation = slerp(a.rotation, -b.rotation, 1.0f - weight);
+-                }
+-                else {
+-                    ret.rotation = lerp(a.rotation, -b.rotation, weight);
+-                }
+-            }
+-            ret.rotation = normalize(ret.rotation);
+-        }
++        if (lerpRotation) {
++            // Use the shortest quaternion arc, with weight 0 at a and 1 at b.
++            // The pinned hlslpp slerp omits one sine coefficient; reversing its
++            // weight fixes endpoints but still produces uneven angular motion.
++            hlslpp::quaternion endRotation = b.rotation;
++            float rotationDot = float(dot(a.rotation, endRotation));
++            if (rotationDot < 0.0f) {
++                endRotation = -endRotation;
++                rotationDot = -rotationDot;
++            }
++            rotationDot = std::min(rotationDot, 1.0f);
++            if (useSlerp && rotationDot < 0.9995f) {
++                const float angle = std::acos(rotationDot);
++                const float denominator = std::sin(angle);
++                const float startWeight = std::sin((1.0f - weight) * angle) / denominator;
++                const float endWeight = std::sin(weight * angle) / denominator;
++                ret.rotation = hlslpp::quaternion(
++                    a.rotation.f32[0] * startWeight + endRotation.f32[0] * endWeight,
++                    a.rotation.f32[1] * startWeight + endRotation.f32[1] * endWeight,
++                    a.rotation.f32[2] * startWeight + endRotation.f32[2] * endWeight,
++                    a.rotation.f32[3] * startWeight + endRotation.f32[3] * endWeight);
++            }
++            else {
++                // Near-identical rotations need nlerp to avoid division by zero.
++                ret.rotation = lerp(a.rotation, endRotation, weight);
++            }
++            ret.rotation = normalize(ret.rotation);
++        }
+         else {
+             ret.rotation = b.rotation;
+diff --git a/src/hle/rt64_rigid_body.cpp b/src/hle/rt64_rigid_body.cpp
+--- a/src/hle/rt64_rigid_body.cpp
++++ b/src/hle/rt64_rigid_body.cpp
+@@ -90,11 +90,19 @@
+     hlslpp::float4x4 RigidBody::lerp(float weight, const hlslpp::float4x4& fallbackPrev, const hlslpp::float4x4& fallbackCur, bool slerp) const {
+-        // Return a linear component-wise interpolation of the fallback matrices if decomposition is disabled or if either decomposition is invalid.
+-        if (!lerpDecompose || !transforms[0].valid || !transforms[1].valid) {
+-            return lerpMatrixComponents(fallbackPrev, fallbackCur, lerpTranslation, lerpRotation, lerpPerspective, weight);
+-        }
+-
+-        const DecomposedTransform &prevTransform = transforms[transformIndex ^ 1];
+-        DecomposedTransform prevTransformCopy = prevTransform;
+-        const DecomposedTransform &curTransform = transforms[transformIndex];
+-        DecomposedTransform lerpedTransform;
++        if (!lerpDecompose) {
++            return lerpMatrixComponents(fallbackPrev, fallbackCur, lerpTranslation, lerpRotation, lerpPerspective, weight);
++        }
++
++        // The first matched pair has only a current decomposition in its history.
++        // Decompose the supplied endpoints rather than flattening a rotating rigid
++        // object for that frame. Invalid endpoints cannot be safely interpolated.
++        const DecomposedTransform prevTransform = transforms[transformIndex ^ 1].valid
++            ? transforms[transformIndex ^ 1] : DecomposedTransform(fallbackPrev);
++        const DecomposedTransform curTransform = transforms[transformIndex].valid
++            ? transforms[transformIndex] : DecomposedTransform(fallbackCur);
++        if (!prevTransform.valid || !curTransform.valid) {
++            return fallbackCur;
++        }
++
++        DecomposedTransform prevTransformCopy = prevTransform;
++        DecomposedTransform lerpedTransform;
+         

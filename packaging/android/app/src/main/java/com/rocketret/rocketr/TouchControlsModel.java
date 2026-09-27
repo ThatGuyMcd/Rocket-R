@@ -35,6 +35,10 @@ public final class TouchControlsModel {
     public List<Button> buttons() { return buttons; }
 
     public void layout(float width, float height) {
+        layout(width, height, false);
+    }
+
+    public void layout(float width, float height, boolean cameraActive) {
         clear();
         buttons.clear();
         scale = Math.min(width / 900.0f, height / 480.0f);
@@ -50,10 +54,16 @@ public final class TouchControlsModel {
         add("START", 0x1000, width / 2, height - 34*s, 27*s);
         // C buttons sit above A/B; the D-pad sits above the left thumbstick.
         float cx = width - 98*s, cy = height - 218*s;
-        add("C▲", 0x0008, cx, cy - 48*s, 23*s);
-        add("C▼", 0x0004, cx, cy + 48*s, 23*s);
-        add("C◀", 0x0002, cx - 48*s, cy, 23*s);
-        add("C▶", 0x0001, cx + 48*s, cy, 23*s);
+        if (cameraActive) {
+            // Keep mode buttons outside the look stick's touch area.
+            add("ZOOM", 0x0004, width - 214*s, height - 250*s, 26*s);
+            add("VIEW", 0x0008, width - 214*s, height - 178*s, 26*s);
+        } else {
+            add("C▲", 0x0008, cx, cy - 48*s, 23*s);
+            add("C▼", 0x0004, cx, cy + 48*s, 23*s);
+            add("C◀", 0x0002, cx - 48*s, cy, 23*s);
+            add("C▶", 0x0001, cx + 48*s, cy, 23*s);
+        }
         float dx = 98*s, dy = height - 282*s;
         add("▲", 0x0800, dx, dy - 44*s, 21*s);
         add("▼", 0x0400, dx, dy + 44*s, 21*s);

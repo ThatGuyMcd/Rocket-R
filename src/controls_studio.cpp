@@ -193,7 +193,7 @@ void Editor(const Callbacks& callbacks, bool guided) {
         }
         ImGui::Spacing();
     }
-    Assignment("KEYBOARD", g_selected, BindingSlot::KeyboardPrimary, callbacks);
+    Assignment("KEYBOARD / MOUSE", g_selected, BindingSlot::KeyboardPrimary, callbacks);
     Assignment("CONTROLLER", g_selected, BindingSlot::ControllerPrimary, callbacks);
     const int alternate_count = (input::binding(g_selected, BindingSlot::KeyboardSecondary) != input::kUnbound) +
                                 (input::binding(g_selected, BindingSlot::ControllerSecondary) != input::kUnbound);
@@ -201,7 +201,7 @@ void Editor(const Callbacks& callbacks, bool guided) {
     std::snprintf(label, sizeof(label), "Extra inputs (%d)", alternate_count);
     ImGui::Checkbox(label, &g_alternates);
     if (g_alternates) {
-        Assignment("SECOND KEYBOARD INPUT", g_selected, BindingSlot::KeyboardSecondary, callbacks);
+        Assignment("SECOND KEYBOARD / MOUSE INPUT", g_selected, BindingSlot::KeyboardSecondary, callbacks);
         Assignment("SECOND CONTROLLER INPUT", g_selected, BindingSlot::ControllerSecondary, callbacks);
     }
     ImGui::TextWrapped("Select an input to change or remove it.");
@@ -210,7 +210,7 @@ void Editor(const Callbacks& callbacks, bool guided) {
 
 void TestInputs(float width, const Callbacks& callbacks) {
     ImGui::TextColored(kOrange, "TEST YOUR INPUTS");
-    ImGui::TextWrapped("Press a key or controller button, or move a stick. The matching N64 control lights up without sending input to the game.");
+    ImGui::TextWrapped("Try a key, mouse input or controller control. The matching N64 control lights up without sending input to the game.");
     if (ImGui::Button("DONE TESTING", {std::min(width, 250.0F), 46.0F})) end_test();
     ImGui::TextWrapped("Press Escape or your controller's Back / Select button to finish.");
     const auto preview = callbacks.preview();
@@ -240,7 +240,7 @@ void Review(float width, const Callbacks& callbacks) {
         if (ImGui::Button(input::action_label(action), {-1, 44})) {
             g_step = static_cast<int>(i); g_selected = action; g_review = false;
         }
-        ImGui::TextWrapped("Keyboard: %s   |   Controller: %s",
+        ImGui::TextWrapped("Keyboard / mouse: %s   |   Controller: %s",
             BindingName(action, BindingSlot::KeyboardPrimary).c_str(),
             BindingName(action, BindingSlot::ControllerPrimary).c_str());
         ImGui::PopID();

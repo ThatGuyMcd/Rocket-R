@@ -23,6 +23,7 @@ void toggle_overlay();
 bool overlay_visible();
 bool input_capture_active();
 bool bindings_test_active();
+void draw_camera_mod_settings(float width);
 bool n64_dithering_enabled();
 void detach(RT64::Application& application);
 

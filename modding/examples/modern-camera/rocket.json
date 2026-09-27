@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "api": 1,
+  "category": "Camera",
+  "live_settings": true,
+  "exclusive_resources": ["camera.orbit"],
+  "conflicts": []
+}

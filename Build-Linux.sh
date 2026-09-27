@@ -69,6 +69,7 @@ WORK="$WORK_BASE/FIXED34-$ARCH"
 mkdir -p "$WORK"
 rsync -a --delete \
   --exclude '.git/' --exclude 'build/' --exclude 'dist/' --exclude 'extern/' \
+  --exclude '*.zip' --exclude '*.rar' --exclude '/Payload/' \
   "$PROJECT_ROOT/" "$WORK/"
 mkdir -p "$WORK/dist-container"
 
@@ -90,15 +91,15 @@ python3 -m pip install --no-cache-dir 'cmake==3.27.9' 'tomli>=2.0,<3'
 cd /work
 python3 scripts/bootstrap_dependencies.py --root .
 python3 scripts/self_check.py --root .
+python3 scripts/verify_recomp_policy_v42.py --root . --with-generated
+python3 scripts/verify_shared_mode0_v43_3.py --root .
+python3 scripts/verify_presentation_policy.py --root . --with-generated
+python3 -m unittest discover -s tests -p 'test_*.py'
 rm -rf "build/linux-${ROCKET_TARGET_ARCH}"
 cmake -S . -B "build/linux-${ROCKET_TARGET_ARCH}" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release
-<<<<<<< Updated upstream
-cmake --build "build/linux-${ROCKET_TARGET_ARCH}" --target RocketR --parallel
-=======
-cmake --build "build/linux-${ROCKET_TARGET_ARCH}" --target RocketR RocketPresentationTests RocketRuntimeLogTests RocketControlsTests RocketControlsUiTests --parallel
+cmake --build "build/linux-${ROCKET_TARGET_ARCH}" --target RocketR RocketPresentationTests RocketRuntimeLogTests RocketControlsTests RocketControlsUiTests RocketModsTests RocketCameraModTests RocketGraphicsCameraTests --parallel
 ctest --test-dir "build/linux-${ROCKET_TARGET_ARCH}" --output-on-failure
->>>>>>> Stashed changes
 BINARY="build/linux-${ROCKET_TARGET_ARCH}/bin/Rocket-R"
 if [[ ! -x "$BINARY" ]]; then
   BINARY="$(find "build/linux-${ROCKET_TARGET_ARCH}" -type f -name Rocket-R -perm -111 | head -n1)"
@@ -246,7 +247,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="$HOME/.local/share/applications/rocket-r-steamdeck.desktop"
 mkdir -p "$(dirname "$TARGET")"
-ICON="$HERE/Rocket-R.AppDir/rocket-r.svg"
+ICON="$HERE/Rocket-R.AppDir/rocket-r.png"
 LAUNCHER="$HERE/START-ROCKET-R.sh"
 cat > "$TARGET" <<EOF_DESKTOP
 [Desktop Entry]

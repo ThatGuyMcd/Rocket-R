@@ -46,8 +46,28 @@ retain component interpolation. Secondary matrices in vehicle attachment draws
 have their own role within the owning model invocation. Ambiguous identities,
 conflicting matrix uses, cull gaps and teleports are handled conservatively.
 
+Rocket's rolling wheel is identified by its checked draw call and the player's
+wheel-model pointer. Its squash and rotation matrices can combine into a sheared
+basis, so the final rolling transform also interpolates scale and shear. Other
+sheared models and projected shadows keep their existing handling.
+
 The CPU regression suite checks these cases against the host bridge and patched
 RT64 transform maths. Visual checks in the game remain necessary for new paths.
+
+The sky uses a separate textured rectangle. Its vertical movement comes from the
+texture rows selected by `func_8008AEA0`, rather than a rotating sky model. Checked
+guest hooks capture the source rows and keep enough neighbouring rows loaded for
+RT64 to sample between frames. That information travels with the graphics task.
+Camera cuts and changes of sky texture start fresh history.
+The row displacement uses the rendered camera FOV and perspective projection,
+so widening the view does not make the horizon scroll faster than the scenery.
+
+Graphics → Image has a Sky dithering reduction slider. It filters the sky texture
+before compositing, so it does not blur the level, Rocket or the HUD. The filter
+averages all eight columns of Rocket's narrow sky gradient at full strength.
+Wider textures use a 4×4 filter that limits blending across strong colour edges.
+Both preserve alpha. The default is 0%; changing it applies immediately and
+saves with the other graphics settings. Replacement textures bypass the filter.
 
 ## Audio, saves and input
 

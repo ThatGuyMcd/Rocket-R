@@ -302,15 +302,11 @@ if ($MainCppText -notmatch 'bypassing desktop launcher and starting Rocket direc
 Write-Host 'Android launcher compatibility: permanent direct-ROM handoff verified; no build-time main.cpp rewrite required.' -ForegroundColor DarkGray
 
 Copy-Item (Join-Path $ProjectRoot 'packaging\android\app\src\main\AndroidManifest.xml') (Join-Path $AndroidProject 'app\src\main\AndroidManifest.xml') -Force
-<<<<<<< Updated upstream
-Copy-Item (Join-Path $ProjectRoot 'packaging\android\app\src\main\res\values\strings.xml') (Join-Path $AndroidProject 'app\src\main\res\values\strings.xml') -Force
-=======
 # Copy the complete resource tree, including the icon referenced by the manifest.
 Copy-Item (Join-Path $ProjectRoot 'packaging\android\app\src\main\res\*') (Join-Path $AndroidProject 'app\src\main\res') -Recurse -Force
 Copy-Item (Join-Path $ProjectRoot 'packaging\android\app\src\main\assets') (Join-Path $AndroidProject 'app\src\main') -Recurse -Force
 $docsExit = Invoke-NativeVisible 'python' @((Join-Path $ProjectRoot 'scripts\stage_release_docs.py'), '--root', $ProjectRoot, '--output', (Join-Path $AndroidProject 'app\src\main\assets\rocket-r-docs'))
 if ($docsExit -ne 0) { throw 'Could not stage Android release documentation.' }
->>>>>>> Stashed changes
 Copy-Item (Join-Path $ProjectRoot 'packaging\android\app\src\main\java\com\rocketret\rocketr\*.java') (Join-Path $AndroidProject 'app\src\main\java\com\rocketret\rocketr') -Force
 Copy-Item (Join-Path $SdlJava '*.java') (Join-Path $AndroidProject 'app\src\main\java\org\libsdl\app') -Force
 "sdk.dir=$($SdkRoot.Replace('\','/').Replace(':','\:'))" | Set-Content -Encoding ASCII (Join-Path $AndroidProject 'local.properties')

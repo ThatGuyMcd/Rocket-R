@@ -1,0 +1,156 @@
+--- a/librecomp/include/librecomp/mods.hpp
++++ b/librecomp/include/librecomp/mods.hpp
+@@ -620,6 +620,12 @@
+         ModOpenError parse_manifest(ModManifest &ret, const std::vector<char> &manifest_data, std::string &error_param);
+         CodeModLoadError validate_api_version(uint32_t api_version, std::string& error_param);
+ 
++        // Configure once before start; the frontend only reads package metadata.
++        void configure_profile_paths(const std::filesystem::path& runtime_path,
++                                     const std::filesystem::path& saves_path);
++        std::filesystem::path profile_save_directory();
++        void protect_game_function(uint32_t vram);
++        bool is_game_function_protected(uint32_t vram);
+         void initialize_mods();
+         void register_embedded_mod(const std::string &mod_id, std::span<const uint8_t> mod_bytes);
+         void scan_mods();
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -51,6 +51,19 @@
+ 
+ // Global variables
+ std::filesystem::path config_path;
++static std::filesystem::path mod_profile_path;
++static std::filesystem::path mod_profile_saves;
++void recomp::mods::configure_profile_paths(const std::filesystem::path& runtime_path,
++                                          const std::filesystem::path& saves_path) {
++    mod_profile_path = runtime_path;
++    mod_profile_saves = saves_path;
++}
++std::filesystem::path recomp::mods::profile_save_directory() {
++    return mod_profile_saves.empty() ? config_path / "saves" : mod_profile_saves;
++}
++static std::filesystem::path mod_configuration_root() {
++    return mod_profile_path.empty() ? config_path : mod_profile_path;
++}
+ // Maps game_id to the game's entry.
+ std::unordered_map<std::u8string, recomp::GameEntry> game_roms {};
+ // The global mod context.
+@@ -84,10 +97,10 @@
+ 
+ void recomp::mods::initialize_mods() {
+     N64Recomp::live_recompiler_init();
+-    std::filesystem::create_directories(config_path / mods_directory);
+-    std::filesystem::create_directories(config_path / mod_config_directory);
+-    mod_context->set_mods_config_path(config_path / "mods.json");
+-    mod_context->set_mod_config_directory(config_path / mod_config_directory);
++    std::filesystem::create_directories(mod_configuration_root() / mods_directory);
++    std::filesystem::create_directories(mod_configuration_root() / mod_config_directory);
++    mod_context->set_mods_config_path(mod_configuration_root() / "mods.json");
++    mod_context->set_mod_config_directory(mod_configuration_root() / mod_config_directory);
+ }
+ 
+ void recomp::mods::register_embedded_mod(const std::string &mod_id, std::span<const uint8_t> mod_bytes) {
+@@ -99,7 +112,7 @@
+     std::vector<recomp::mods::ModOpenErrorDetails> mod_open_errors;
+     {
+         std::lock_guard mod_lock{ mod_context_mutex };
+-        mod_open_errors = mod_context->scan_mod_folder(config_path / mods_directory);
++        mod_open_errors = mod_context->scan_mod_folder(mod_configuration_root() / mods_directory);
+     }
+     for (const auto& cur_error : mod_open_errors) {
+         printf("Error opening mod " PATHFMT ": %s (%s)\n", cur_error.mod_path.c_str(), recomp::mods::error_to_string(cur_error.error).c_str(), cur_error.error_param.c_str());
+@@ -116,7 +129,7 @@
+ }
+ 
+ std::filesystem::path recomp::mods::get_mods_directory() {
+-    return config_path / mods_directory;
++    return mod_configuration_root() / mods_directory;
+ }
+ 
+ recomp::mods::ModContentTypeId recomp::mods::register_mod_content_type(const ModContentType& type) {
+--- a/librecomp/src/pi.cpp
++++ b/librecomp/src/pi.cpp
+@@ -8,6 +8,7 @@
+ #include "librecomp/addresses.hpp"
+ #include "librecomp/game.hpp"
+ #include "librecomp/files.hpp"
++#include "librecomp/mods.hpp"
+ #include <ultramodern/ultra64.h>
+ #include <ultramodern/ultramodern.hpp>
+ 
+@@ -105,7 +106,7 @@
+ }
+ 
+ void set_save_file_path(const std::u8string& subfolder, const std::u8string& name) {
+-    std::filesystem::path save_folder_path = config_path / save_folder;
++    std::filesystem::path save_folder_path = recomp::mods::profile_save_directory();
+     if (!subfolder.empty()) {
+         save_folder_path = save_folder_path / subfolder;
+     }
+--- a/librecomp/src/mods.cpp
++++ b/librecomp/src/mods.cpp
+@@ -10,6 +10,14 @@
+ #include "librecomp/patcher.hpp"
+ #include "recompiler/context.h"
+ #include "recompiler/live_recompiler.h"
++static std::unordered_set<uint32_t> protected_game_functions;
++void recomp::mods::protect_game_function(uint32_t vram) {
++    protected_game_functions.insert(vram);
++}
++bool recomp::mods::is_game_function_protected(uint32_t vram) {
++    return protected_game_functions.contains(vram);
++}
++
+ 
+ static bool read_json(std::ifstream input_file, nlohmann::json &json_out) {
+     if (!input_file.good()) {
+@@ -589,6 +597,12 @@
+ #   error "Unsupported architecture"
+ #endif
+ 
++#if defined(_WIN32)
++    FlushInstructionCache(GetCurrentProcess(), target_func_u8, offset);
++#else
++    __builtin___clear_cache(reinterpret_cast<char*>(target_func_u8),
++                            reinterpret_cast<char*>(target_func_u8 + offset));
++#endif
+     protect(target_func_u8, old_flags);
+ }
+ 
+@@ -596,6 +610,12 @@
+     uint64_t old_flags;
+     unprotect(target_func, &old_flags);
+     memcpy(target_func, data.replaced_bytes.data(), data.replaced_bytes.size());
++#if defined(_WIN32)
++    FlushInstructionCache(GetCurrentProcess(), target_func, data.replaced_bytes.size());
++#else
++    __builtin___clear_cache(reinterpret_cast<char*>(target_func),
++                            reinterpret_cast<char*>(target_func) + data.replaced_bytes.size());
++#endif
+     protect(target_func, old_flags);
+ }
+ 
+@@ -1838,6 +1858,12 @@
+     for (size_t hook_index = 0; hook_index < sorted_unprocessed_hooks.size(); hook_index++) {
+         const auto& cur_hook = sorted_unprocessed_hooks[hook_index];
+         const auto& cur_hook_def = cur_hook.first;
++        if (recomp::mods::is_game_function_protected(cur_hook_def.function_vram)) {
++            ret.emplace_back(ModLoadErrorDetails{
++                "", ModLoadError::FailedToLoadCode,
++                "Hook targets a protected game function. Use Rocket's public events."});
++            return ret;
++        }
+         size_t cur_hook_slot_index = cur_hook.second;
+     
+         if (cur_hook_def.section_rom != cur_section_rom) {
+@@ -2581,6 +2607,10 @@
+ 
+     // Apply all the function replacements in the mod.
+     for (const auto& replacement : mod.recompiler_context->replacements) {
++        if (recomp::mods::is_game_function_protected(replacement.original_vram)) {
++            error_param = "Replacement targets a protected game function. Use Rocket's public events.";
++            return CodeModLoadError::BaseRecompConflict;
++        }
+         recomp_func_t* to_replace = recomp::overlays::get_func_by_section_rom_function_vram(replacement.original_section_vrom, replacement.original_vram);
+ 
+         if (to_replace == nullptr) {

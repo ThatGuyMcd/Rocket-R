@@ -1,0 +1,17 @@
+--- a/src/hle/rt64_rsp.cpp
++++ b/src/hle/rt64_rsp.cpp
+@@ -588,8 +588,12 @@
+                     ? G_EX_COMPONENT_INTERPOLATE : G_EX_COMPONENT_SKIP;
+                 group.rotationInterpolation = interpolateTransform
+                     ? G_EX_COMPONENT_INTERPOLATE : G_EX_COMPONENT_SKIP;
+-                group.scaleInterpolation = G_EX_COMPONENT_SKIP;
+-                group.skewInterpolation = G_EX_COMPONENT_SKIP;
++                // Only Rocket's verified spring-mounted player wheel opts into
++                // interpolating scale/shear along with rotation.
++                group.scaleInterpolation = interpolateTransform && (semantic.reserved & 0x2U)
++                    ? G_EX_COMPONENT_INTERPOLATE : G_EX_COMPONENT_SKIP;
++                group.skewInterpolation = interpolateTransform && (semantic.reserved & 0x2U)
++                    ? G_EX_COMPONENT_INTERPOLATE : G_EX_COMPONENT_SKIP;
+                 group.perspectiveInterpolation = interpolateTransform
+                     ? G_EX_COMPONENT_INTERPOLATE : G_EX_COMPONENT_SKIP;
+                 group.vertexInterpolation =

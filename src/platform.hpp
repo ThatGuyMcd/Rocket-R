@@ -26,6 +26,8 @@ int android_display_refresh_rate();
 #endif
 void pump_runtime_events();
 void sample_input();
+struct CameraInput { float x=0, y=0; bool recenter=false; float mouse_yaw=0, mouse_pitch=0; };
+CameraInput camera_input();
 void toggle_fullscreen();
 
 struct ControllerChoice {

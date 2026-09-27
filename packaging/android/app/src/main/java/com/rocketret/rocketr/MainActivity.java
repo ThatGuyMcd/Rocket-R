@@ -1,6 +1,8 @@
 package com.rocketret.rocketr;
 
 import android.app.Activity;
+import android.animation.ObjectAnimator;
+import android.animation.ValueAnimator;
 import android.content.Intent;
 import android.graphics.Typeface;
 import android.net.Uri;
@@ -8,7 +10,9 @@ import android.os.Bundle;
 import android.provider.OpenableColumns;
 import android.view.Gravity;
 import android.view.View;
+import android.view.animation.LinearInterpolator;
 import android.widget.Button;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -20,6 +24,8 @@ import java.io.InputStream;
 public final class MainActivity extends Activity {
     private static final int PICK_ROM = 1001;
     private File privateRom;
+    // ROCKET-R UI V36 ANDROID SPINNING BRAND
+    private ObjectAnimator brandAnimator;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -29,11 +35,30 @@ public final class MainActivity extends Activity {
     }
 
     private void showLauncher() {
+        if (brandAnimator != null) {
+            brandAnimator.cancel();
+            brandAnimator = null;
+        }
         final LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setGravity(Gravity.CENTER);
         final int pad = (int)(24.0f * getResources().getDisplayMetrics().density);
         root.setPadding(pad, pad, pad, pad);
+
+        ImageView brand = new ImageView(this);
+        brand.setImageResource(R.drawable.rocket_r_brand);
+        brand.setAdjustViewBounds(true);
+        brand.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        brand.setCameraDistance(8000.0f * getResources().getDisplayMetrics().density);
+        final int brandSize = (int)(180.0f * getResources().getDisplayMetrics().density);
+        LinearLayout.LayoutParams brandParams = new LinearLayout.LayoutParams(brandSize, brandSize);
+        brandParams.bottomMargin = pad;
+        root.addView(brand, brandParams);
+        brandAnimator = ObjectAnimator.ofFloat(brand, View.ROTATION_Y, 0.0f, 360.0f);
+        brandAnimator.setDuration(4800L);
+        brandAnimator.setRepeatCount(ValueAnimator.INFINITE);
+        brandAnimator.setInterpolator(new LinearInterpolator());
+        brandAnimator.start();
 
         TextView title = new TextView(this);
         title.setText("ROCKET-R\nRocket: Robot on wheels Recompiled");
@@ -65,6 +90,12 @@ public final class MainActivity extends Activity {
         choose.setTypeface(Typeface.create("Comic Sans MS", Typeface.BOLD));
         choose.setOnClickListener(v -> chooseRom());
         root.addView(choose);
+        Button mods = new Button(this);
+        mods.setText("MODS");
+        mods.setTextSize(20.0f);
+        mods.setTypeface(Typeface.create("Comic Sans MS", Typeface.BOLD));
+        mods.setOnClickListener(v -> startActivity(new Intent(this, ModActivity.class)));
+        root.addView(mods);
         setContentView(root);
     }
 
@@ -100,5 +131,14 @@ public final class MainActivity extends Activity {
     private void launchGame() {
         Intent intent = new Intent(this, RocketActivity.class);
         startActivity(intent);
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (brandAnimator != null) {
+            brandAnimator.cancel();
+            brandAnimator = null;
+        }
+        super.onDestroy();
     }
 }

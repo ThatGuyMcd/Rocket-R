@@ -125,16 +125,24 @@
   "manualFunctions": [],
   "functionHooks": [
     {
+      "function": "func_8003AA04",
+      "beforeVram": "0x8003AA04",
+      "romOffset": "0x0003B604",
+      "expectedInstruction": "0x27BDFF48",
+      "text": "extern void rocket_mod_camera_tick(uint8_t*, recomp_context*); rocket_mod_camera_tick(rdram, ctx);",
+      "reason": "Apply live camera switches at the main camera update boundary before any normal, corridor or first-person controller runs."
+    },
+    {
       "function": "func_8003ACD4",
       "beforeVram": "0x8003ACD4",
       "text": "extern void rocket_graphics_camera_begin(uint8_t*, recomp_context*); rocket_graphics_camera_begin(rdram, ctx);",
-      "reason": "Apply project-owned FOV, cutscene-preservation, far-clip extension and conservative camera-shake attenuation immediately before Rocket builds the projection/view matrices. Temporary guest camera values are restored as soon as the first object frustum test confirms the graphics task has consumed them, and otherwise on the next camera build."
+      "reason": "Apply project-owned FOV, near-plane clearance for expanded FOV/aspect, and far-clip extension before Rocket builds the projection/view matrices. Restore temporary camera fields at projection return so they cannot change simulation or collision."
     },
     {
       "function": "frustum_test",
       "beforeVram": "0x8003C764",
       "text": "extern void rocket_graphics_frustum_begin(uint8_t*, recomp_context*); extern void rocket_widescreen_frustum_begin(uint8_t*, recomp_context*); rocket_graphics_frustum_begin(rdram, ctx); rocket_widescreen_frustum_begin(rdram, ctx);",
-      "reason": "Apply Rocket-R world-detail render-distance policy, then widen only the two horizontal retail frustum planes to the selected output aspect. Both operations happen at frustum_test entry and fail closed for Original 4:3."
+      "reason": "Apply Rocket-R render distance, then expand sphere culling to cover the selected FOV and output aspect in both axes. Original FOV at 4:3 retains retail visibility."
     },
     {
       "function": "update_gfx_context",
@@ -145,8 +153,9 @@
     {
       "function": "add_render_entry",
       "beforeVram": "0x8008B24C",
-      "text": "extern void rocket_presentation_render_entry(uint8_t*, recomp_context*); rocket_presentation_render_entry(rdram, ctx);",
-      "reason": "Capture each unsorted RenderEntry's nested display list, matrix pair, callsite, lifetime track and world position before Rocket sorts opaque/translucent entries by depth. This is Rocket's equivalent of DKR-R's render_object semantic owner hook."
+      "text": "/* ROCKET-R POLICY V44 ENTER 0x8008B24C */ extern void rocket_presentation_enter_call(recomp_context*, uint32_t); rocket_presentation_enter_call(ctx, 0x8008B24CU); extern void rocket_presentation_render_entry(uint8_t*, recomp_context*); rocket_presentation_render_entry(rdram, ctx);",
+      "reason": "Capture each unsorted RenderEntry's nested display list, matrix pair, callsite, lifetime track and world position before Rocket sorts opaque/translucent entries by depth. This is Rocket's equivalent of DKR-R's render_object semantic owner hook.",
+      "callsiteEntry": "0x8008B24C"
     },
     {
       "function": "schedule_gfx_task",
@@ -156,18 +165,729 @@
     },
     {
       "function": "func_8008B594",
-      "beforeVram": "0x8008B594",
-      "text": "extern void rocket_presentation_background_begin(uint8_t*, recomp_context*); rocket_presentation_background_begin(rdram, ctx);",
-      "reason": "Rocket-R v33: mark the start of the pre-world background/sky display-list command range without modifying the renderer or v32 live RenderEntry queue."
+      "beforeVram": "0x8008B5C0",
+      "text": "/* ROCKET-R POLICY V42 V32 QUEUE BASE */ ctx->r3 = S32(0X8060 << 16);",
+      "reason": "V42 golden-rule migration: override Rocket's retail RenderEntry base at generation time; paired with a NOP instruction patch."
     },
     {
-      "function": "func_80046D58",
-      "beforeVram": "0x80046D58",
-      "text": "extern void rocket_presentation_background_end(uint8_t*, recomp_context*); rocket_presentation_background_end(rdram, ctx);",
-      "reason": "Rocket-R v33: close the background/sky command range immediately before the depth/world pass so RT64 can interpolate only that presentation subtree."
+      "function": "add_render_entry",
+      "beforeVram": "0x8008B26C",
+      "text": "/* ROCKET-R POLICY V42 V32 ADD BASE */ ctx->r3 = S32(0X8060 << 16);",
+      "reason": "V42 golden-rule migration: expanded live RenderEntry base emitted by N64Recomp."
+    },
+    {
+      "function": "add_render_entry",
+      "beforeVram": "0x8008B29C",
+      "text": "/* ROCKET-R POLICY V42 V32 CAPACITY */ ctx->r2 = ctx->r2 < 0X8000 ? 1 : 0;",
+      "reason": "V42 golden-rule migration: 32768-entry capacity comparison emitted by N64Recomp."
+    },
+    {
+      "function": "func_8008B694",
+      "beforeVram": "0x8008B7F8",
+      "text": "/* ROCKET-R POLICY V42 V32 DRAW BASE */ ctx->r4 = S32(0X8060 << 16);",
+      "reason": "V42 golden-rule migration: renderer count base follows the same live queue."
+    },
+    {
+      "function": "func_8008B694",
+      "beforeVram": "0x8008B82C",
+      "text": "/* ROCKET-R POLICY V42 V32 SORT ARG1 */ ctx->r7 = S32(0X8070 << 16);",
+      "reason": "V42 golden-rule migration: expanded sorted-entry scratch argument."
+    },
+    {
+      "function": "func_8008B694",
+      "beforeVram": "0x8008B830",
+      "text": "/* ROCKET-R POLICY V42 V32 SORT CURSOR */ ctx->r3 = S32(0X8070 << 16);",
+      "reason": "V42 golden-rule migration: expanded sorted-entry scratch cursor."
+    },
+    {
+      "function": "func_8008B694",
+      "beforeVram": "0x8008B834",
+      "text": "/* ROCKET-R POLICY V42 V32 SORT STORE */ MEM_W(0X0, ctx->r3) = ctx->r4;",
+      "reason": "V42 golden-rule migration: direct pointer store into expanded sorted-entry scratch."
+    },
+    {
+      "function": "func_8008B694",
+      "beforeVram": "0x8008B850",
+      "text": "/* ROCKET-R POLICY V42 V32 SORT ARG2 */ ctx->r7 = S32(0X8070 << 16);",
+      "reason": "V42 golden-rule migration: second partition/sort argument uses expanded scratch."
+    },
+    {
+      "function": "func_8008B694",
+      "beforeVram": "0x8008B92C",
+      "text": "/* ROCKET-R POLICY V42 V32 HEAPSORT BASE */ ctx->r16 = S32(0X8070 << 16);",
+      "reason": "V42 golden-rule migration: original heapsort receives expanded pointer list."
+    },
+    {
+      "function": "func_8008B694",
+      "beforeVram": "0x8008B988",
+      "text": "/* ROCKET-R POLICY V42 V32 OPAQUE ADDRESS */ ctx->r2 = ADD32(S32(0X8070 << 16), ctx->r2);",
+      "reason": "V42 golden-rule migration: opaque pointer lookup is based at expanded scratch."
+    },
+    {
+      "function": "func_8008B694",
+      "beforeVram": "0x8008B98C",
+      "text": "/* ROCKET-R POLICY V42 V32 OPAQUE LOAD */ ctx->r16 = MEM_W(ctx->r2, 0X0);",
+      "reason": "V42 golden-rule migration: load opaque RenderEntry pointer from expanded scratch."
+    },
+    {
+      "function": "func_8008B694",
+      "beforeVram": "0x8008B9A4",
+      "text": "/* ROCKET-R POLICY V42 V32 TRANSPARENT ADDRESS */ ctx->r2 = ADD32(S32(0X8070 << 16), ctx->r2);",
+      "reason": "V42 golden-rule migration: transparent pointer lookup is based at expanded scratch."
+    },
+    {
+      "function": "func_8008B694",
+      "beforeVram": "0x8008B9A8",
+      "text": "/* ROCKET-R POLICY V42 V32 TRANSPARENT LOAD */ ctx->r16 = MEM_W(ctx->r2, -0X4);",
+      "reason": "V42 golden-rule migration: load transparent RenderEntry pointer from expanded scratch."
+    },
+    {
+      "function": "func_8001EA18",
+      "beforeVram": "0x8001EA18",
+      "text": "/* ROCKET-R POLICY V42 V35 SUBMODEL BEGIN */ extern void rocket_presentation_submodel_matrix_begin(uint8_t*, recomp_context*); rocket_presentation_submodel_matrix_begin(rdram, ctx);",
+      "reason": "V42 golden-rule migration: exact GameObject/Submodel capture at func_8001EA18 entry."
+    },
+    {
+      "function": "func_8001EA18",
+      "beforeVram": "0x8001ECE4",
+      "text": "/* ROCKET-R POLICY V42 V35 SUBMODEL END */ extern void rocket_presentation_submodel_matrix_end(uint8_t*, recomp_context*); rocket_presentation_submodel_matrix_end(rdram, ctx);",
+      "reason": "V42 golden-rule migration: exact matrix capture immediately before func_8001EA18 returns."
+    },
+    {
+      "function": "func_8001ECEC",
+      "beforeVram": "0x8001ECEC",
+      "text": "/* ROCKET-R POLICY V44 ENTER 0x8001ECEC */ extern void rocket_presentation_enter_call(recomp_context*, uint32_t); rocket_presentation_enter_call(ctx, 0x8001ECECU); /* ROCKET-R POLICY V42 V36 MODEL BEGIN */ extern void rocket_presentation_model_range_begin(uint8_t*, recomp_context*); rocket_presentation_model_range_begin(rdram, ctx); /* ROCKET-R POLICY V43 MODE0 BEGIN */ extern void rocket_presentation_shared_mode0_begin(uint8_t*, recomp_context*); rocket_presentation_shared_mode0_begin(rdram, ctx);",
+      "reason": "V42/V43 merged: v36 model-range begin plus shared mode-0 draw scope. Single N64Recomp hook at func_8001ECEC/0x8001ECEC.",
+      "callsiteEntry": "0x8001ECEC"
+    },
+    {
+      "function": "func_8001ECEC",
+      "beforeVram": "0x8001F120",
+      "text": "/* ROCKET-R POLICY V42 V36 MODEL END */ extern void rocket_presentation_model_range_end(uint8_t*, recomp_context*); rocket_presentation_model_range_end(rdram, ctx); /* ROCKET-R POLICY V43 MODE0 END */ extern void rocket_presentation_shared_mode0_end(uint8_t*, recomp_context*); rocket_presentation_shared_mode0_end(rdram, ctx);",
+      "reason": "V42/V43 merged: v36 model-range end plus shared mode-0 scope clear. Single N64Recomp hook at func_8001ECEC/0x8001F120."
+    },
+    {
+      "function": "load_translation_mtx",
+      "beforeVram": "0x800476CC",
+      "text": "/* ROCKET-R POLICY V44 ENTER 0x800476CC */ extern void rocket_presentation_enter_call(recomp_context*, uint32_t); rocket_presentation_enter_call(ctx, 0x800476CCU); /* ROCKET-R POLICY V42 V36 TRANSLATION BEGIN */ extern void rocket_presentation_direct_begin(uint8_t*, recomp_context*, uint32_t); rocket_presentation_direct_begin(rdram, ctx, 1U);",
+      "reason": "V42 golden-rule migration: direct translation-matrix producer begin.",
+      "callsiteEntry": "0x800476CC"
+    },
+    {
+      "function": "load_translation_mtx",
+      "beforeVram": "0x800477A4",
+      "text": "/* ROCKET-R POLICY V42 V36 TRANSLATION END */ extern void rocket_presentation_direct_end(uint8_t*, recomp_context*, uint32_t); rocket_presentation_direct_end(rdram, ctx, 1U);",
+      "reason": "V42 golden-rule migration: direct translation-matrix producer end immediately before return."
+    },
+    {
+      "function": "func_8004A4F0",
+      "beforeVram": "0x8004A4F0",
+      "text": "/* ROCKET-R POLICY V44 ENTER 0x8004A4F0 */ extern void rocket_presentation_enter_call(recomp_context*, uint32_t); rocket_presentation_enter_call(ctx, 0x8004A4F0U); /* ROCKET-R POLICY V42 V36 EFFECT BEGIN */ extern void rocket_presentation_direct_begin(uint8_t*, recomp_context*, uint32_t); rocket_presentation_direct_begin(rdram, ctx, 2U);",
+      "reason": "V42 golden-rule migration: direct effect-matrix producer begin.",
+      "callsiteEntry": "0x8004A4F0"
+    },
+    {
+      "function": "func_8004A4F0",
+      "beforeVram": "0x8004AC34",
+      "text": "/* ROCKET-R POLICY V42 V36 EFFECT END */ extern void rocket_presentation_direct_end(uint8_t*, recomp_context*, uint32_t); rocket_presentation_direct_end(rdram, ctx, 2U);",
+      "reason": "V42 golden-rule migration: direct effect-matrix producer end immediately before return."
+    },
+    {
+      "function": "func_8003ACD4",
+      "beforeVram": "0x8003ADF4",
+      "text": "/* ROCKET-R POLICY V42 V36 CAMERA MATRICES */ extern void rocket_presentation_camera_matrices(uint8_t*, recomp_context*); rocket_presentation_camera_matrices(rdram, ctx); extern void rocket_graphics_camera_end(uint8_t*, recomp_context*); rocket_graphics_camera_end(rdram, ctx);",
+      "reason": "Capture the completed projection/view/identity matrices, then restore temporary presentation camera fields before returning to the game.",
+      "romOffset": "0x0003B9F4",
+      "expectedInstruction": "0x03E00008"
+    },
+    {
+      "function": "func_8006BDF0",
+      "beforeVram": "0x8006BE94",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8006BE94 */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x8006BE94U); /* ROCKET-R POLICY V42 TINKER BEGIN */ extern void rocket_presentation_tinker_token_draw_begin(uint8_t*, recomp_context*); rocket_presentation_tinker_token_draw_begin(rdram, ctx);",
+      "reason": "V42: establish actual per-token instance scope immediately before func_8006BDF0 calls func_8001ECEC.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x0006CA94",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_8006BDF0",
+      "beforeVram": "0x8006BE9C",
+      "text": "/* ROCKET-R POLICY V42 TINKER END */ extern void rocket_presentation_tinker_token_draw_end(uint8_t*, recomp_context*); rocket_presentation_tinker_token_draw_end(rdram, ctx);",
+      "reason": "V42: close per-token instance scope immediately after func_8001ECEC returns."
+    },
+    {
+      "function": "func_8001ECEC",
+      "beforeVram": "0x8001EFD0",
+      "text": "/* ROCKET-R POLICY V42 TINKER MATRIX */ extern void rocket_presentation_tinker_token_matrix(uint8_t*, recomp_context*); rocket_presentation_tinker_token_matrix(rdram, ctx);",
+      "reason": "V42: capture func_8001ECEC final selected mode-0 matrix, which bypasses func_8001EA18."
+    },
+    {
+      "function": "func_8001E954",
+      "beforeVram": "0x8001E9CC",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8001E9CC */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x8001E9CCU);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x0001F5CC",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_8001ECEC",
+      "beforeVram": "0x8001F084",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8001F084 */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8008B24CU, 0x8001F084U);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8008B24C",
+      "romOffset": "0x0001FC84",
+      "expectedInstruction": "0x0C022C93"
+    },
+    {
+      "function": "func_8001F128",
+      "beforeVram": "0x8001F26C",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8001F26C */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x8001F26CU);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x0001FE6C",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_8001F2A4",
+      "beforeVram": "0x8001F33C",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8001F33C */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x8001F33CU);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x0001FF3C",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_800261D0",
+      "beforeVram": "0x80026240",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x80026240 */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x80026240U);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x00026E40",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_8002ACA0",
+      "beforeVram": "0x8002AD28",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8002AD28 */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x8002AD28U);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x0002B928",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_8002C25C",
+      "beforeVram": "0x8002C2F4",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8002C2F4 */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x8002C2F4U);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x0002CEF4",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_8002C63C",
+      "beforeVram": "0x8002C6F8",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8002C6F8 */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x8002C6F8U);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x0002D2F8",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_8002C77C",
+      "beforeVram": "0x8002C89C",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8002C89C */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8004A4F0U, 0x8002C89CU);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8004A4F0",
+      "romOffset": "0x0002D49C",
+      "expectedInstruction": "0x0C01293C"
+    },
+    {
+      "function": "func_8002C77C",
+      "beforeVram": "0x8002CA4C",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8002CA4C */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8008B24CU, 0x8002CA4CU);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8008B24C",
+      "romOffset": "0x0002D64C",
+      "expectedInstruction": "0x0C022C93"
+    },
+    {
+      "function": "func_8002C77C",
+      "beforeVram": "0x8002CB0C",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8002CB0C */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x8002CB0CU);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x0002D70C",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_80031E6C",
+      "beforeVram": "0x80031ECC",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x80031ECC */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x80031ECCU);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x00032ACC",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_800325D8",
+      "beforeVram": "0x8003265C",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8003265C */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x8003265CU);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x0003325C",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_80033468",
+      "beforeVram": "0x8003386C",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8003386C */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8008B24CU, 0x8003386CU);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8008B24C",
+      "romOffset": "0x0003446C",
+      "expectedInstruction": "0x0C022C93"
+    },
+    {
+      "function": "func_8003F440",
+      "beforeVram": "0x8003F4A0",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8003F4A0 */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x8003F4A0U);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x000400A0",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_800499B0",
+      "beforeVram": "0x80049B6C",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x80049B6C */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x80049B6CU);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x0004A76C",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_8004AC3C",
+      "beforeVram": "0x8004AEC4",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8004AEC4 */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x800476CCU, 0x8004AEC4U);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x800476CC",
+      "romOffset": "0x0004BAC4",
+      "expectedInstruction": "0x0C011DB3"
+    },
+    {
+      "function": "func_8004B420",
+      "beforeVram": "0x8004B67C",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8004B67C */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8004A4F0U, 0x8004B67CU);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8004A4F0",
+      "romOffset": "0x0004C27C",
+      "expectedInstruction": "0x0C01293C"
+    },
+    {
+      "function": "func_8004B420",
+      "beforeVram": "0x8004B890",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8004B890 */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8008B24CU, 0x8004B890U);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8008B24C",
+      "romOffset": "0x0004C490",
+      "expectedInstruction": "0x0C022C93"
+    },
+    {
+      "function": "func_8004D0FC",
+      "beforeVram": "0x8004D170",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8004D170 */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x8004D170U);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x0004DD70",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_8004D0FC",
+      "beforeVram": "0x8004D1A8",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8004D1A8 */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x8004D1A8U);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x0004DDA8",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_80050728",
+      "beforeVram": "0x80050788",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x80050788 */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x80050788U);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x00051388",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_80055690",
+      "beforeVram": "0x80055A20",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x80055A20 */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x80055A20U);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x00056620",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_8005863C",
+      "beforeVram": "0x80058878",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x80058878 */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x80058878U);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x00059478",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_8005863C",
+      "beforeVram": "0x800589EC",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x800589EC */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x800589ECU);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x000595EC",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_8005863C",
+      "beforeVram": "0x80058B54",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x80058B54 */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x80058B54U);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x00059754",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_8005863C",
+      "beforeVram": "0x80058E28",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x80058E28 */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x80058E28U);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x00059A28",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_8006730C",
+      "beforeVram": "0x80067554",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x80067554 */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x80067554U);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x00068154",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_8006E194",
+      "beforeVram": "0x8006E2C4",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8006E2C4 */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x8006E2C4U);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x0006EEC4",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_8006EF70",
+      "beforeVram": "0x8006F0D4",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8006F0D4 */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x800476CCU, 0x8006F0D4U);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x800476CC",
+      "romOffset": "0x0006FCD4",
+      "expectedInstruction": "0x0C011DB3"
+    },
+    {
+      "function": "func_8006F4A4",
+      "beforeVram": "0x8006F55C",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8006F55C */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x800476CCU, 0x8006F55CU);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x800476CC",
+      "romOffset": "0x0007015C",
+      "expectedInstruction": "0x0C011DB3"
+    },
+    {
+      "function": "func_80070F0C",
+      "beforeVram": "0x80071054",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x80071054 */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x80071054U);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x00071C54",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_8007C1C0",
+      "beforeVram": "0x8007C298",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8007C298 */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x8007C298U);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x0007CE98",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_8007C2BC",
+      "beforeVram": "0x8007C3CC",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8007C3CC */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x8007C3CCU);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x0007CFCC",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_8007C3F4",
+      "beforeVram": "0x8007C504",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8007C504 */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x8007C504U);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x0007D104",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_8007C52C",
+      "beforeVram": "0x8007C654",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8007C654 */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x8007C654U);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x0007D254",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_8007C67C",
+      "beforeVram": "0x8007CA04",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8007CA04 */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x8007CA04U);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x0007D604",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_8007E688",
+      "beforeVram": "0x8007E804",
+      "text": "/* ROCKET-R POLICY V44 CALLSITE 0x8007E804 */ extern void rocket_presentation_callsite(recomp_context*, uint32_t, uint32_t); rocket_presentation_callsite(ctx, 0x8001ECECU, 0x8007E804U);",
+      "reason": "Verified retail JAL supplies interpolation provenance without relying on guest r31.",
+      "callsiteTarget": "0x8001ECEC",
+      "romOffset": "0x0007F404",
+      "expectedInstruction": "0x0C007B3B"
+    },
+    {
+      "function": "func_8003BA40",
+      "beforeVram": "0x8003BA40",
+      "expectedInstruction": "0x27BDFEE8",
+      "romOffset": "0x0003C640",
+      "text": "extern void rocket_mod_camera_update(uint8_t*, recomp_context*); rocket_mod_camera_update(rdram, ctx);",
+      "reason": "Release analogue input when the main camera leaves the supported third-person path. Never replace the obstacle-checked eye position."
+    },
+    {
+      "function": "func_8003BA40",
+      "beforeVram": "0x8003BC08",
+      "expectedInstruction": "0x14400009",
+      "romOffset": "0x0003C808",
+      "text": "extern void rocket_mod_camera_smoothing_begin(uint8_t*, recomp_context*); rocket_mod_camera_smoothing_begin(rdram, ctx);",
+      "reason": "Capture the native desired orbit and look angles before spring integration, only for an active mod that opts into adjustable camera smoothing."
+    },
+    {
+      "function": "func_8003BA40",
+      "beforeVram": "0x8003BF50",
+      "expectedInstruction": "0x8FA500A8",
+      "romOffset": "0x0003CB50",
+      "text": "extern void rocket_mod_camera_smoothing_finish(uint8_t*, recomp_context*); rocket_mod_camera_smoothing_finish(rdram, ctx);",
+      "reason": "Scale native camera lag toward the desired orbit before final geometry collision checks. Preserve all collision flags, original geometry routines and publication history."
+    },
+    {
+      "function": "func_8005A9F8",
+      "beforeVram": "0x8005A9F8",
+      "expectedInstruction": "0x27BDFFE0",
+      "romOffset": "0x0005B5F8",
+      "text": "extern void rocket_mod_camera_first_person(uint8_t*, recomp_context*); rocket_mod_camera_first_person(rdram, ctx);",
+      "reason": "Add optional mod look angles inside the original first-person input update, preserving native left-stick input, limits, transitions and camera placement."
+    },
+    {
+      "function": "func_80036D84",
+      "beforeVram": "0x80036F7C",
+      "expectedInstruction": "0x0C00E78A",
+      "romOffset": "0x00037B7C",
+      "text": "extern void rocket_mod_camera_prepare(uint8_t*, recomp_context*); rocket_mod_camera_prepare(rdram, ctx);",
+      "reason": "Apply mod orbit angles before vanilla obstacle filtering and candidate selection, using a scoped copy of the selected zoom preset."
+    },
+    {
+      "function": "func_80036D84",
+      "beforeVram": "0x80036F84",
+      "expectedInstruction": "0x8FA800B0",
+      "romOffset": "0x00037B84",
+      "text": "extern void rocket_mod_camera_candidates_begin(uint8_t*, recomp_context*); rocket_mod_camera_candidates_begin(rdram, ctx); rocket_mod_camera_retry_candidate:;",
+      "reason": "Retain the original filtered object count and mark the start of the vanilla candidate checks for bounded distance retries."
+    },
+    {
+      "function": "func_80036D84",
+      "beforeVram": "0x80037178",
+      "expectedInstruction": "0x8FA800AC",
+      "romOffset": "0x00037D78",
+      "text": "extern int rocket_mod_camera_retry(uint8_t*, recomp_context*); if (rocket_mod_camera_retry(rdram, ctx)) goto rocket_mod_camera_retry_candidate;",
+      "reason": "On a blocked mod-camera candidate, retry closer at the same heading using the original obstacle checks before considering alternate angles."
+    },
+    {
+      "function": "func_80036D84",
+      "beforeVram": "0x800377DC",
+      "expectedInstruction": "0x8FA80114",
+      "romOffset": "0x000383DC",
+      "text": "extern void rocket_mod_camera_candidates_finish(uint8_t*, recomp_context*); rocket_mod_camera_candidates_finish(rdram, ctx);",
+      "reason": "Remember the fitted orbit distance for stable tight-space behaviour and gradual outward recovery; leave the selected eye untouched."
+    },
+    {
+      "function": "func_80097D7C",
+      "beforeVram": "0x80098530",
+      "expectedInstruction": "0x0C00EE90",
+      "romOffset": "0x00099130",
+      "text": "extern void rocket_mod_camera_volume_update(uint8_t*, recomp_context*); rocket_mod_camera_volume_update(rdram, ctx);",
+      "reason": "Adapt the active corridor view at its verified callsite, retaining its exact camera-region identity."
+    },
+    {
+      "function": "func_80036D84",
+      "beforeVram": "0x800377C0",
+      "expectedInstruction": "0x8FA800A8",
+      "romOffset": "0x000383C0",
+      "text": "extern void rocket_mod_camera_candidates_exhausted(uint8_t*, recomp_context*); rocket_mod_camera_candidates_exhausted(rdram, ctx);",
+      "reason": "Mark the previous-eye fallback as exhausted so a corridor can use its original moving candidate instead of freezing."
+    },
+    {
+      "function": "func_80036D84",
+      "beforeVram": "0x8003702C",
+      "expectedInstruction": "0x1440002A",
+      "romOffset": "0x00037C2C",
+      "text": "extern void rocket_mod_camera_volume_check(uint8_t*, recomp_context*); rocket_mod_camera_volume_check(rdram, ctx);",
+      "reason": "Allow the active corridor camera inside its own normal-camera exclusion region; preserve all physical geometry checks and other regions."
+    },
+    {
+      "function": "func_80036D84",
+      "beforeVram": "0x800372AC",
+      "expectedInstruction": "0x1440002A",
+      "romOffset": "0x00037EAC",
+      "text": "extern void rocket_mod_camera_volume_check(uint8_t*, recomp_context*); rocket_mod_camera_volume_check(rdram, ctx);",
+      "reason": "Allow the active corridor camera inside its own normal-camera exclusion region; preserve all physical geometry checks and other regions."
+    },
+    {
+      "function": "func_80036D84",
+      "beforeVram": "0x80037494",
+      "expectedInstruction": "0x1440002A",
+      "romOffset": "0x00038094",
+      "text": "extern void rocket_mod_camera_volume_check(uint8_t*, recomp_context*); rocket_mod_camera_volume_check(rdram, ctx);",
+      "reason": "Allow the active corridor camera inside its own normal-camera exclusion region; preserve all physical geometry checks and other regions."
+    },
+    {
+      "function": "func_80036D84",
+      "beforeVram": "0x800376E4",
+      "expectedInstruction": "0x14400026",
+      "romOffset": "0x000382E4",
+      "text": "extern void rocket_mod_camera_volume_check(uint8_t*, recomp_context*); rocket_mod_camera_volume_check(rdram, ctx);",
+      "reason": "Allow the active corridor camera inside its own normal-camera exclusion region; preserve all physical geometry checks and other regions."
+    },
+    {
+      "function": "func_8008AEA0",
+      "beforeVram": "0x8008AEA0",
+      "romOffset": "0x0008BAA0",
+      "expectedInstruction": "0x27BDFFB0",
+      "text": "extern void rocket_presentation_background_begin(uint8_t*, recomp_context*); rocket_presentation_background_begin(rdram, ctx);",
+      "reason": "Capture the retail sky texture rectangle and its camera-driven source rows; preserve guard rows for presentation interpolation."
+    },
+    {
+      "function": "func_8008AEA0",
+      "beforeVram": "0x8008B034",
+      "romOffset": "0x0008BC34",
+      "expectedInstruction": "0x3C05E200",
+      "text": "extern void rocket_presentation_sky_rows(uint8_t*, recomp_context*); rocket_presentation_sky_rows(rdram, ctx);",
+      "reason": "Capture the retail sky texture rectangle and its camera-driven source rows; preserve guard rows for presentation interpolation."
+    },
+    {
+      "function": "func_8008AEA0",
+      "beforeVram": "0x8008B1EC",
+      "romOffset": "0x0008BDEC",
+      "expectedInstruction": "0xAC620004",
+      "text": "extern void rocket_presentation_sky_uv(uint8_t*, recomp_context*); rocket_presentation_sky_uv(rdram, ctx);",
+      "reason": "Capture the retail sky texture rectangle and its camera-driven source rows; preserve guard rows for presentation interpolation."
+    },
+    {
+      "function": "func_8008AEA0",
+      "beforeVram": "0x8008B224",
+      "romOffset": "0x0008BE24",
+      "expectedInstruction": "0x8FBF0044",
+      "text": "extern void rocket_presentation_sky_end(uint8_t*, recomp_context*); rocket_presentation_sky_end(rdram, ctx);",
+      "reason": "Capture the retail sky texture rectangle and its camera-driven source rows; preserve guard rows for presentation interpolation."
     }
   ],
-  "instructionPatches": [],
+  "instructionPatches": [
+    {
+      "function": "func_8008B594",
+      "vram": "0x8008B5C0",
+      "value": "0x00000000",
+      "reason": "V42 v32: policy hook supplies 0x80600000 queue base."
+    },
+    {
+      "function": "add_render_entry",
+      "vram": "0x8008B26C",
+      "value": "0x00000000",
+      "reason": "V42 v32: policy hook supplies expanded RenderEntry base."
+    },
+    {
+      "function": "add_render_entry",
+      "vram": "0x8008B29C",
+      "value": "0x00000000",
+      "reason": "V42 v32: policy hook supplies 32768 capacity comparison."
+    },
+    {
+      "function": "func_8008B694",
+      "vram": "0x8008B7F8",
+      "value": "0x00000000",
+      "reason": "V42 v32: policy hook supplies live-queue base."
+    },
+    {
+      "function": "func_8008B694",
+      "vram": "0x8008B82C",
+      "value": "0x00000000",
+      "reason": "V42 v32: policy hook supplies sorted scratch base."
+    },
+    {
+      "function": "func_8008B694",
+      "vram": "0x8008B830",
+      "value": "0x00000000",
+      "reason": "V42 v32: policy hook supplies sorted cursor."
+    },
+    {
+      "function": "func_8008B694",
+      "vram": "0x8008B834",
+      "value": "0x00000000",
+      "reason": "V42 v32: policy hook supplies sorted pointer store."
+    },
+    {
+      "function": "func_8008B694",
+      "vram": "0x8008B850",
+      "value": "0x00000000",
+      "reason": "V42 v32: policy hook supplies second sorted scratch base."
+    },
+    {
+      "function": "func_8008B694",
+      "vram": "0x8008B92C",
+      "value": "0x00000000",
+      "reason": "V42 v32: policy hook supplies heapsort base."
+    },
+    {
+      "function": "func_8008B694",
+      "vram": "0x8008B988",
+      "value": "0x00000000",
+      "reason": "V42 v32: policy hook supplies opaque scratch address."
+    },
+    {
+      "function": "func_8008B694",
+      "vram": "0x8008B98C",
+      "value": "0x00000000",
+      "reason": "V42 v32: policy hook supplies opaque pointer load."
+    },
+    {
+      "function": "func_8008B694",
+      "vram": "0x8008B9A4",
+      "value": "0x00000000",
+      "reason": "V42 v32: policy hook supplies transparent scratch address."
+    },
+    {
+      "function": "func_8008B694",
+      "vram": "0x8008B9A8",
+      "value": "0x00000000",
+      "reason": "V42 v32: policy hook supplies transparent pointer load."
+    }
+  ],
   "stubs": [],
   "renamed": [],
   "ignored": []

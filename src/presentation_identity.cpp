@@ -1,4 +1,6 @@
 #include "presentation_identity.hpp"
+#include "sky_presentation.hpp"
+#include "graphics_enhancements.hpp"
 
 #include "recomp.h"
 
@@ -12,6 +14,7 @@
 #include <limits>
 #include <iterator>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -20,6 +23,10 @@
 namespace {
 
 // === ROCKET-R INTERPOLATION V35 SPECIFIC SUBMODEL MATRICES + RANGE-STABLE SKY ===
+// === ROCKET-R INTERPOLATION V36 GLOBAL MATRIX OWNERSHIP ===
+// Coverage-first extension: exact model allocation ranges, every non-RenderEntry
+// CPU matrix producer, and camera-owned matrices. Existing v35/v5/v6 matching
+// remains intact and exact v35 Submodel ownership keeps highest priority.
 // Additive coverage only: the proven v5/v6 RenderEntry matcher remains authoritative
 // for all existing draws. v35 overlays an identity only when Rocket itself proves
 // the exact GameObject/Submodel that authored a matrix. Unknowns still fail closed.
@@ -35,8 +42,20 @@ constexpr std::uint32_t kGfxContextDlHeadAddress = 0x800A5DB0U; // v33 sky/backg
 constexpr std::uint32_t kMtxBytes = 0x40U;
 constexpr std::uint32_t kSubmodelBytes = 0x28U;
 constexpr std::uint32_t kGameObjectClassOffset = 0x000U;
+constexpr std::uint32_t kGameObjectMaterialCallbackOffset = 0x06CU;
+constexpr std::uint32_t kCollectibleMaterialCallback = 0x8006BDF0U;
+constexpr std::uint32_t kSubmodelPresentationModeOffset = 0x20U;
+constexpr std::uint8_t kCameraRelativeSubmodelModeMin = 1U;
+constexpr std::uint8_t kCameraRelativeSubmodelModeMax = 5U;
 constexpr std::uint32_t kGameObjectSubmodelsOffset = 0x0F4U;
 constexpr std::uint32_t kGameObjectSubmodelCountOffset = 0x0F8U;
+constexpr std::uint32_t kGameObjectPositionOffset = 0x03CU;
+constexpr std::uint32_t kGfxContextMtxHeadAddress = 0x800A5DB4U;
+constexpr std::uint32_t kGfxTaskPerspectiveMtxOffset = 0x018U;
+constexpr std::uint32_t kGfxTaskViewMtxOffset = 0x058U;
+constexpr std::uint32_t kGfxTaskIdentityModelMtxOffset = 0x098U;
+constexpr std::size_t kMaximumModelRangeMatrices = 256U;
+constexpr std::size_t kMaximumDirectRangeMatrices = 8U;
 constexpr std::uint64_t kMaximumTrackAge = 1U;
 constexpr std::size_t kMaximumPendingTasks = 8U;
 // Rocket v4.2 allowed a previous owner to be selected from as far as 768 world
@@ -118,9 +137,80 @@ struct SharedCandidate {
     float cost = 0.0F;
 };
 
+struct ModelRangeCapture {
+    std::uint32_t start_head = 0U;
+    std::uint32_t object = 0U;
+    std::uint32_t caller = 0U;
+    std::size_t specific_begin = 0U;
+    bool valid = false;
+};
+
+struct ModelRangeSample {
+    std::uint32_t address = 0U;
+    std::uint32_t identity = 0U;
+};
+
+struct ObjectLifetimeState {
+    std::uint32_t token = 0U;
+    std::uint64_t fingerprint = 0U;
+    Vec3 position{};
+    bool position_valid = false;
+    std::uint64_t last_frame = 0U;
+};
+
+struct DirectCapture {
+    std::uint32_t start_head = 0U;
+    std::uint32_t caller = 0U;
+    std::uint32_t owner = 0U;
+    bool valid = false;
+};
+
+struct DirectMatrixSample {
+    std::uint64_t key = 0U;
+    std::uint32_t address = 0U;
+    std::uint32_t kind = 0U;
+    std::uint32_t role = 0U;
+    Vec3 position{};
+    bool position_valid = false;
+    std::uint32_t track_token = 0U;
+};
+
+struct DirectContinuity {
+    std::uint64_t key = 0U;
+    std::uint32_t token = 0U;
+    Vec3 position{};
+    bool position_valid = false;
+    std::uint64_t last_frame = 0U;
+    bool claimed = false;
+};
+
+struct DirectCandidate {
+    std::size_t sample = 0U;
+    std::size_t track = 0U;
+    float cost = 0.0F;
+};
+
+struct CameraMatrixSample {
+    std::uint32_t address = 0U;
+    std::uint32_t identity = 0U;
+};
+
+struct CameraContinuityState {
+    std::uint32_t camera = 0U;
+    std::uint32_t token = 0U;
+    std::uint64_t last_frame = 0U;
+};
+
 struct SpecificMatrixSample {
     std::uint64_t key = 0U;
     std::uint32_t address = 0U;
+    std::uint32_t owner = 0U;
+    bool rigid_decompose = false;
+    bool interpolate_shape = false;
+    bool force_snap = false;
+    bool secondary_transform = false;
+    bool collectible_billboard = false;
+    std::uint8_t submodel_mode = 0U;
     Vec3 position{};
     bool position_valid = false;
     std::uint32_t track_token = 0U;
@@ -137,7 +227,14 @@ struct SpecificContinuity {
 
 struct SubmodelMatrixCapture {
     std::uint64_t key = 0U;
+    std::uint32_t owner = 0U;
+    bool rigid_decompose = false;
+    bool collectible_billboard = false;
+    std::uint8_t submodel_mode = 0U;
     bool valid = false;
+    Vec3 instance_position{};
+    bool instance_position_valid = false;
+    bool projected_shadow = false;
 };
 
 struct BindingRecord {
@@ -150,7 +247,19 @@ using MatrixMap = std::unordered_map<std::uint32_t, BindingRecord>;
 struct BackgroundCommandRange {
     std::uint32_t begin = 0U;
     std::uint32_t end = 0U;
+    bool scrolling_rectangle = false;
+    float current_row_offset = 0;
+    float previous_row_offset = 0;
 };
+
+struct SkyCapture {
+    rocket::presentation::SkyRows rows{};
+    std::uint32_t texture = 0, camera = 0;
+    std::uint64_t frame = 0;
+    bool valid = false;
+};
+SkyCapture g_sky_capture{}, g_previous_sky{};
+std::uint32_t g_trace_wheel_matrix = 0;
 
 struct SubmittedFrame {
     std::uint32_t display_list = 0U;
@@ -160,6 +269,7 @@ struct SubmittedFrame {
     std::uint64_t sequence = 0U;
     std::vector<BackgroundCommandRange> background_ranges{};
     MatrixMap matrices{};
+    std::uint32_t camera_token = 0U;
 };
 
 std::mutex g_mutex;
@@ -168,21 +278,48 @@ std::vector<Track> g_tracks;
 std::vector<SharedMatrixTrack> g_shared_matrix_tracks;
 std::vector<SpecificMatrixSample> g_specific_samples;
 std::vector<SpecificContinuity> g_specific_continuity;
+std::vector<ModelRangeSample> g_model_range_samples;
+std::unordered_map<std::uint32_t, ObjectLifetimeState> g_object_lifetimes;
+std::vector<DirectMatrixSample> g_direct_samples;
+std::vector<DirectContinuity> g_direct_continuity;
+std::vector<CameraMatrixSample> g_camera_samples;
+CameraContinuityState g_camera_continuity{};
+std::uint32_t g_recording_camera_token = 0U;
 std::vector<SubmittedFrame> g_submitted;
 std::uint64_t g_frame = 0U;
 std::uint64_t g_submission_sequence = 1U;
 std::uint32_t g_next_token = 1U;
 std::uint32_t g_empty_frames = 0U;
 std::unordered_map<std::uint64_t, std::uint32_t> g_key_ordinals;
-std::unordered_map<std::uint64_t, std::uint32_t> g_specific_key_ordinals;
 std::vector<BackgroundCommandRange> g_background_ranges;
 bool g_background_capture_active = false;
 std::uint32_t g_background_capture_begin = 0U;
 thread_local MatrixMap g_active_matrices;
 thread_local SubmodelMatrixCapture g_submodel_matrix_capture{};
+thread_local ModelRangeCapture g_model_range_captures[16]{};
+thread_local std::size_t g_model_range_depth = 0U;
+thread_local std::size_t g_model_range_overflow_depth = 0U;
+thread_local DirectCapture g_direct_captures[3]{};
+// The pinned recompiler uses host calls and does not maintain guest r31 at
+// JAL sites. Policy hooks pass the verified instruction address explicitly.
+struct CallsiteCapture {
+    const recomp_context* context = nullptr;
+    std::uint32_t target = 0U;
+    std::uint32_t address = 0U;
+};
+thread_local CallsiteCapture g_pending_callsite{};
+thread_local CallsiteCapture g_entered_callsite{};
+
+[[nodiscard]] std::uint32_t EntryCallsite(
+    const recomp_context* context, std::uint32_t target) {
+    return context != nullptr && g_entered_callsite.context == context &&
+        g_entered_callsite.target == target ? g_entered_callsite.address : 0U;
+}
 thread_local std::vector<BackgroundCommandRange> g_active_background_ranges;
 thread_local std::uint32_t g_active_context_dl_start = 0U;
 thread_local std::uint32_t g_active_context_size = 0U;
+thread_local std::uint32_t g_active_camera_token = 0U;
+thread_local std::uint32_t g_active_task_address = 0U;
 // While an RT64 Rocket task is being decoded, the semantic sidecar owns the
 // matching policy for every model matrix. Unknown matrices must therefore snap
 // instead of escaping back into RT64's anonymous automatic matcher.
@@ -203,8 +340,61 @@ std::atomic<std::uint64_t> g_trace_specific_samples{0U};
 std::atomic<std::uint64_t> g_trace_specific_matches{0U};
 std::atomic<std::uint64_t> g_trace_specific_new{0U};
 std::atomic<std::uint64_t> g_trace_specific_conflicts{0U};
+std::atomic<std::uint64_t> g_trace_v45_mode0{0U};
+std::atomic<std::uint64_t> g_trace_v45_scoped_submodels{0U};
+std::atomic<std::uint64_t> g_trace_v45_ambiguous{0U};
+std::atomic<std::uint64_t> g_trace_v45_invalid{0U};
 std::atomic<std::uint64_t> g_trace_unowned_matrix_snaps{0U};
 std::atomic<std::uint64_t> g_trace_background_identities{0U};
+std::atomic<std::uint64_t> g_trace_v36_object_lifetimes{0U};
+std::atomic<std::uint64_t> g_trace_v36_model_range_matrices{0U};
+std::atomic<std::uint64_t> g_trace_v36_model_range_specific_overlap{0U};
+std::atomic<std::uint64_t> g_trace_v36_direct_samples{0U};
+std::atomic<std::uint64_t> g_trace_v36_direct_matches{0U};
+std::atomic<std::uint64_t> g_trace_v36_direct_new{0U};
+std::atomic<std::uint64_t> g_trace_v36_camera_matrices{0U};
+std::atomic<std::uint64_t> g_trace_v36_camera_epochs{0U};
+std::atomic<std::uint64_t> g_trace_v36_unowned_camera{0U};
+std::atomic<std::uint64_t> g_trace_v36_unowned_arena{0U};
+std::atomic<std::uint64_t> g_trace_v36_unowned_other{0U};
+std::atomic<std::uint64_t> g_trace_v37_collectible_rigid{0U};
+std::atomic<std::uint64_t> g_trace_v38_collectible_vertex{0U};
+std::atomic<std::uint64_t> g_trace_v38_mode0{0U};
+std::atomic<std::uint64_t> g_trace_v38_mode1{0U};
+std::atomic<std::uint64_t> g_trace_v38_mode2{0U};
+std::atomic<std::uint64_t> g_trace_v38_mode3{0U};
+std::atomic<std::uint64_t> g_trace_v38_mode4{0U};
+std::atomic<std::uint64_t> g_trace_v38_mode5{0U};
+std::atomic<std::uint64_t> g_trace_v38_mode_other{0U};
+std::atomic<std::uint64_t> g_trace_v39_owner_position{0U};
+std::atomic<std::uint64_t> g_trace_v39_matrix_fallback{0U};
+std::atomic<std::uint64_t> g_trace_v39_matches{0U};
+std::atomic<std::uint64_t> g_trace_v39_new{0U};
+std::atomic<std::uint64_t> g_trace_v39_conflicts{0U};
+// === ROCKET-R INTERPOLATION V42 TINKER TOKEN POLICY HOOKS ===
+thread_local std::uint32_t g_tinker_token_draw_owner = 0U;
+thread_local Vec3 g_tinker_token_draw_position{};
+thread_local bool g_tinker_token_draw_position_valid = false;
+std::atomic<std::uint64_t> g_trace_v42_token_draws{0U};
+std::atomic<std::uint64_t> g_trace_v42_token_matrices{0U};
+// === ROCKET-R INTERPOLATION V43 SHARED MODE0 DIRECT MATRICES ===
+struct SharedMode0ScopeV43 {
+    std::uint32_t model = 0U;
+    std::uint32_t origin = 0U;
+    std::uint32_t owner_hint = 0U;
+    std::uint32_t caller = 0U;
+    std::uint32_t stack = 0U;
+    std::uint32_t claimed_matrix = 0U;
+    std::uint64_t instance_key = 0U;
+    Vec3 position{};
+    bool position_valid = false;
+    bool active = false;
+    bool projected_shadow = false;
+    bool player_wheel = false;
+    std::size_t specific_begin = 0U;
+    std::vector<std::uint64_t> secondary_pairs;
+};
+thread_local SharedMode0ScopeV43 g_shared_mode0_v43{};
 std::atomic<std::uint64_t> g_trace_sidecar_mismatches{0U};
 std::atomic<std::uint64_t> g_coverage_semantic_bindings{0U};
 std::atomic<std::uint64_t> g_coverage_snapped_bindings{0U};
@@ -235,6 +425,19 @@ std::atomic<std::uint64_t> g_coverage_dynamic_vertex_bindings{0U};
 [[nodiscard]] std::uint32_t ReadU32(std::uint8_t* rdram,
                                     std::uint32_t address) {
     return static_cast<std::uint32_t>(MEM_W(0, RdramAddress(address)));
+}
+
+// === ROCKET-R INTERPOLATION V37 COLLECTIBLE RIGID ROTATION ===
+// Rocket's model parser invokes the GameObject class callback at +0x6C for
+// material commands. func_8006BDF0 is the decomp-identified token/collectible
+// callback, so this is a semantic class test rather than a draw-order guess.
+[[nodiscard]] bool IsRigidCollectibleObject(std::uint8_t*,
+                                             std::uint32_t) {
+    // === ROCKET-R V42 RETIRED V37 CLASS-CALLBACK GUESS ===
+    // v40 proved func_8006BDF0 is the Tinker Token renderer itself, not a
+    // GameObject class material callback. Keep this legacy path fail-closed;
+    // v42's explicit func_8006BDF0 policy hooks are authoritative.
+    return false;
 }
 
 [[nodiscard]] bool ReadCurrentDlHeadPhysical(std::uint8_t* rdram,
@@ -356,6 +559,78 @@ struct BackgroundCommandLocation {
     return Finite(out);
 }
 
+// Only affine, nondegenerate orthogonal bases are safe rigid transforms.
+// N64 fixed-point quantization needs a small relative orthogonality tolerance.
+[[nodiscard]] bool ReadGuestMatrix(std::uint8_t* rdram, std::uint32_t address, float (&matrix)[16]) {
+    if (!ValidRange(address, kMtxBytes)) return false;
+    for (std::uint32_t i = 0; i < 16U; ++i) {
+        matrix[i] = static_cast<float>(ReadS16(rdram, address + 2U * i)) +
+            static_cast<float>(ReadU16(rdram, address + 32U + 2U * i)) / 65536.0F;
+    }
+    return true;
+}
+
+[[nodiscard]] bool SupportsRigidInterpolation(const float (&matrix)[16]) {
+    if (matrix[3] != 0.0F || matrix[7] != 0.0F || matrix[11] != 0.0F || matrix[15] != 1.0F) return false;
+    float length_squared[3]{};
+    for (unsigned row = 0; row < 3; ++row) {
+        for (unsigned column = 0; column < 3; ++column)
+            length_squared[row] += matrix[4U * row + column] * matrix[4U * row + column];
+        if (length_squared[row] < 0.000001F) return false;
+    }
+    for (unsigned a = 0; a < 3; ++a) {
+        for (unsigned b = a + 1; b < 3; ++b) {
+            float dot = 0.0F;
+            for (unsigned column = 0; column < 3; ++column)
+                dot += matrix[4U * a + column] * matrix[4U * b + column];
+            if (std::abs(dot) > 0.02F * std::sqrt(length_squared[a] * length_squared[b])) return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool SupportsRigidInterpolation(std::uint8_t* rdram, std::uint32_t address) {
+    float matrix[16]{};
+    return ReadGuestMatrix(rdram, address, matrix) && SupportsRigidInterpolation(matrix);
+}
+
+[[nodiscard]] bool SupportsRigidPair(std::uint8_t* rdram, std::uint32_t primary, std::uint32_t secondary) {
+    float first[16]{}, second[16]{}, combined[16]{};
+    if (!ReadGuestMatrix(rdram, primary, first) || !ReadGuestMatrix(rdram, secondary, second)) return false;
+    // RT64's G_MTX_MUL composes secondary * primary. A nonuniform scale and
+    // rotation can produce shear even when each input separately is rigid.
+    for (unsigned row = 0; row < 4; ++row)
+        for (unsigned column = 0; column < 4; ++column)
+            for (unsigned k = 0; k < 4; ++k)
+                combined[row * 4U + column] += second[row * 4U + k] * first[k * 4U + column];
+    return SupportsRigidInterpolation(combined);
+}
+
+[[nodiscard]] bool SupportsWheelDecomposition(const float (&m)[16]) {
+    for (float value : m) if (!std::isfinite(value)) return false;
+    if (m[3] != 0 || m[7] != 0 || m[11] != 0 || m[15] != 1) return false;
+    const float det = m[0]*(m[5]*m[10]-m[6]*m[9]) - m[1]*(m[4]*m[10]-m[6]*m[8]) + m[2]*(m[4]*m[9]-m[5]*m[8]);
+    float lengths = 1;
+    for (unsigned row=0; row<3; ++row) {
+        const auto i = row*4;
+        lengths *= std::sqrt(m[i]*m[i]+m[i+1]*m[i+1]+m[i+2]*m[i+2]);
+    }
+    return lengths > 1e-9F && std::abs(det) > lengths * 1e-4F;
+}
+
+[[nodiscard]] bool SupportsWheelDecomposition(std::uint8_t* rdram, std::uint32_t address) {
+    float matrix[16]{};
+    return ReadGuestMatrix(rdram,address,matrix) && SupportsWheelDecomposition(matrix);
+}
+
+[[nodiscard]] bool SupportsWheelPair(std::uint8_t* rdram, std::uint32_t primary, std::uint32_t secondary) {
+    float first[16]{}, second[16]{}, combined[16]{};
+    if (!ReadGuestMatrix(rdram,primary,first) || !ReadGuestMatrix(rdram,secondary,second)) return false;
+    for (unsigned row=0; row<4; ++row) for (unsigned column=0; column<4; ++column)
+        for (unsigned k=0; k<4; ++k) combined[row*4+column] += second[row*4+k] * first[k*4+column];
+    return SupportsWheelDecomposition(combined);
+}
+
 [[nodiscard]] std::uint32_t ReadCurrentGfxTask(std::uint8_t* rdram) {
     if (!ValidRange(kCurGfxTaskAddress, 4U)) return 0U;
     const std::uint32_t task = ReadU32(rdram, kCurGfxTaskAddress);
@@ -429,6 +704,55 @@ struct GfxSemanticRef {
     return NormalizeIdentity((static_cast<std::uint64_t>(token) << 32U) |
                              static_cast<std::uint64_t>(role + 1U));
 }
+
+[[nodiscard]] bool ReadGuestVec3(std::uint8_t* rdram,
+                                    std::uint32_t address, Vec3& out) {
+    if (rdram == nullptr || !ValidRange(address, 12U)) return false;
+    out.x = std::bit_cast<float>(ReadU32(rdram, address + 0U));
+    out.y = std::bit_cast<float>(ReadU32(rdram, address + 4U));
+    out.z = std::bit_cast<float>(ReadU32(rdram, address + 8U));
+    return Finite(out);
+}
+
+[[nodiscard]] std::uint32_t AcquireObjectLifetimeTokenLocked(
+    std::uint8_t* rdram, std::uint32_t object) {
+    if (!ValidRange(object, kGameObjectSubmodelCountOffset + 4U)) return 0U;
+    const std::uint32_t object_class = ReadU32(rdram, object + kGameObjectClassOffset);
+    const std::uint32_t submodels = ReadU32(rdram, object + kGameObjectSubmodelsOffset);
+    const std::uint32_t count = ReadU32(rdram, object + kGameObjectSubmodelCountOffset);
+    std::uint64_t fingerprint = Mix64(static_cast<std::uint64_t>(object_class));
+    fingerprint = Mix64(fingerprint ^ (static_cast<std::uint64_t>(submodels) << 1U));
+    fingerprint = Mix64(fingerprint ^ (static_cast<std::uint64_t>(count) << 33U));
+
+    Vec3 position{};
+    const bool position_valid = ReadGuestVec3(
+        rdram, object + kGameObjectPositionOffset, position);
+    ObjectLifetimeState& state = g_object_lifetimes[Physical(object)];
+
+    bool restart = state.token == 0U || state.fingerprint != fingerprint;
+    if (!restart && state.last_frame != g_frame) {
+        if (state.last_frame + 1U != g_frame) {
+            restart = true;
+        } else if (state.position_valid != position_valid) {
+            restart = true;
+        } else if (position_valid) {
+            const float dist2 = DistanceSquared(position, state.position);
+            const float limit2 = kMaximumTrackDistance * kMaximumTrackDistance;
+            if (!std::isfinite(dist2) || dist2 > limit2) restart = true;
+        }
+    }
+    if (restart) {
+        state.token = NextSpecificPresentationToken();
+        g_trace_v36_object_lifetimes.fetch_add(1U, std::memory_order_relaxed);
+    }
+    state.fingerprint = fingerprint;
+    state.position = position;
+    state.position_valid = position_valid;
+    state.last_frame = g_frame;
+    return state.token;
+}
+
+
 
 [[nodiscard]] rocket::presentation::MatrixBinding IgnoredBinding() {
     // G_EX_ID_IGNORE is zero. Keeping an explicit zero-ID binding in the
@@ -675,6 +999,173 @@ void MatchSharedMatrixSamples(std::vector<SharedMatrixSample>& samples) {
 // separately from the stable v5/v6 RenderEntry heuristic. This cannot make an
 // existing generic match less conservative: it only overrides a physical slot
 // when Rocket's own func_8001EA18 proved the exact GameObject/Submodel owner.
+// v36 exact allocation-range layer. The range is captured inside Rocket's
+// real func_8001ECEC model renderer. It covers parent/attachment matrices that
+// never reach func_8001EA18 while deliberately leaving v35's exact returned
+// Submodel matrix as the highest-priority owner for any overlapping slot.
+void FinalizeModelRangeBindings(MatrixMap& out) {
+    std::unordered_set<std::uint32_t> specific_owned;
+    specific_owned.reserve(g_specific_samples.size());
+    for (const SpecificMatrixSample& sample : g_specific_samples) {
+        if (sample.address != 0U && ValidRange(sample.address, kMtxBytes)) {
+            specific_owned.insert(Physical(sample.address));
+        }
+    }
+
+    std::unordered_map<std::uint32_t, std::uint32_t> claims;
+    claims.reserve(g_model_range_samples.size());
+    for (const ModelRangeSample& sample : g_model_range_samples) {
+        if (sample.address == 0U || sample.identity == 0U ||
+            sample.identity == 0xFFFFFFFFU || !ValidRange(sample.address, kMtxBytes)) {
+            continue;
+        }
+        const std::uint32_t physical = Physical(sample.address);
+        if (specific_owned.contains(physical)) {
+            g_trace_v36_model_range_specific_overlap.fetch_add(1U, std::memory_order_relaxed);
+            continue;
+        }
+        const auto prior = claims.find(physical);
+        if (prior != claims.end() && prior->second != sample.identity) {
+            // Keep conflicts sticky: A/B/A claims must not revive A.
+            prior->second = 0U;
+            out.insert_or_assign(physical, BindingRecord{IgnoredBinding()});
+            continue;
+        }
+        claims[physical] = sample.identity;
+        rocket::presentation::MatrixBinding binding{};
+        binding.identity = sample.identity;
+        out.insert_or_assign(physical, BindingRecord{binding});
+    }
+}
+
+// Scoped fallback for the only two non-camera CPU matrix producers outside the
+// RenderEntry path. Repeated calls from the same producer are paired by the same
+// mutual-nearest + ambiguity-margin policy as the stable v5/v6 matcher. This
+// deliberately avoids draw-order/occurrence identities when effects appear or
+// disappear between authored frames.
+void FinalizeDirectMatrixBindings(MatrixMap& out) {
+    std::erase_if(g_direct_continuity, [](const DirectContinuity& item) {
+        return g_frame > item.last_frame + kMaximumTrackAge;
+    });
+    for (DirectContinuity& item : g_direct_continuity) item.claimed = false;
+
+    std::vector<DirectCandidate> candidates;
+    candidates.reserve(g_direct_samples.size() * 4U);
+    for (std::size_t si = 0U; si < g_direct_samples.size(); ++si) {
+        const DirectMatrixSample& sample = g_direct_samples[si];
+        for (std::size_t ti = 0U; ti < g_direct_continuity.size(); ++ti) {
+            const DirectContinuity& item = g_direct_continuity[ti];
+            if (item.key != sample.key || item.claimed ||
+                item.last_frame >= g_frame || g_frame - item.last_frame != 1U) {
+                continue;
+            }
+            if (item.position_valid != sample.position_valid) continue;
+            float cost = 0.25F;
+            if (sample.position_valid) {
+                const float dist2 = DistanceSquared(sample.position, item.position);
+                const float limit2 = kMaximumTrackDistance * kMaximumTrackDistance;
+                if (!std::isfinite(dist2) || dist2 > limit2) continue;
+                cost = dist2;
+            }
+            candidates.push_back({si, ti, cost});
+        }
+    }
+
+    const float inf = std::numeric_limits<float>::infinity();
+    const std::size_t none = std::numeric_limits<std::size_t>::max();
+    std::vector<float> sample_best(g_direct_samples.size(), inf);
+    std::vector<float> sample_second(g_direct_samples.size(), inf);
+    std::vector<std::size_t> sample_best_track(g_direct_samples.size(), none);
+    std::vector<float> track_best(g_direct_continuity.size(), inf);
+    std::vector<float> track_second(g_direct_continuity.size(), inf);
+    std::vector<std::size_t> track_best_sample(g_direct_continuity.size(), none);
+
+    auto update_best = [](float cost, std::size_t index,
+                          float& best, float& second, std::size_t& best_index) {
+        if (cost < best) {
+            second = best;
+            best = cost;
+            best_index = index;
+        } else if (cost < second) {
+            second = cost;
+        }
+    };
+    for (const DirectCandidate& candidate : candidates) {
+        update_best(candidate.cost, candidate.track,
+                    sample_best[candidate.sample], sample_second[candidate.sample],
+                    sample_best_track[candidate.sample]);
+        update_best(candidate.cost, candidate.sample,
+                    track_best[candidate.track], track_second[candidate.track],
+                    track_best_sample[candidate.track]);
+    }
+    auto clearly_better = [](float best, float second) {
+        if (!std::isfinite(best)) return false;
+        if (!std::isfinite(second)) return true;
+        const float required = std::max(
+            kAmbiguityAbsoluteMargin, best * kAmbiguityRelativeMargin);
+        return second > best + required;
+    };
+
+    std::vector<bool> matched(g_direct_samples.size(), false);
+    for (std::size_t si = 0U; si < g_direct_samples.size(); ++si) {
+        const std::size_t ti = sample_best_track[si];
+        if (ti == none || ti >= g_direct_continuity.size()) continue;
+        if (track_best_sample[ti] != si ||
+            !clearly_better(sample_best[si], sample_second[si]) ||
+            !clearly_better(track_best[ti], track_second[ti])) {
+            continue;
+        }
+        DirectContinuity& item = g_direct_continuity[ti];
+        if (item.claimed) continue;
+        g_direct_samples[si].track_token = item.token;
+        item.claimed = true;
+        matched[si] = true;
+        g_trace_v36_direct_matches.fetch_add(1U, std::memory_order_relaxed);
+    }
+
+    for (std::size_t si = 0U; si < g_direct_samples.size(); ++si) {
+        DirectMatrixSample& sample = g_direct_samples[si];
+        if (!matched[si]) {
+            DirectContinuity item{};
+            item.key = sample.key;
+            item.token = NextSpecificPresentationToken();
+            item.position = sample.position;
+            item.position_valid = sample.position_valid;
+            item.last_frame = g_frame;
+            item.claimed = true;
+            sample.track_token = item.token;
+            g_direct_continuity.push_back(item);
+            g_trace_v36_direct_new.fetch_add(1U, std::memory_order_relaxed);
+        } else {
+            const auto found = std::find_if(
+                g_direct_continuity.begin(), g_direct_continuity.end(),
+                [&](const DirectContinuity& item) {
+                    return item.token == sample.track_token;
+                });
+            if (found != g_direct_continuity.end()) {
+                found->position = sample.position;
+                found->position_valid = sample.position_valid;
+                found->last_frame = g_frame;
+            }
+        }
+        if (sample.track_token == 0U || !ValidRange(sample.address, kMtxBytes)) continue;
+        rocket::presentation::MatrixBinding binding{};
+        binding.identity = MatrixIdentity(
+            sample.track_token, 0x50U + sample.kind * 8U + sample.role);
+        out.insert_or_assign(Physical(sample.address), BindingRecord{binding});
+    }
+}
+
+void FinalizeCameraMatrixBindings(MatrixMap& out) {
+    for (const CameraMatrixSample& sample : g_camera_samples) {
+        if (sample.identity == 0U || sample.identity == 0xFFFFFFFFU ||
+            !ValidRange(sample.address, kMtxBytes)) continue;
+        rocket::presentation::MatrixBinding binding{};
+        binding.identity = sample.identity;
+        out.insert_or_assign(Physical(sample.address), BindingRecord{binding});
+    }
+}
+
 void FinalizeSpecificMatrixBindings(MatrixMap& out) {
     std::erase_if(g_specific_continuity, [](const SpecificContinuity& item) {
         return g_frame > item.last_frame + kMaximumTrackAge;
@@ -683,8 +1174,22 @@ void FinalizeSpecificMatrixBindings(MatrixMap& out) {
 
     std::unordered_map<std::uint32_t, std::uint32_t> specific_claims;
     specific_claims.reserve(g_specific_samples.size());
+    std::unordered_map<std::uint64_t, std::size_t> instance_claims;
+    for (const auto& sample : g_specific_samples) ++instance_claims[sample.key];
 
     for (SpecificMatrixSample& sample : g_specific_samples) {
+        if (sample.address == 0U || !ValidRange(sample.address, kMtxBytes)) continue;
+        // Never turn draw order into object identity. Two separate matrices
+        // with the same semantic owner are ambiguous, even if one disappears
+        // next frame. Explicitly rejected ownership must override generic matching.
+        if (sample.force_snap || instance_claims[sample.key] != 1U) {
+            (sample.force_snap ? g_trace_v45_invalid : g_trace_v45_ambiguous)
+                .fetch_add(1U, std::memory_order_relaxed);
+            const auto physical = Physical(sample.address);
+            specific_claims[physical] = 0U;
+            out.insert_or_assign(physical, BindingRecord{IgnoredBinding()});
+            continue;
+        }
         SpecificContinuity* match = nullptr;
         bool ambiguous = false;
         for (SpecificContinuity& item : g_specific_continuity) {
@@ -712,6 +1217,9 @@ void FinalizeSpecificMatrixBindings(MatrixMap& out) {
             match->last_frame = g_frame;
             match->claimed = true;
             g_trace_specific_matches.fetch_add(1U, std::memory_order_relaxed);
+            if (sample.rigid_decompose) {
+                g_trace_v39_matches.fetch_add(1U, std::memory_order_relaxed);
+            }
         } else {
             SpecificContinuity item{};
             item.key = sample.key;
@@ -723,6 +1231,9 @@ void FinalizeSpecificMatrixBindings(MatrixMap& out) {
             sample.track_token = item.token;
             g_specific_continuity.push_back(item);
             g_trace_specific_new.fetch_add(1U, std::memory_order_relaxed);
+            if (sample.rigid_decompose) {
+                g_trace_v39_new.fetch_add(1U, std::memory_order_relaxed);
+            }
         }
 
         if (sample.track_token == 0U || sample.address == 0U ||
@@ -730,9 +1241,14 @@ void FinalizeSpecificMatrixBindings(MatrixMap& out) {
         const std::uint32_t physical = Physical(sample.address);
         rocket::presentation::MatrixBinding binding{};
         binding.identity = MatrixIdentity(sample.track_token, 0x40U);
-        binding.interpolate_vertices = false;
+        binding.interpolate_vertices = sample.collectible_billboard;
+        if (binding.interpolate_vertices) {
+            g_trace_v38_collectible_vertex.fetch_add(1U, std::memory_order_relaxed);
+        }
         binding.interpolate_texcoords = false;
         binding.interpolate_tiles = false;
+        binding.rigid_decompose = sample.rigid_decompose;
+        binding.interpolate_shape = sample.interpolate_shape;
 
         const auto prior = specific_claims.find(physical);
         if (prior == specific_claims.end()) {
@@ -744,6 +1260,9 @@ void FinalizeSpecificMatrixBindings(MatrixMap& out) {
             // specific physical-slot ownership conflict: never guess.
             out.insert_or_assign(physical, BindingRecord{IgnoredBinding()});
             g_trace_specific_conflicts.fetch_add(1U, std::memory_order_relaxed);
+            if (sample.rigid_decompose) {
+                g_trace_v39_conflicts.fetch_add(1U, std::memory_order_relaxed);
+            }
         }
     }
 }
@@ -1002,6 +1521,158 @@ void MaybeTraceSummary() {
         std::fputs(v35_line, v35_file);
         std::fclose(v35_file);
     }
+
+    const std::uint64_t v36_lifetimes =
+        g_trace_v36_object_lifetimes.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v36_ranges =
+        g_trace_v36_model_range_matrices.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v36_overlap =
+        g_trace_v36_model_range_specific_overlap.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v36_direct =
+        g_trace_v36_direct_samples.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v36_direct_match =
+        g_trace_v36_direct_matches.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v36_direct_new =
+        g_trace_v36_direct_new.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v36_camera =
+        g_trace_v36_camera_matrices.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v36_epochs =
+        g_trace_v36_camera_epochs.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v36_unowned_camera =
+        g_trace_v36_unowned_camera.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v36_unowned_arena =
+        g_trace_v36_unowned_arena.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v36_unowned_other =
+        g_trace_v36_unowned_other.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v36_unowned_total =
+        v36_unowned_camera + v36_unowned_arena + v36_unowned_other;
+    char v36_line[768]{};
+    std::snprintf(v36_line, sizeof(v36_line),
+        "[rocket-interpolation-v36] frame=%llu object-lifetime-new=%llu model-range=%llu range-v35-overlap=%llu direct-samples=%llu direct-match=%llu direct-new=%llu camera-matrices=%llu camera-epochs=%llu unowned-total=%llu unowned-camera=%llu unowned-arena=%llu unowned-other=%llu direct-continuity=%zu objects=%zu\n",
+        static_cast<unsigned long long>(g_frame),
+        static_cast<unsigned long long>(v36_lifetimes),
+        static_cast<unsigned long long>(v36_ranges),
+        static_cast<unsigned long long>(v36_overlap),
+        static_cast<unsigned long long>(v36_direct),
+        static_cast<unsigned long long>(v36_direct_match),
+        static_cast<unsigned long long>(v36_direct_new),
+        static_cast<unsigned long long>(v36_camera),
+        static_cast<unsigned long long>(v36_epochs),
+        static_cast<unsigned long long>(v36_unowned_total),
+        static_cast<unsigned long long>(v36_unowned_camera),
+        static_cast<unsigned long long>(v36_unowned_arena),
+        static_cast<unsigned long long>(v36_unowned_other),
+        g_direct_continuity.size(), g_object_lifetimes.size());
+    std::fputs(v36_line, stderr);
+    if (std::FILE* v36_file = std::fopen("Rocket-R-interpolation-coverage.log", "a")) {
+        std::fputs(v36_line, v36_file);
+        std::fclose(v36_file);
+    }
+
+    const std::uint64_t v37_collectible_rigid =
+        g_trace_v37_collectible_rigid.exchange(0U, std::memory_order_relaxed);
+    char v37_line[256]{};
+    std::snprintf(v37_line, sizeof(v37_line),
+        "[rocket-interpolation-v37] frame=%llu collectible-rigid-matrices=%llu\n",
+        static_cast<unsigned long long>(g_frame),
+        static_cast<unsigned long long>(v37_collectible_rigid));
+    std::fputs(v37_line, stderr);
+    if (std::FILE* v37_file = std::fopen("Rocket-R-interpolation-coverage.log", "a")) {
+        std::fputs(v37_line, v37_file);
+        std::fclose(v37_file);
+    }
+
+    // === ROCKET-R INTERPOLATION V38 COLLECTIBLE BILLBOARD VERTEX COVERAGE ===
+    const std::uint64_t v38_vertex =
+        g_trace_v38_collectible_vertex.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v38_m0 =
+        g_trace_v38_mode0.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v38_m1 =
+        g_trace_v38_mode1.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v38_m2 =
+        g_trace_v38_mode2.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v38_m3 =
+        g_trace_v38_mode3.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v38_m4 =
+        g_trace_v38_mode4.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v38_m5 =
+        g_trace_v38_mode5.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v38_other =
+        g_trace_v38_mode_other.exchange(0U, std::memory_order_relaxed);
+    char v38_line[384]{};
+    std::snprintf(v38_line, sizeof(v38_line),
+        "[rocket-interpolation-v38] frame=%llu collectible-vertex=%llu modes=0:%llu,1:%llu,2:%llu,3:%llu,4:%llu,5:%llu,other:%llu\n",
+        static_cast<unsigned long long>(g_frame),
+        static_cast<unsigned long long>(v38_vertex),
+        static_cast<unsigned long long>(v38_m0),
+        static_cast<unsigned long long>(v38_m1),
+        static_cast<unsigned long long>(v38_m2),
+        static_cast<unsigned long long>(v38_m3),
+        static_cast<unsigned long long>(v38_m4),
+        static_cast<unsigned long long>(v38_m5),
+        static_cast<unsigned long long>(v38_other));
+    std::fputs(v38_line, stderr);
+    if (std::FILE* v38_file = std::fopen("Rocket-R-interpolation-coverage.log", "a")) {
+        std::fputs(v38_line, v38_file);
+        std::fclose(v38_file);
+    }
+
+    const std::uint64_t v39_owner_pos =
+        g_trace_v39_owner_position.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v39_fallback =
+        g_trace_v39_matrix_fallback.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v39_matches =
+        g_trace_v39_matches.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v39_new =
+        g_trace_v39_new.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v39_conflicts =
+        g_trace_v39_conflicts.exchange(0U, std::memory_order_relaxed);
+    char v39_line[320]{};
+    std::snprintf(v39_line, sizeof(v39_line),
+        "[rocket-interpolation-v39] frame=%llu owner-pos=%llu matrix-fallback=%llu collectible-match=%llu collectible-new=%llu collectible-conflict=%llu\n",
+        static_cast<unsigned long long>(g_frame),
+        static_cast<unsigned long long>(v39_owner_pos),
+        static_cast<unsigned long long>(v39_fallback),
+        static_cast<unsigned long long>(v39_matches),
+        static_cast<unsigned long long>(v39_new),
+        static_cast<unsigned long long>(v39_conflicts));
+    std::fputs(v39_line, stderr);
+    if (std::FILE* v39_file =
+            std::fopen("Rocket-R-interpolation-coverage.log", "a")) {
+        std::fputs(v39_line, v39_file);
+        std::fclose(v39_file);
+    }
+
+
+    const std::uint64_t v42_token_draws =
+        g_trace_v42_token_draws.exchange(0U, std::memory_order_relaxed);
+    const std::uint64_t v42_token_matrices =
+        g_trace_v42_token_matrices.exchange(0U, std::memory_order_relaxed);
+    char v42_line[256]{};
+    std::snprintf(v42_line, sizeof(v42_line),
+        "[rocket-interpolation-v42] frame=%llu token-draws=%llu mode0-matrices=%llu\n",
+        static_cast<unsigned long long>(g_frame),
+        static_cast<unsigned long long>(v42_token_draws),
+        static_cast<unsigned long long>(v42_token_matrices));
+    std::fputs(v42_line, stderr);
+    if (std::FILE* v42_file =
+            std::fopen("Rocket-R-interpolation-coverage.log", "a")) {
+        std::fputs(v42_line, v42_file);
+        std::fclose(v42_file);
+    }
+    char v45_line[320]{};
+    std::snprintf(v45_line, sizeof(v45_line),
+        "[rocket-interpolation-v45] frame=%llu mode0=%llu scoped-submodels=%llu ambiguous-snaps=%llu invalid-rigid-snaps=%llu\n",
+        static_cast<unsigned long long>(g_frame),
+        static_cast<unsigned long long>(g_trace_v45_mode0.exchange(0U, std::memory_order_relaxed)),
+        static_cast<unsigned long long>(g_trace_v45_scoped_submodels.exchange(0U, std::memory_order_relaxed)),
+        static_cast<unsigned long long>(g_trace_v45_ambiguous.exchange(0U, std::memory_order_relaxed)),
+        static_cast<unsigned long long>(g_trace_v45_invalid.exchange(0U, std::memory_order_relaxed)));
+    std::fputs(v45_line, stderr);
+    if (std::FILE* file = std::fopen("Rocket-R-interpolation-coverage.log", "a")) {
+        std::fputs(v45_line, file);
+        std::fclose(file);
+    }
 }
 
 } // namespace
@@ -1031,6 +1702,8 @@ rocket::presentation::TaskIdentityScope::TaskIdentityScope(
     g_active_background_ranges.clear();
     g_active_context_dl_start = 0U;
     g_active_context_size = 0U;
+    g_active_camera_token = 0U;
+    g_active_task_address = 0U;
     g_active_task_fail_closed = true;
     const std::uint32_t physical = Physical(display_list_address);
 
@@ -1080,6 +1753,10 @@ rocket::presentation::TaskIdentityScope::TaskIdentityScope(
         }
         g_submitted.clear();
         g_specific_continuity.clear();
+        g_direct_continuity.clear();
+        g_object_lifetimes.clear();
+        g_camera_continuity = {};
+        g_recording_camera_token = 0U;
         g_tracks.clear();
         g_shared_matrix_tracks.clear();
         return;
@@ -1089,6 +1766,8 @@ rocket::presentation::TaskIdentityScope::TaskIdentityScope(
     g_active_background_ranges = std::move(frame.background_ranges);
     g_active_context_dl_start = frame.context_dl_start;
     g_active_context_size = frame.context_size;
+    g_active_camera_token = frame.camera_token;
+    g_active_task_address = frame.task_address;
     g_submitted.erase(g_submitted.begin());
     g_trace_task_matches.fetch_add(1U, std::memory_order_relaxed);
 }
@@ -1098,6 +1777,8 @@ rocket::presentation::TaskIdentityScope::~TaskIdentityScope() {
     g_active_background_ranges.clear();
     g_active_context_dl_start = 0U;
     g_active_context_size = 0U;
+    g_active_camera_token = 0U;
+    g_active_task_address = 0U;
     g_active_task_fail_closed = false;
 }
 
@@ -1122,6 +1803,22 @@ bool rocket::presentation::matrix_binding(
     // owner of this matrix, do not let RT64 guess from draw order/material
     // similarity. Present the newest authored transform for this matrix.
     if (g_active_task_fail_closed) {
+        const std::uint32_t physical = physical_matrix_address & kRdramMask;
+        const bool camera_matrix = g_active_task_address != 0U &&
+            (physical == g_active_task_address + kGfxTaskPerspectiveMtxOffset ||
+             physical == g_active_task_address + kGfxTaskViewMtxOffset ||
+             physical == g_active_task_address + kGfxTaskIdentityModelMtxOffset);
+        const std::uint64_t arena_begin = g_active_context_dl_start;
+        const std::uint64_t arena_end = arena_begin +
+            static_cast<std::uint64_t>(g_active_context_size);
+        if (camera_matrix) {
+            g_trace_v36_unowned_camera.fetch_add(1U, std::memory_order_relaxed);
+        } else if (g_active_context_size != 0U && physical >= arena_begin &&
+                   static_cast<std::uint64_t>(physical) < arena_end) {
+            g_trace_v36_unowned_arena.fetch_add(1U, std::memory_order_relaxed);
+        } else {
+            g_trace_v36_unowned_other.fetch_add(1U, std::memory_order_relaxed);
+        }
         g_trace_unowned_matrix_snaps.fetch_add(1U, std::memory_order_relaxed);
         binding = IgnoredBinding();
         g_coverage_snapped_bindings.fetch_add(1U, std::memory_order_relaxed);
@@ -1142,7 +1839,8 @@ extern "C" bool rocket_presentation_matrix_binding(
     out_binding->interpolate_vertices = binding.interpolate_vertices ? 1U : 0U;
     out_binding->interpolate_texcoords = binding.interpolate_texcoords ? 1U : 0U;
     out_binding->interpolate_tiles = binding.interpolate_tiles ? 1U : 0U;
-    out_binding->reserved = 0U;
+    // reserved bit 0 is v37 rigid-decomposition intent for exact collectibles.
+    out_binding->reserved = (binding.rigid_decompose ? 1U : 0U) | (binding.interpolate_shape ? 2U : 0U);
     return true;
 }
 
@@ -1164,6 +1862,10 @@ extern "C" bool rocket_presentation_background_display_list(
         (static_cast<std::uint64_t>(command.range_index) << 32U) ^
         static_cast<std::uint64_t>(command.offset));
     key = Mix64(key ^ (static_cast<std::uint64_t>(target_key) << 1U));
+    if (g_active_camera_token != 0U) {
+        key = Mix64(key ^
+            (static_cast<std::uint64_t>(g_active_camera_token) << 24U));
+    }
     const std::uint32_t identity = NormalizeIdentity(key);
     *out_identity = identity;
     if (identity != 0U && identity != 0xFFFFFFFFU) {
@@ -1177,12 +1879,25 @@ extern "C" void rocket_presentation_frame_begin(std::uint8_t*,
                                                   recomp_context*) {
     std::scoped_lock lock(g_mutex);
     g_specific_samples.clear();
-    g_specific_key_ordinals.clear();
     g_submodel_matrix_capture = {};
+    g_model_range_samples.clear();
+    g_model_range_depth = 0U;
+    g_model_range_overflow_depth = 0U;
+    g_direct_samples.clear();
+    g_pending_callsite = {};
+    g_entered_callsite = {};
+    g_shared_mode0_v43 = {};
+    g_tinker_token_draw_owner = 0U;
+    g_tinker_token_draw_position_valid = false;
+    for (DirectCapture& capture : g_direct_captures) capture = {};
+    g_camera_samples.clear();
+    g_recording_camera_token = 0U;
     g_background_ranges.clear();
     g_background_capture_active = false;
     g_background_capture_begin = 0U;
     ++g_frame;
+    g_sky_capture = {};
+    g_trace_wheel_matrix = 0;
     g_entries.clear();
     g_key_ordinals.clear();
     MaybeTraceSummary();
@@ -1213,6 +1928,286 @@ extern "C" void rocket_presentation_background_end(std::uint8_t* rdram,
     g_background_ranges.push_back(BackgroundCommandRange{begin, head});
 }
 
+extern "C" void rocket_presentation_sky_rows(std::uint8_t* rdram, recomp_context* context) {
+    // func_8008AEA0, before 0x8008B034: s3 is the sky texture header,
+    // t1 is the clamped load row and f0 is the unrounded camera displacement.
+    const auto texture = static_cast<std::uint32_t>(context->r19);
+    if (!ValidRange(texture, 0x18U)) return;
+    const int height = ReadU16(rdram, texture + 2U);
+    const int loaded = static_cast<int>(context->r20);
+    if (height < 241 || loaded < 240 || loaded > 4096) return;
+    const auto data = ReadU32(rdram, texture + 0x10U);
+    const bool continuous = g_previous_sky.valid && g_previous_sky.frame + 1U == g_frame &&
+        g_previous_sky.texture == data && g_previous_sky.camera == g_recording_camera_token;
+    // The game's camera field has already been restored after projection setup.
+    // Project pitch using the rendered FOV, so the horizon follows the world.
+    const auto camera = static_cast<std::uint32_t>(context->r16);
+    float displacement = context->f0.fl;
+    if (ValidRange(camera, 0xA4U)) {
+        const float authored_fov = std::bit_cast<float>(ReadU32(rdram, camera + 0xA0U));
+        const float rendered_fov = rocket::graphics::effective_fov_radians(authored_fov);
+        displacement = rocket::presentation::sky_pitch_displacement(displacement, authored_fov, rendered_fov);
+    }
+    const float requested = std::clamp(float((height - 240) / 2) - displacement, 0.0F, float(height - 241));
+    g_sky_capture.rows = rocket::presentation::sky_rows(static_cast<int>(requested),
+        requested, g_previous_sky.rows.current,
+        height, loaded, continuous);
+    if (TraceEnabled() && continuous && std::abs(requested - g_previous_sky.rows.current) > 8.0F) {
+        std::fprintf(stderr, "[rocket-sky-motion] row=%.2f previous=%.2f load=%d height=%d rows=%d reset=%d\n",
+            requested, g_previous_sky.rows.current, g_sky_capture.rows.load, height, loaded,
+            int(g_sky_capture.rows.previous == g_sky_capture.rows.current));
+    }
+    g_sky_capture.texture = data;
+    g_sky_capture.camera = g_recording_camera_token;
+    g_sky_capture.frame = g_frame;
+    g_sky_capture.valid = true;
+    // Keep the visible rows unchanged while making room for interpolation taps.
+    context->r9 = g_sky_capture.rows.load;
+}
+
+extern "C" void rocket_presentation_sky_uv(std::uint8_t*, recomp_context* context) {
+    if (g_sky_capture.valid) {
+        context->r2 += (g_sky_capture.rows.origin - g_sky_capture.rows.load) * 32;
+    }
+}
+
+extern "C" void rocket_presentation_sky_end(std::uint8_t* rdram, recomp_context* context) {
+    rocket_presentation_background_end(rdram, context);
+    if (!g_sky_capture.valid || g_background_ranges.empty()) return;
+    auto& range = g_background_ranges.back();
+    range.scrolling_rectangle = true;
+    range.current_row_offset = g_sky_capture.rows.current - g_sky_capture.rows.origin;
+    range.previous_row_offset = g_sky_capture.rows.previous - g_sky_capture.rows.origin;
+    g_previous_sky = g_sky_capture;
+}
+
+extern "C" bool rocket_presentation_sky_rectangle(std::uint32_t command, float* current, float* previous) {
+    BackgroundCommandLocation location{};
+    if (!current || !previous || !g_active_task_fail_closed || !BackgroundRangeLocation(command, location)) return false;
+    const auto& range = g_active_background_ranges[location.range_index];
+    if (!range.scrolling_rectangle) return false;
+    *current = range.current_row_offset;
+    *previous = range.previous_row_offset;
+    g_trace_background_identities.fetch_add(1U, std::memory_order_relaxed);
+    return true;
+}
+
+extern "C" void rocket_presentation_callsite(
+    recomp_context* context, std::uint32_t target, std::uint32_t address) {
+    g_pending_callsite = {context, target, address};
+}
+
+extern "C" void rocket_presentation_enter_call(
+    recomp_context* context, std::uint32_t target) {
+    // Consume once, including on mismatch. An uninstrumented/indirect call
+    // must never borrow a previous call's provenance.
+    const CallsiteCapture pending = std::exchange(g_pending_callsite, {});
+    g_entered_callsite = {};
+    if (context != nullptr && pending.context == context && pending.target == target) {
+        g_entered_callsite = pending;
+    }
+}
+
+extern "C" void rocket_presentation_model_range_begin(
+    std::uint8_t* rdram, recomp_context* context) {
+    if (g_model_range_overflow_depth != 0U) {
+        ++g_model_range_overflow_depth;
+        return;
+    }
+    if (g_model_range_depth >= 16U) {
+        ++g_model_range_overflow_depth;
+        return;
+    }
+    ModelRangeCapture& capture = g_model_range_captures[g_model_range_depth++];
+    capture = {};
+    if (rdram == nullptr || context == nullptr ||
+        !ValidRange(kGfxContextMtxHeadAddress, 4U)) return;
+    const std::uint32_t head = ReadU32(rdram, kGfxContextMtxHeadAddress);
+    if (!ValidRange(head - kMtxBytes, kMtxBytes)) return;
+    capture.object = static_cast<std::uint32_t>(context->r4);
+    if (!ValidRange(capture.object, kGameObjectSubmodelCountOffset + 4U)) return;
+    capture.start_head = head;
+    capture.caller = EntryCallsite(context, 0x8001ECECU);
+    if (capture.caller == 0U) return;
+    {
+        std::scoped_lock lock(g_mutex);
+        capture.specific_begin = g_specific_samples.size();
+    }
+    capture.valid = true;
+}
+
+extern "C" void rocket_presentation_model_range_end(
+    std::uint8_t* rdram, recomp_context* context) {
+    if (g_model_range_overflow_depth != 0U) {
+        --g_model_range_overflow_depth;
+        return;
+    }
+    if (g_model_range_depth == 0U) return;
+    const ModelRangeCapture capture =
+        g_model_range_captures[--g_model_range_depth];
+    if (!capture.valid || rdram == nullptr || context == nullptr) return;
+
+    const std::uint32_t current = ReadU32(rdram, kGfxContextMtxHeadAddress);
+    if (current > capture.start_head) return;
+    const std::uint32_t bytes = capture.start_head - current;
+    if ((bytes % kMtxBytes) != 0U) return;
+    const std::size_t matrix_count = bytes / kMtxBytes;
+    if (matrix_count == 0U || matrix_count > kMaximumModelRangeMatrices) return;
+
+    // The return hook runs after s3/r19 has been restored to its caller's
+    // value. Use the argument saved at entry and still require an exact
+    // Submodel capture from this invocation/range to prove ownership.
+    const std::uint32_t object = capture.object;
+    if (!ValidRange(object, kGameObjectSubmodelCountOffset + 4U)) return;
+    const std::uint32_t submodels = ReadU32(rdram, object + kGameObjectSubmodelsOffset);
+    const std::uint32_t count = ReadU32(rdram, object + kGameObjectSubmodelCountOffset);
+    if (count == 0U || count > 512U ||
+        !ValidRange(submodels, count * kSubmodelBytes)) return;
+
+    std::scoped_lock lock(g_mutex);
+    const std::uint32_t owner_physical = Physical(object);
+    bool owner_proven = false;
+    std::uint64_t proof_key = 0U;
+    const std::size_t first = std::min(
+        capture.specific_begin, g_specific_samples.size());
+    const std::uint32_t range_begin = Physical(current);
+    const std::uint32_t range_end = Physical(capture.start_head);
+    for (std::size_t index = first; index < g_specific_samples.size(); ++index) {
+        const SpecificMatrixSample& exact = g_specific_samples[index];
+        const std::uint32_t physical = Physical(exact.address);
+        if (exact.owner == owner_physical && physical >= range_begin &&
+            physical < range_end) {
+            owner_proven = true;
+            proof_key = exact.key;
+            break;
+        }
+    }
+    if (!owner_proven || proof_key == 0U) return;
+
+    const std::uint32_t lifetime = AcquireObjectLifetimeTokenLocked(rdram, object);
+    if (lifetime == 0U) return;
+    std::uint64_t invocation_key = Mix64(0x4D4F44454C524E47ULL ^
+        static_cast<std::uint64_t>(lifetime));
+    invocation_key = Mix64(invocation_key ^
+        (static_cast<std::uint64_t>(capture.caller) << 1U));
+    // Reuse v35's exact proved Submodel key as the invocation discriminator.
+    // This is stronger than a new per-frame ordinal and avoids adding another
+    // independent draw-order assumption to the broad object range.
+    invocation_key = Mix64(invocation_key ^ (proof_key << 1U));
+
+    for (std::size_t ordinal = 0U; ordinal < matrix_count; ++ordinal) {
+        const std::uint32_t address = capture.start_head -
+            static_cast<std::uint32_t>((ordinal + 1U) * kMtxBytes);
+        if (!ValidRange(address, kMtxBytes)) continue;
+        const std::uint64_t identity_key = Mix64(invocation_key ^
+            (static_cast<std::uint64_t>(ordinal) << 56U));
+        const std::uint32_t identity = NormalizeIdentity(identity_key);
+        g_model_range_samples.push_back({address, identity});
+        g_trace_v36_model_range_matrices.fetch_add(1U, std::memory_order_relaxed);
+    }
+}
+
+extern "C" void rocket_presentation_direct_begin(
+    std::uint8_t* rdram, recomp_context* context, std::uint32_t kind) {
+    if (kind == 0U || kind >= 3U) return;
+    g_direct_captures[kind] = {};
+    if (rdram == nullptr || context == nullptr ||
+        !ValidRange(kGfxContextMtxHeadAddress, 4U)) return;
+    const std::uint32_t head = ReadU32(rdram, kGfxContextMtxHeadAddress);
+    if (!ValidRange(head - kMtxBytes, kMtxBytes)) return;
+    DirectCapture capture{};
+    capture.start_head = head;
+    capture.caller = EntryCallsite(context, kind == 1U ? 0x800476CCU : 0x8004A4F0U);
+    if (capture.caller == 0U) return;
+    // func_8004A4F0's r4 is a durable effect/renderer owner. The translation
+    // helper's r4 often points at transient stack data, so do not key on it.
+    const std::uint32_t owner_candidate = static_cast<std::uint32_t>(context->r4);
+    capture.owner = kind == 2U && ValidRange(owner_candidate, 4U)
+        ? Physical(owner_candidate) : 0U;
+    capture.valid = true;
+    g_direct_captures[kind] = capture;
+}
+
+extern "C" void rocket_presentation_direct_end(
+    std::uint8_t* rdram, recomp_context* context, std::uint32_t kind) {
+    if (kind == 0U || kind >= 3U) return;
+    const DirectCapture capture = std::exchange(
+        g_direct_captures[kind], DirectCapture{});
+    if (!capture.valid || rdram == nullptr || context == nullptr) return;
+    const std::uint32_t current = ReadU32(rdram, kGfxContextMtxHeadAddress);
+    if (current > capture.start_head) return;
+    const std::uint32_t bytes = capture.start_head - current;
+    if ((bytes % kMtxBytes) != 0U) return;
+    const std::size_t matrix_count = bytes / kMtxBytes;
+    if (matrix_count == 0U || matrix_count > kMaximumDirectRangeMatrices) return;
+
+    std::scoped_lock lock(g_mutex);
+    std::uint64_t base = Mix64(0x4449524543544D58ULL ^
+        static_cast<std::uint64_t>(kind));
+    base = Mix64(base ^ (static_cast<std::uint64_t>(capture.caller) << 8U));
+    base = Mix64(base ^ (static_cast<std::uint64_t>(capture.owner) << 24U));
+
+    for (std::size_t ordinal = 0; ordinal < matrix_count; ++ordinal) {
+        const std::uint32_t address = capture.start_head -
+            static_cast<std::uint32_t>((ordinal + 1U) * kMtxBytes);
+        if (!ValidRange(address, kMtxBytes)) continue;
+        DirectMatrixSample sample{};
+        sample.key = Mix64(base ^ (static_cast<std::uint64_t>(ordinal) << 56U));
+        sample.address = address;
+        sample.kind = kind;
+        sample.role = static_cast<std::uint32_t>(ordinal);
+        sample.position_valid = ReadMtxTranslation(rdram, address, sample.position);
+        g_direct_samples.push_back(sample);
+        g_trace_v36_direct_samples.fetch_add(1U, std::memory_order_relaxed);
+    }
+}
+
+extern "C" void rocket_presentation_camera_source(
+    std::uint8_t*, recomp_context* context, std::uint32_t discontinuity) {
+    if (context == nullptr) return;
+    const std::uint32_t camera = static_cast<std::uint32_t>(context->r4);
+    std::scoped_lock lock(g_mutex);
+    g_recording_camera_token = 0U;
+    if (!ValidRange(camera, 0xB0U)) return;
+
+    bool new_epoch = g_camera_continuity.token == 0U ||
+        g_camera_continuity.camera != Physical(camera);
+    if (g_camera_continuity.last_frame != g_frame) {
+        if (g_camera_continuity.last_frame + 1U != g_frame || discontinuity != 0U) {
+            new_epoch = true;
+        }
+    }
+    if (new_epoch) {
+        g_camera_continuity.token = NextSpecificPresentationToken();
+        g_trace_v36_camera_epochs.fetch_add(1U, std::memory_order_relaxed);
+    }
+    g_camera_continuity.camera = Physical(camera);
+    g_camera_continuity.last_frame = g_frame;
+    g_recording_camera_token = g_camera_continuity.token;
+}
+
+extern "C" void rocket_presentation_camera_matrices(
+    std::uint8_t* rdram, recomp_context*) {
+    if (rdram == nullptr) return;
+    std::scoped_lock lock(g_mutex);
+    if (g_recording_camera_token == 0U) return;
+    const std::uint32_t task = ReadCurrentGfxTask(rdram);
+    if (task == 0U) return;
+    const std::uint32_t offsets[] = {
+        kGfxTaskPerspectiveMtxOffset,
+        kGfxTaskViewMtxOffset,
+        kGfxTaskIdentityModelMtxOffset,
+    };
+    for (std::uint32_t role = 0U; role < 3U; ++role) {
+        const std::uint32_t address = task + offsets[role];
+        if (!ValidRange(address, kMtxBytes)) continue;
+        const std::uint32_t identity = MatrixIdentity(
+            g_recording_camera_token, 0x70U + role);
+        g_camera_samples.push_back({address, identity});
+        g_trace_v36_camera_matrices.fetch_add(1U, std::memory_order_relaxed);
+    }
+}
+
 extern "C" void rocket_presentation_submodel_matrix_begin(
     std::uint8_t* rdram, recomp_context* context) {
     g_submodel_matrix_capture = {};
@@ -1237,8 +2232,10 @@ extern "C" void rocket_presentation_submodel_matrix_begin(
     const std::uint32_t object_class =
         ReadU32(rdram, object + kGameObjectClassOffset);
     const std::uint32_t submodel_gfx = ReadU32(rdram, submodel);
+    const bool scoped_instance = g_shared_mode0_v43.active &&
+        g_shared_mode0_v43.model == Physical(object);
     std::uint64_t base_key = Mix64(0x5355424D41545258ULL ^
-        static_cast<std::uint64_t>(Physical(object)));
+        (scoped_instance ? g_shared_mode0_v43.instance_key : Physical(object)));
     base_key = Mix64(base_key ^ (static_cast<std::uint64_t>(index) << 32U));
     base_key = Mix64(base_key ^
         (static_cast<std::uint64_t>(object_class) << 1U));
@@ -1246,11 +2243,36 @@ extern "C" void rocket_presentation_submodel_matrix_begin(
         (static_cast<std::uint64_t>(submodel_gfx) << 17U));
 
     std::scoped_lock lock(g_mutex);
-    const std::uint32_t occurrence = g_specific_key_ordinals[base_key]++;
-    std::uint64_t key = Mix64(base_key ^
-        (static_cast<std::uint64_t>(occurrence) << 48U));
+    std::uint64_t key = base_key;
     if (key == 0U) key = 1U;
-    g_submodel_matrix_capture = {key, true};
+    const bool collectible = IsRigidCollectibleObject(rdram, object);
+    const std::uint8_t submodel_mode = static_cast<std::uint8_t>(
+        MEM_B(0, RdramAddress(submodel + kSubmodelPresentationModeOffset)));
+    const bool collectible_billboard = collectible &&
+        submodel_mode >= kCameraRelativeSubmodelModeMin &&
+        submodel_mode <= kCameraRelativeSubmodelModeMax;
+
+    if (collectible) {
+        switch (submodel_mode) {
+            case 0U: g_trace_v38_mode0.fetch_add(1U, std::memory_order_relaxed); break;
+            case 1U: g_trace_v38_mode1.fetch_add(1U, std::memory_order_relaxed); break;
+            case 2U: g_trace_v38_mode2.fetch_add(1U, std::memory_order_relaxed); break;
+            case 3U: g_trace_v38_mode3.fetch_add(1U, std::memory_order_relaxed); break;
+            case 4U: g_trace_v38_mode4.fetch_add(1U, std::memory_order_relaxed); break;
+            case 5U: g_trace_v38_mode5.fetch_add(1U, std::memory_order_relaxed); break;
+            default: g_trace_v38_mode_other.fetch_add(1U, std::memory_order_relaxed); break;
+        }
+    }
+
+    g_submodel_matrix_capture = {
+        key, Physical(object), collectible, collectible_billboard,
+        submodel_mode, true};
+    if (scoped_instance) {
+        g_submodel_matrix_capture.projected_shadow = g_shared_mode0_v43.projected_shadow;
+        g_submodel_matrix_capture.instance_position = g_shared_mode0_v43.position;
+        g_submodel_matrix_capture.instance_position_valid = g_shared_mode0_v43.position_valid;
+        g_trace_v45_scoped_submodels.fetch_add(1U, std::memory_order_relaxed);
+    }
 }
 
 extern "C" void rocket_presentation_submodel_matrix_end(
@@ -1264,12 +2286,267 @@ extern "C" void rocket_presentation_submodel_matrix_end(
     SpecificMatrixSample sample{};
     sample.key = capture.key;
     sample.address = matrix;
-    sample.position_valid = ReadMtxTranslation(rdram, matrix, sample.position);
+    sample.owner = capture.owner;
+    sample.rigid_decompose = !capture.projected_shadow && SupportsRigidInterpolation(rdram, matrix);
+    // A surface projection is a valid interpolated matrix, even though it
+    // cannot be decomposed as a rigid object. Keep its semantic identity.
+    sample.collectible_billboard = capture.collectible_billboard;
+    sample.submodel_mode = capture.submodel_mode;
+    // === ROCKET-R INTERPOLATION V39 COLLECTIBLE OWNER-POSITION CONTINUITY ===
+    // Collectible matrices can be camera-relative, so their rendered matrix
+    // translation is not a safe lifetime/continuity metric during camera pans.
+    // Track the real GameObject world position instead. The matrix itself is
+    // still the transform RT64 interpolates; only the identity continuity
+    // guard changes.
+    if (capture.instance_position_valid) {
+        sample.position = capture.instance_position;
+        sample.position_valid = true;
+    } else if (sample.rigid_decompose && capture.owner != 0U) {
+        const std::uint32_t owner_address = 0x80000000U | capture.owner;
+        sample.position_valid = ReadGuestVec3(
+            rdram, owner_address + kGameObjectPositionOffset, sample.position);
+        if (sample.position_valid) {
+            g_trace_v39_owner_position.fetch_add(1U, std::memory_order_relaxed);
+        } else {
+            sample.position_valid = ReadMtxTranslation(rdram, matrix, sample.position);
+            g_trace_v39_matrix_fallback.fetch_add(1U, std::memory_order_relaxed);
+        }
+    } else {
+        sample.position_valid = ReadMtxTranslation(rdram, matrix, sample.position);
+    }
 
     std::scoped_lock lock(g_mutex);
     g_specific_samples.push_back(sample);
     g_trace_specific_samples.fetch_add(1U, std::memory_order_relaxed);
+    if (sample.rigid_decompose) {
+        g_trace_v37_collectible_rigid.fetch_add(1U, std::memory_order_relaxed);
+    }
 }
+
+extern "C" void rocket_presentation_tinker_token_draw_begin(
+    std::uint8_t* rdram, recomp_context* context) {
+    g_tinker_token_draw_owner = 0U;
+    g_tinker_token_draw_position = {};
+    g_tinker_token_draw_position_valid = false;
+    if (rdram == nullptr || context == nullptr) return;
+
+    // At 0x8006BE94 func_8006BDF0 still holds the original token instance
+    // in s0/r16. Its world position is the vec3 at +0x30.
+    const std::uint32_t token = static_cast<std::uint32_t>(context->r16);
+    if (!ValidRange(token, 0x3CU)) return;
+
+    g_tinker_token_draw_owner = Physical(token);
+    g_tinker_token_draw_position_valid =
+        ReadGuestVec3(rdram, token + 0x30U, g_tinker_token_draw_position);
+    g_trace_v42_token_draws.fetch_add(1U, std::memory_order_relaxed);
+}
+
+extern "C" void rocket_presentation_tinker_token_draw_end(
+    std::uint8_t*, recomp_context*) {
+    g_tinker_token_draw_owner = 0U;
+    g_tinker_token_draw_position = {};
+    g_tinker_token_draw_position_valid = false;
+}
+
+extern "C" void rocket_presentation_shared_mode0_begin(
+    std::uint8_t* rdram, recomp_context* context) {
+    g_shared_mode0_v43 = {};
+    if (rdram == nullptr || context == nullptr) return;
+
+    const std::uint32_t model =
+        static_cast<std::uint32_t>(context->r4);
+    if (!ValidRange(model, 0x78U)) return;
+
+    std::uint32_t origin =
+        static_cast<std::uint32_t>(context->r7);
+    if (origin == 0U) {
+        // Retail func_8001ECEC falls back to model + 0x6C when a3 is null.
+        origin = model + 0x6CU;
+    }
+    if (!ValidRange(origin, 12U)) return;
+
+    g_shared_mode0_v43.model = Physical(model);
+    g_shared_mode0_v43.origin = Physical(origin);
+    g_shared_mode0_v43.caller =
+        EntryCallsite(context, 0x8001ECECU);
+    if (g_shared_mode0_v43.caller == 0U) return;
+    // At this checked draw s3 names Rocket and +0x268 selects his rolling wheel.
+    // The secondary matrix carries angle +0x7D8, advanced by speed/radius in
+    // func_8005CF48. Its squash/rotation pair can form a non-orthogonal basis.
+    const auto player = static_cast<std::uint32_t>(context->r19);
+    g_shared_mode0_v43.player_wheel = g_shared_mode0_v43.caller == 0x800589ECU &&
+        ValidRange(player, 0x26CU) && ReadU32(rdram, player + 0x268U) == model;
+    g_shared_mode0_v43.stack =
+        Physical(static_cast<std::uint32_t>(context->r29));
+
+    // Prefer a persistent render-origin pointer as the instance owner.
+    // Caller-stack temporary vectors are not persistent, so use the model
+    // object for those. Tinker Tokens have a stronger explicit owner and
+    // override this inside the matrix hook.
+    const std::uint32_t origin_phys = Physical(origin);
+    const std::uint32_t stack_phys = g_shared_mode0_v43.stack;
+    const std::uint32_t distance = origin_phys > stack_phys
+        ? origin_phys - stack_phys
+        : stack_phys - origin_phys;
+    const bool stack_temporary = distance < 0x00010000U;
+    g_shared_mode0_v43.owner_hint =
+        stack_temporary ? Physical(model) : origin_phys;
+
+    // Shadow models are shared assets and their projected origins are often
+    // caller-stack scratch. Capture the actual instance before the callee
+    // replaces these saved registers (verified retail JAL provenance only).
+    std::uint32_t shadow_origin = 0U;
+    g_shared_mode0_v43.projected_shadow = true;
+    switch (g_shared_mode0_v43.caller) {
+        case 0x8007C298U: // cached shadow result passed in a3
+            shadow_origin = origin;
+            break;
+        case 0x8007C3CCU:
+        case 0x8007C504U: // s1 = owning GameObject + 0x6C
+            shadow_origin = static_cast<std::uint32_t>(context->r17);
+            break;
+        case 0x8007C654U: // s2 = original world-position argument
+            shadow_origin = static_cast<std::uint32_t>(context->r18);
+            break;
+        case 0x8007CA04U: // s3 = owning GameObject
+            shadow_origin = static_cast<std::uint32_t>(context->r19) + 0x6CU;
+            break;
+        default: g_shared_mode0_v43.projected_shadow = false; break;
+    }
+    if (g_shared_mode0_v43.projected_shadow) {
+        if (!ValidRange(shadow_origin, 12U)) return;
+        g_shared_mode0_v43.owner_hint = Physical(shadow_origin);
+    }
+
+    // Both shared mode-0 and camera-relative Submodels belong to the DRAW
+    // INSTANCE. Tokens share model/submodel assets, so their model pointer
+    // plus an occurrence number cannot identify the token being rendered.
+    const std::uint32_t owner = g_tinker_token_draw_owner != 0U
+        ? g_tinker_token_draw_owner : g_shared_mode0_v43.owner_hint;
+    auto key = Mix64(static_cast<std::uint64_t>(owner));
+    key = Mix64(key ^ (static_cast<std::uint64_t>(Physical(model)) << 1U));
+    key = Mix64(key ^ (static_cast<std::uint64_t>(
+        g_shared_mode0_v43.projected_shadow || stack_temporary ? 0U : origin_phys) << 21U));
+    g_shared_mode0_v43.instance_key = Mix64(key ^
+        (static_cast<std::uint64_t>(g_shared_mode0_v43.caller) << 37U));
+
+    g_shared_mode0_v43.position_valid =
+        ReadGuestVec3(rdram, shadow_origin != 0U ? shadow_origin : origin, g_shared_mode0_v43.position);
+    if (g_tinker_token_draw_position_valid) {
+        g_shared_mode0_v43.position = g_tinker_token_draw_position;
+        g_shared_mode0_v43.position_valid = true;
+    }
+    g_shared_mode0_v43.active = true;
+    std::scoped_lock lock(g_mutex);
+    g_shared_mode0_v43.specific_begin = g_specific_samples.size();
+}
+
+extern "C" void rocket_presentation_shared_mode0_end(
+    std::uint8_t*, recomp_context*) {
+    g_shared_mode0_v43 = {};
+}
+
+
+extern "C" void rocket_presentation_tinker_token_matrix(
+    std::uint8_t* rdram, recomp_context* context) {
+    if (rdram == nullptr || context == nullptr ||
+        !g_shared_mode0_v43.active) {
+        return;
+    }
+
+    const std::uint32_t object =
+        static_cast<std::uint32_t>(context->r19);
+    const std::uint32_t submodel =
+        static_cast<std::uint32_t>(context->r16);
+    const std::uint32_t matrix =
+        static_cast<std::uint32_t>(context->r17);
+
+    if (!ValidRange(object, kGameObjectSubmodelCountOffset + 4U) ||
+        !ValidRange(submodel, kSubmodelBytes) ||
+        !ValidRange(matrix, kMtxBytes)) {
+        return;
+    }
+
+    // Ensure this is still the func_8001ECEC invocation whose arguments were
+    // captured at entry.
+    if (Physical(object) != g_shared_mode0_v43.model) return;
+
+    const std::uint8_t mode = static_cast<std::uint8_t>(
+        MEM_B(0, RdramAddress(submodel + 0x20U)));
+    if (mode != 0U) {
+        return; // v35 func_8001EA18 remains authoritative for nonzero modes.
+    }
+
+    const std::uint32_t physical_matrix = Physical(matrix);
+    if (g_shared_mode0_v43.claimed_matrix != 0U) {
+        // This is the critical v43 fix. Retail func_8001ECEC reuses s4 for
+        // every later mode-0 Submodel. Never submit another semantic identity
+        // for that same physical slot, otherwise FinalizeSpecificMatrixBindings
+        // deliberately turns it into IgnoredBinding().
+        return;
+    }
+    g_shared_mode0_v43.claimed_matrix = physical_matrix;
+
+    const bool token_draw = g_tinker_token_draw_owner != 0U;
+    const std::uint32_t owner = token_draw
+        ? g_tinker_token_draw_owner
+        : g_shared_mode0_v43.owner_hint;
+    if (owner == 0U) return;
+
+    // Identity belongs to the shared DIRECT DRAW MATRIX, not the current
+    // Submodel. This removes the self-conflict that kept tokens rejected and
+    // extends the same proven mode-0 family to other direct model draws such
+    // as the remaining machine-part path.
+    std::uint64_t base_key = Mix64(
+        (token_draw ? 0x54494E4B45524D30ULL : 0x4D4F444530445241ULL) ^
+        g_shared_mode0_v43.instance_key);
+
+    std::scoped_lock lock(g_mutex);
+    std::uint64_t key = base_key;
+    if (key == 0U) key = 1U;
+
+    SpecificMatrixSample sample{};
+    sample.key = key;
+    sample.address = matrix;
+    sample.owner = owner;
+    // func_800577E8 also builds flat/sheared shadow projections. Those keep
+    // component interpolation; only an orthogonal basis uses rigid rotation.
+    sample.rigid_decompose = !g_shared_mode0_v43.projected_shadow &&
+        SupportsRigidInterpolation(rdram, matrix);
+    if (g_shared_mode0_v43.player_wheel && SupportsWheelDecomposition(rdram, matrix)) {
+        sample.rigid_decompose = true;
+        sample.interpolate_shape = true;
+    }
+    sample.collectible_billboard = false;
+    sample.submodel_mode = 0U;
+
+    if (token_draw && g_tinker_token_draw_position_valid) {
+        sample.position = g_tinker_token_draw_position;
+        sample.position_valid = true;
+    } else if (g_shared_mode0_v43.position_valid) {
+        sample.position = g_shared_mode0_v43.position;
+        sample.position_valid = true;
+    } else {
+        sample.position_valid =
+            ReadMtxTranslation(rdram, matrix, sample.position);
+    }
+
+    g_specific_samples.push_back(sample);
+    g_trace_specific_samples.fetch_add(1U, std::memory_order_relaxed);
+    if (token_draw) {
+        // Preserve v42's existing trace counter/verification behavior.
+        g_trace_v42_token_matrices.fetch_add(1U, std::memory_order_relaxed);
+    }
+    g_trace_v45_mode0.fetch_add(1U, std::memory_order_relaxed);
+}
+
+
+
+
+
+
+
+
 
 extern "C" void rocket_presentation_render_entry(std::uint8_t* rdram,
                                                    recomp_context* context) {
@@ -1278,7 +2555,8 @@ extern "C" void rocket_presentation_render_entry(std::uint8_t* rdram,
     entry.gfx = static_cast<std::uint32_t>(context->r4);
     entry.mtx1 = static_cast<std::uint32_t>(context->r5);
     entry.mtx2 = static_cast<std::uint32_t>(context->r6);
-    entry.callsite = static_cast<std::uint32_t>(context->r31);
+    entry.callsite = EntryCallsite(context, 0x8008B24CU);
+    if (entry.callsite == 0U) return;
     entry.alpha = static_cast<std::uint8_t>(MEM_W(0x14, context->r29) & 0xFF);
     const GfxSemanticRef gfx_ref = CanonicalGfxRef(rdram, entry.gfx);
     entry.key = EntryKey(
@@ -1305,6 +2583,44 @@ extern "C" void rocket_presentation_render_entry(std::uint8_t* rdram,
     entry.dynamic_gfx = gfx_ref.dynamic;
 
     std::scoped_lock lock(g_mutex);
+    if (TraceEnabled() && (g_frame % 120U) == 0U && entry.callsite == 0x8001F084U &&
+        g_shared_mode0_v43.active && g_shared_mode0_v43.player_wheel) {
+        g_trace_wheel_matrix = Physical(entry.mtx2 ? entry.mtx2 : entry.mtx1);
+        std::fprintf(stderr, "[rocket-player-wheel] model=%08x primary=%08x secondary=%08x samples=%zu\n",
+            g_shared_mode0_v43.model, entry.mtx1, entry.mtx2,
+            g_specific_samples.size() - g_shared_mode0_v43.specific_begin);
+    }
+    if (entry.callsite == 0x8001F084U && g_shared_mode0_v43.active &&
+        ValidRange(entry.mtx2, kMtxBytes)) {
+        // The render queue emits LOAD(mtx1), MUL(mtx2); RT64 associates the
+        // resulting transform with mtx2's address. Carry the exact instance
+        // binding to that address, after the guest has produced both matrices.
+        const auto pair = (static_cast<std::uint64_t>(Physical(entry.mtx1)) << 32U) |
+            Physical(entry.mtx2);
+        auto& pairs = g_shared_mode0_v43.secondary_pairs;
+        if (std::find(pairs.begin(), pairs.end(), pair) == pairs.end()) {
+            std::optional<SpecificMatrixSample> primary;
+            for (auto i = g_shared_mode0_v43.specific_begin; i < g_specific_samples.size(); ++i) {
+                if (g_specific_samples[i].secondary_transform) continue;
+                if (Physical(g_specific_samples[i].address) != Physical(entry.mtx1)) continue;
+                if (primary.has_value()) { primary.reset(); break; }
+                primary = g_specific_samples[i];
+            }
+            if (primary.has_value()) {
+                SpecificMatrixSample sample = *primary;
+                sample.key = Mix64(sample.key ^ 0x5345434F4E444152ULL);
+                sample.address = entry.mtx2;
+                sample.secondary_transform = true;
+                sample.rigid_decompose = primary->rigid_decompose &&
+                    (primary->interpolate_shape ? SupportsWheelPair(rdram, entry.mtx1, entry.mtx2) :
+                        SupportsRigidPair(rdram, entry.mtx1, entry.mtx2));
+                sample.interpolate_shape = primary->interpolate_shape && sample.rigid_decompose;
+                g_specific_samples.push_back(sample);
+                pairs.push_back(pair); // material repeats reuse the same transform
+                g_trace_specific_samples.fetch_add(1U, std::memory_order_relaxed);
+            }
+        }
+    }
     entry.ordinal = g_key_ordinals[entry.key]++;
     g_entries.push_back(entry);
     g_trace_entries.fetch_add(1U, std::memory_order_relaxed);
@@ -1330,12 +2646,29 @@ extern "C" void rocket_presentation_task_submitted(std::uint8_t* rdram,
     frame.background_ranges = g_background_ranges;
     frame.sequence = g_submission_sequence++;
     FinalizeTracksAndBindings(frame.matrices);
+    FinalizeModelRangeBindings(frame.matrices);
+    FinalizeDirectMatrixBindings(frame.matrices);
+    FinalizeCameraMatrixBindings(frame.matrices);
     FinalizeSpecificMatrixBindings(frame.matrices);
+    if (g_trace_wheel_matrix != 0) {
+        const auto found = frame.matrices.find(g_trace_wheel_matrix);
+        if (found != frame.matrices.end()) std::fprintf(stderr, "[rocket-wheel-binding] matrix=%08x id=%08x rigid=%d shape=%d\n",
+            g_trace_wheel_matrix, found->second.binding.identity, int(found->second.binding.rigid_decompose),
+            int(found->second.binding.interpolate_shape));
+        for (const auto& sample : g_specific_samples) if (Physical(sample.address) == g_trace_wheel_matrix)
+            std::fprintf(stderr, "[rocket-wheel-owner] key=%016llx mode=%u rigid=%d owner=%08x\n",
+                static_cast<unsigned long long>(sample.key), sample.submodel_mode, int(sample.rigid_decompose), sample.owner);
+    }
+    frame.camera_token = g_recording_camera_token;
 
     if (g_entries.empty()) {
         ++g_empty_frames;
         if (g_empty_frames >= 2U) {
             g_specific_continuity.clear();
+            g_direct_continuity.clear();
+            g_object_lifetimes.clear();
+            g_camera_continuity = {};
+            g_recording_camera_token = 0U;
             g_tracks.clear();
             g_shared_matrix_tracks.clear();
         }
@@ -1348,6 +2681,10 @@ extern "C" void rocket_presentation_task_submitted(std::uint8_t* rdram,
         // Never guess after queue ownership is lost. Current task is still
         // allowed to start a fresh FIFO; prior interpolation history is gone.
         g_specific_continuity.clear();
+        g_direct_continuity.clear();
+        g_object_lifetimes.clear();
+        g_camera_continuity = {};
+        g_recording_camera_token = 0U;
         g_tracks.clear();
         g_shared_matrix_tracks.clear();
         if (TraceEnabled()) {
@@ -1362,6 +2699,11 @@ extern "C" void rocket_presentation_task_submitted(std::uint8_t* rdram,
     g_entries.clear();
     g_key_ordinals.clear();
     g_specific_samples.clear();
-    g_specific_key_ordinals.clear();
     g_submodel_matrix_capture = {};
+    g_model_range_samples.clear();
+    g_model_range_depth = 0U;
+    g_model_range_overflow_depth = 0U;
+    g_direct_samples.clear();
+    for (DirectCapture& capture : g_direct_captures) capture = {};
+    g_camera_samples.clear();
 }

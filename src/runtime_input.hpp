@@ -6,11 +6,34 @@
 #include <vector>
 
 struct _SDL_GameController;
+union SDL_Event;
 typedef struct _SDL_GameController SDL_GameController;
 
 namespace rocket::input {
 
 constexpr int kUnbound = -1;
+void set_camera_input_owned(bool owned);
+bool camera_input_owned();
+void set_camera_runtime_enabled(bool enabled);
+void set_camera_actions_active(bool active);
+enum class CameraAction : std::uint8_t { Up, Down, Left, Right, Recenter, CycleZoom, FirstPerson, Count };
+struct CameraState { float x=0, y=0; bool recenter=false, cycle_zoom=false, first_person=false; };
+std::size_t camera_action_count();
+const char* camera_action_identifier(CameraAction action);
+const char* camera_action_label(CameraAction action);
+int camera_binding(CameraAction action, bool keyboard);
+void set_camera_binding(CameraAction action, bool keyboard, int source);
+void reset_camera_bindings();
+bool camera_mouse_enabled();
+bool camera_mouse_supported();
+void set_camera_mouse_supported(bool supported);
+void set_camera_mouse_enabled(bool enabled);
+float camera_mouse_sensitivity();
+void set_camera_mouse_sensitivity(float degrees_per_pixel);
+int camera_mouse_recenter_button();
+void set_camera_mouse_recenter_button(int button);
+CameraState poll_camera(SDL_GameController* controller, bool include_keyboard,
+                        bool include_controller, bool blocked);
 
 enum class Action : std::uint8_t {
     StickUp,
@@ -91,6 +114,16 @@ void reset_stick_settings();
 
 int encode_controller_button(int button);
 int encode_controller_axis(int axis, bool positive);
+enum class MouseDirection : std::uint8_t { Up, Down, Left, Right };
+int encode_mouse_button(int button);
+int encode_mouse_wheel(MouseDirection direction);
+int encode_mouse_motion(MouseDirection direction);
+bool is_mouse_source(int source);
+bool is_mouse_motion(int source);
+bool mouse_motion_bound();
+// SDL owner thread only, before polling controls.
+void mouse_event(const SDL_Event& event);
+void clear_mouse_transients();
 std::string keyboard_binding_name(int scancode);
 std::string controller_binding_name(int source);
 

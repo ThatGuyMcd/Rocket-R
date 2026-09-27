@@ -15,11 +15,7 @@ New-Item -ItemType Directory -Force -Path $LogRoot | Out-Null
 $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $LogPath = Join-Path $LogRoot "one-click-$Stamp.log"
 $Version = (Get-Content (Join-Path $Root 'VERSION') -Raw).Trim()
-<<<<<<< Updated upstream
-$BuilderRevision = 'FIXED34'
-=======
-$BuilderRevision = 'RELEASE-1.0.0'
->>>>>>> Stashed changes
+$BuilderRevision = 'RELEASE-1.0.1'
 if ($Version -notmatch '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z._-]+)?$') {
     throw "Invalid VERSION value: '$Version'"
 }
@@ -62,8 +58,8 @@ function Select-BuildPlatforms([string[]]$RequestedPlatforms) {
         Write-Host '  [4] Android ARM64 / arm64-v8a (.APK)'
         Write-Host '  [A] All four platforms'
         Write-Host ''
-        $answer = Read-Host 'Select one or more choices (example: 1,2,4)'
-        if ([string]::IsNullOrWhiteSpace($answer)) { $answer = '1' }
+        $answer = Read-Host 'Select one or more choices (default: 1,2)'
+        if ([string]::IsNullOrWhiteSpace($answer)) { $answer = '1,2' }
         $tokens = @($answer -split '[,; ]+' | Where-Object { $_ })
     }
 
@@ -90,6 +86,10 @@ function Select-BuildPlatforms([string[]]$RequestedPlatforms) {
         if ($normalized -and -not $result.Contains($normalized)) { $result.Add($normalized) }
     }
     if ($result.Count -eq 0) { throw 'Select at least one build platform.' }
+    if ($result.Contains('Windows-x64') -and -not $result.Contains('Linux-x86_64')) {
+        Write-Host 'Windows builds include the matching Linux x86-64 AppImage.' -ForegroundColor Cyan
+        $result.Add('Linux-x86_64')
+    }
     return [string[]]($result | ForEach-Object { $_ })
 }
 
@@ -865,7 +865,13 @@ try {
         Install-Winget 'Python.Python.3.12' 'Python 3.12'
     }
     Invoke-Python @((Join-Path $Root 'scripts\self_check.py'),'--root',$Root)
+    Invoke-Python @((Join-Path $Root 'scripts\verify_recomp_policy_v42.py'),'--root',$Root)
     Invoke-Python @((Join-Path $Root 'scripts\verify_interpolation_v35.py'),'--root',$Root)
+    Invoke-Python @((Join-Path $Root 'scripts\verify_global_interpolation_ui_v36.py'),'--root',$Root)
+    Invoke-Python @((Join-Path $Root 'scripts\verify_shared_mode0_v43_3.py'),'--root',$Root)
+    Invoke-Python @((Join-Path $Root 'scripts\verify_presentation_policy.py'),'--root',$Root)
+    Invoke-Python @('-m','unittest','discover','-s',(Join-Path $Root 'tests'),'-p','test_*.py')
+    Write-Host 'Interpolation v36 global ownership + UI source: VERIFIED.' -ForegroundColor DarkGreen
     Write-Host 'Interpolation v35 source coverage: VERIFIED (v5/v6 baseline preserved).' -ForegroundColor DarkGreen
 
     if (-not (Import-VsEnvironment)) {
@@ -1069,7 +1075,7 @@ try {
     if ($n64ConfigureExit -ne 0) { throw "N64Recomp CMake configuration failed (exit $n64ConfigureExit). See $N64Log" }
 
     Write-Host 'Building N64RecompCLI + RSPRecomp (Release)...'
-    $n64BuildExit = Invoke-NativeLogged $NativeCMake @('--build',$N64Build,'--target','N64RecompCLI','RSPRecomp','--parallel') $N64Log
+    $n64BuildExit = Invoke-NativeLogged $NativeCMake @('--build',$N64Build,'--target','N64RecompCLI','RSPRecomp','RecompModTool','--parallel') $N64Log
     if ($n64BuildExit -ne 0) { throw "N64Recomp/RSPRecomp build failed (exit $n64BuildExit). See $N64Log" }
     $N64Exe = Find-BuiltFile $N64Build 'N64Recomp.exe'
     $RspExe = Find-BuiltFile $N64Build 'RSPRecomp.exe'
@@ -1151,21 +1157,22 @@ inline constexpr std::uint32_t kBootstrapBssEnd = $($RocketBootstrap.BssEnd)U;
     }
     finally { Pop-Location }
 
+    # ROCKET-R V42 GOLDEN RULE: RecompiledFuncs is disposable N64Recomp output.
+    # Clean the output directory before generation; never edit generated C afterwards.
+    if (Test-Path $CpuOut) { Remove-Item $CpuOut -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $CpuOut | Out-Null
     Write-Host 'Generating Rocket CPU recompilation...'
     $recompExit = Invoke-NativeLogged $N64Exe @($RecompToml) $RecompLog
     if ($recompExit -ne 0) {
         throw "N64Recomp CPU generation failed (exit $recompExit). See $RecompLog for the exact function/instruction."
     }
 
-    # Graphics v32: single authoritative live RenderEntry queue.
-    # func_8008B594 initializes it once; the main renderer continues the SAME list.
-    # No staging pool, no copying, no eviction, no second-pass reset.
-    Invoke-Python @((Join-Path $Root 'scripts\patch_render_capacity_v32_generated.py'),'--root',$Root)
-    # Interpolation v35: capture the exact matrix returned by func_8001EA18.
-    # This is additive and never replaces the stable v5/v6 RenderEntry matcher.
-    Invoke-Python @((Join-Path $Root 'scripts\patch_interpolation_v35_generated.py'),'--root',$Root)
-    Invoke-Python @((Join-Path $Root 'scripts\verify_interpolation_v35.py'),'--root',$Root,'--with-generated')
-    Write-Host 'Graphics v32 single live RenderEntry queue: ENABLED (32768 entries; v29 interpolation untouched).'
+    # ROCKET-R V42 GOLDEN RULE: generated CPU C is read-only after N64Recomp.
+    # v32/v35/v36/Tinker hooks come only from rocket.us.recomp-policy.json.
+    Invoke-Python @((Join-Path $Root 'scripts\verify_recomp_policy_v42.py'),'--root',$Root,'--with-generated')
+    Invoke-Python @((Join-Path $Root 'scripts\verify_presentation_policy.py'),'--root',$Root,'--with-generated')
+    Write-Host 'RecompiledFuncs policy verification: PASS (read-only; no post-generation patching).' -ForegroundColor DarkGreen
+    Write-Host 'Graphics v32 single live RenderEntry queue: ENABLED via N64Recomp policy (32768 entries).' -ForegroundColor DarkGreen
 
     Push-Location (Join-Path $Root 'runtime-recomp\rsp')
     try {
@@ -1177,6 +1184,12 @@ inline constexpr std::uint32_t kBootstrapBssEnd = $($RocketBootstrap.BssEnd)U;
     } finally { Pop-Location }
     if (-not (Test-Path (Join-Path $CpuOut 'recomp_overlays.inl'))) { throw 'N64Recomp did not emit recomp_overlays.inl.' }
     if (-not (Get-ChildItem $RspOut -Filter '*.cpp' -File -ErrorAction SilentlyContinue)) { throw 'RSPRecomp did not emit a C++ microcode file.' }
+
+    $ModTool = Find-BuiltFile $N64Build 'RecompModTool.exe'
+    Invoke-Python @((Join-Path $Root 'scripts\build_mod.py'),
+        (Join-Path $Root 'modding\examples\modern-camera'), '--wsl', '--wsl-distro', $script:WslDistro,
+        '--tool', $ModTool, '--symbols', (Join-Path $GeneratedWork 'rocket.functions.dump.toml'),
+        '--output', (Join-Path $BuildRoot 'mods'))
 
     Banner '8/9 - Selected native platform builds'
     $Dist = Join-Path $Root 'dist'
@@ -1200,16 +1213,11 @@ inline constexpr std::uint32_t kBootstrapBssEnd = $($RocketBootstrap.BssEnd)U;
         Write-Host "Rocket runtime build log: $RuntimeLog"
         $runtimeConfigureExit = Invoke-NativeLogged $NativeCMake @('-S',$Root,'-B',$WindowsBuild,'-G','Ninja',"-DCMAKE_MAKE_PROGRAM=$NativeNinja",'-DCMAKE_BUILD_TYPE=Release',"-DCMAKE_C_COMPILER=$ClangCl","-DCMAKE_CXX_COMPILER=$ClangCl") $RuntimeLog
         if ($runtimeConfigureExit -ne 0) { throw "Rocket-R Windows CMake configuration failed (exit $runtimeConfigureExit). See $RuntimeLog" }
-<<<<<<< Updated upstream
-        $runtimeBuildExit = Invoke-NativeLogged $NativeCMake @('--build',$WindowsBuild,'--target','RocketR','--parallel') $RuntimeLog
-        if ($runtimeBuildExit -ne 0) { throw "Rocket-R Windows build failed (exit $runtimeBuildExit). See $RuntimeLog" }
-=======
-        $runtimeBuildExit = Invoke-NativeLogged $NativeCMake @('--build',$WindowsBuild,'--target','RocketR','RocketPresentationTests','RocketRuntimeLogTests','RocketControlsTests','RocketControlsUiTests','--parallel') $RuntimeLog
+        $runtimeBuildExit = Invoke-NativeLogged $NativeCMake @('--build',$WindowsBuild,'--target','RocketR','RocketPresentationTests','RocketRuntimeLogTests','RocketControlsTests','RocketControlsUiTests','RocketModsTests','RocketCameraModTests','RocketGraphicsCameraTests','--parallel') $RuntimeLog
         if ($runtimeBuildExit -ne 0) { throw "Rocket-R Windows build failed (exit $runtimeBuildExit). See $RuntimeLog" }
         $NativeCTest = Join-Path (Split-Path -Parent $NativeCMake) 'ctest.exe'
         $runtimeTestExit = Invoke-NativeLogged $NativeCTest @('--test-dir',$WindowsBuild,'--output-on-failure') $RuntimeLog
         if ($runtimeTestExit -ne 0) { throw "Rocket-R regression tests failed. See $RuntimeLog" }
->>>>>>> Stashed changes
         $RocketExe = Find-BuiltFile $WindowsBuild 'Rocket-R.exe'
         $RocketDir = Split-Path $RocketExe -Parent
         Write-Host "Built: $RocketExe" -ForegroundColor Green
