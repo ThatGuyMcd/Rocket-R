@@ -1,6 +1,7 @@
 #include "controls_studio.hpp"
 
 #include "imgui.h"
+#include "ui_theme.hpp"
 #include <algorithm>
 #include <atomic>
 #include <bitset>
@@ -8,11 +9,11 @@
 
 namespace rocket::ui::controls {
 namespace {
-constexpr ImVec4 kOrange{1.0F, 0.55F, 0.22F, 1.0F};
-constexpr ImVec4 kSelected{0.24F, 0.15F, 0.105F, 1.0F};
-constexpr ImVec4 kSurface{0.055F, 0.12F, 0.17F, 1.0F};
-constexpr ImVec4 kQuiet{0.10F, 0.20F, 0.26F, 1.0F};
-constexpr ImVec4 kLine{0.20F, 0.33F, 0.39F, 1.0F};
+constexpr auto kOrange = theme::gold;
+constexpr auto kSelected = theme::selected;
+constexpr auto kSurface = theme::panel;
+constexpr auto kQuiet = theme::card;
+constexpr auto kLine = theme::border;
 constexpr ImVec4 kPressed{0.12F, 0.48F, 0.36F, 1.0F};
 constexpr std::array<const char*, 4> kGroupNames{"STICK", "MAIN BUTTONS", "C BUTTONS", "D-PAD / L / R"};
 constexpr std::array<int, 5> kGroupStarts{0, 4, 8, 12, 18};
@@ -71,7 +72,7 @@ bool Choice(const char* text, bool selected, ImVec2 size, bool pressed = false) 
     ImGui::PushStyleColor(ImGuiCol_Button, pressed ? kPressed : selected ? kSelected : kSurface);
     ImGui::PushStyleColor(ImGuiCol_Border, selected ? kOrange : kLine);
     ImGui::PushStyleColor(ImGuiCol_Text, selected ? kOrange : ImGui::GetStyleColorVec4(ImGuiCol_Text));
-    const bool clicked = ImGui::Button(text, size);
+    const bool clicked = rocket::ui::theme::button(text, size);
     ImGui::PopStyleColor(3);
     return clicked;
 }
@@ -83,8 +84,8 @@ void Diagram(float width, const input::State& preview, bool test) {
     const float y = origin.y;
     const auto p = [&](float px, float py) { return ImVec2{x + px * w, y + py}; };
     ImDrawList* draw = ImGui::GetWindowDrawList();
-    const ImU32 body = IM_COL32(47, 73, 85, 255);
-    const ImU32 rim = IM_COL32(62, 96, 109, 255);
+    const ImU32 body = IM_COL32(83, 113, 140, 255);
+    const ImU32 rim = IM_COL32(120, 153, 183, 255);
     // Three overlapping convex grips and a rounded body avoid concave-fill
     // artifacts in the project's pinned ImGui version.
     const ImVec2 left[]{p(.10F, 106), p(.35F, 139), p(.23F, 274), p(.08F, 288), p(.02F, 259)};
@@ -117,7 +118,7 @@ void Diagram(float width, const input::State& preview, bool test) {
         ImGui::PushStyleColor(ImGuiCol_Button, test && down ? kPressed : selected ? kSelected : color);
         ImGui::PushStyleColor(ImGuiCol_Border, selected ? kOrange : kLine);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, bw <= 54.0F ? 24.0F : 10.0F);
-        if (ImGui::Button(label, {bw, 48.0F}) && !test) g_selected = action;
+        if (rocket::ui::theme::button(label, {bw, 48.0F}) && !test) g_selected = action;
         if (test && down) {
             draw->AddRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), IM_COL32(77, 239, 155, 255), 10.0F, 0, 3.0F);
         }
@@ -170,7 +171,7 @@ void Assignment(const char* label, Action action, BindingSlot slot, const Callba
     ImGui::PushID(static_cast<int>(slot));
     ImGui::TextWrapped("%s", label);
     const auto name = BindingName(action, slot);
-    if (ImGui::Button(name.c_str(), {-1.0F, 46.0F})) callbacks.capture(action, slot);
+    if (rocket::ui::theme::button(name.c_str(), {-1.0F, 46.0F})) callbacks.capture(action, slot);
     ImGui::PopID();
 }
 
@@ -211,7 +212,7 @@ void Editor(const Callbacks& callbacks, bool guided) {
 void TestInputs(float width, const Callbacks& callbacks) {
     ImGui::TextColored(kOrange, "TEST YOUR INPUTS");
     ImGui::TextWrapped("Try a key, mouse input or controller control. The matching N64 control lights up without sending input to the game.");
-    if (ImGui::Button("DONE TESTING", {std::min(width, 250.0F), 46.0F})) end_test();
+    if (rocket::ui::theme::button("DONE TESTING", {std::min(width, 250.0F), 46.0F})) end_test();
     ImGui::TextWrapped("Press Escape or your controller's Back / Select button to finish.");
     const auto preview = callbacks.preview();
     Diagram(width, preview, true);
@@ -231,13 +232,13 @@ void Review(float width, const Callbacks& callbacks) {
     ImGui::PushID("guided-review");
     ImGui::TextColored(kOrange, "REVIEW YOUR SETUP");
     ImGui::TextWrapped("%d of 18 controls reviewed. Anything you skipped keeps its previous input.", static_cast<int>(g_reviewed.count()));
-    if (ImGui::Button("TEST INPUTS", {std::min(width, 240.0F), 46.0F})) StartTest();
-    if (ImGui::Button("FINISH SETUP", {std::min(width, 240.0F), 46.0F})) { g_guided = false; g_review = false; }
+    if (rocket::ui::theme::button("TEST INPUTS", {std::min(width, 240.0F), 46.0F})) StartTest();
+    if (rocket::ui::theme::button("FINISH SETUP", {std::min(width, 240.0F), 46.0F})) { g_guided = false; g_review = false; }
     ImGui::TextWrapped("Your changes are saved. Select a control to edit it again.");
     for (std::size_t i = 0; i < kSetupOrder.size(); ++i) {
         ImGui::PushID(static_cast<int>(i));
         const auto action = kSetupOrder[i];
-        if (ImGui::Button(input::action_label(action), {-1, 44})) {
+        if (rocket::ui::theme::button(input::action_label(action), {-1, 44})) {
             g_step = static_cast<int>(i); g_selected = action; g_review = false;
         }
         ImGui::TextWrapped("Keyboard / mouse: %s   |   Controller: %s",
@@ -259,7 +260,7 @@ void draw(float width, const Callbacks& callbacks, const std::string& controller
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {12, 8});
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {10, 9});
     ImGui::PushStyleColor(ImGuiCol_Button, kQuiet);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.24F, 0.32F, 0.36F, 1.0F});
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, theme::rgb(0x286c94));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, kSelected);
     ImGui::TextColored(kOrange, g_guided ? "GUIDED SETUP" : "CONTROLLER STUDIO");
     ImGui::TextWrapped(g_guided ? "Set up each control in turn. Changes are saved automatically." : "Select an N64 control to choose its keyboard or controller input.");
@@ -268,12 +269,12 @@ void draw(float width, const Callbacks& callbacks, const std::string& controller
         TestInputs(width, callbacks);
     } else {
         const float action_width = width >= 550.0F ? 235.0F : width;
-        if (ImGui::Button(g_guided ? "BACK TO STUDIO" : "GUIDED SETUP", {action_width, 46})) {
+        if (rocket::ui::theme::button(g_guided ? "BACK TO STUDIO" : "GUIDED SETUP", {action_width, 46})) {
             g_guided = !g_guided;
             if (g_guided) { g_step = 0; g_selected = kSetupOrder[0]; g_review = false; g_reviewed.reset(); }
         }
         if (width >= 550.0F) ImGui::SameLine();
-        if (ImGui::Button("TEST INPUTS", {action_width, 46})) StartTest();
+        if (rocket::ui::theme::button("TEST INPUTS", {action_width, 46})) StartTest();
         ImGui::TextWrapped("Controller: %s", connected ? controller_name.c_str() : "Not connected. Keyboard controls are available.");
         ImGui::Separator();
         if (g_guided && g_review) {
@@ -316,10 +317,10 @@ void draw(float width, const Callbacks& callbacks, const std::string& controller
                 g_step = OrderIndex(g_selected);
                 ImGui::Spacing();
                 ImGui::BeginDisabled(g_step == 0);
-                if (ImGui::Button("BACK", {std::min(width, 155.0F), 46})) { --g_step; g_selected = kSetupOrder[g_step]; }
+                if (rocket::ui::theme::button("BACK", {std::min(width, 155.0F), 46})) { --g_step; g_selected = kSetupOrder[g_step]; }
                 ImGui::EndDisabled();
                 if (width >= 430.0F) ImGui::SameLine();
-                if (ImGui::Button(g_step == 17 ? "REVIEW SETUP" : "NEXT", {std::min(width, 225.0F), 46})) {
+                if (rocket::ui::theme::button(g_step == 17 ? "REVIEW SETUP" : "NEXT", {std::min(width, 225.0F), 46})) {
                     g_reviewed.set(g_step);
                     if (g_step == 17) g_review = true;
                     else { ++g_step; g_selected = kSetupOrder[g_step]; }
@@ -330,14 +331,14 @@ void draw(float width, const Callbacks& callbacks, const std::string& controller
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::TextWrapped("Button positions: bottom, right, left and top.");
-        if (ImGui::Button("RESET N64 CONTROLS", {std::min(width, 380.0F), 44})) ImGui::OpenPopup("Reset N64 controls?");
+        if (rocket::ui::theme::button("RESET N64 CONTROLS", {std::min(width, 380.0F), 44})) ImGui::OpenPopup("Reset N64 controls?");
         ImGui::SetNextWindowSizeConstraints({std::min(width, 440.0F), 0}, {std::min(width, 440.0F), FLT_MAX});
         if (ImGui::BeginPopupModal("Reset N64 controls?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
             ImGui::TextWrapped("Reset all keyboard and controller inputs to their defaults?");
-            if (ImGui::Button("RESET", {-1, 44})) {
+            if (rocket::ui::theme::button("RESET", {-1, 44})) {
                 input::reset_bindings(); callbacks.save(); ImGui::CloseCurrentPopup();
             }
-            if (ImGui::Button("CANCEL", {-1, 44})) ImGui::CloseCurrentPopup();
+            if (rocket::ui::theme::button("CANCEL", {-1, 44})) ImGui::CloseCurrentPopup();
             ImGui::EndPopup();
         }
     }

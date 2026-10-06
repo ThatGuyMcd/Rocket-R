@@ -25,7 +25,10 @@ public final class ModActivity extends Activity {
     }
     private void action(JSONObject request) {
         if (busy) return;
-        try { command(request); message = "Saved. Changes apply on your next launch."; }
+        try {
+            JSONObject result=command(request);
+            message=result.optBoolean("running") ? "Saved. Supported live changes apply during gameplay. Other changes need a restart." : "Saved.";
+        }
         catch (Exception e) { message = e.getMessage(); }
         showMods();
     }
@@ -97,15 +100,19 @@ public final class ModActivity extends Activity {
                 if(entry!=null&&!entry.getString("hash").equals(pkg.getString("hash")))continue;
                 if(!shown.add(id))continue;
                 JSONObject manifest=pkg.getJSONObject("manifest");
+                JSONObject metadata=pkg.optJSONObject("metadata");
+                if(metadata==null)metadata=new JSONObject();
                 text(manifest.getString("display_name")+"  v"+manifest.getString("version"),22);
                 text(manifest.optString("description"),16);
                 Switch toggle=new Switch(this);toggle.setText("Enabled");toggle.setChecked(entry!=null&&entry.getBoolean("enabled"));
+                toggle.setTypeface(Typeface.create("Comic Sans MS",Typeface.NORMAL));
+                if(snapshot.optBoolean("running"))toggle.setText(pkg.optBoolean("live_toggle")?"Active during gameplay":"Enabled next launch");
                 content.addView(toggle);toggle.setOnCheckedChangeListener((v,checked)->{
                     try{action(request("enable").put("id",id).put("enabled",checked));}catch(Exception ignored){}
                 });
-                if(entry==null||!manifest.has("config_schema"))continue;
-                JSONObject values=entry.getJSONObject("settings");
-                JSONArray options=manifest.getJSONObject("config_schema").getJSONArray("options");
+                if(entry==null)continue;
+                JSONObject values=entry.optJSONObject("settings");if(values==null)values=new JSONObject();
+                JSONArray options=manifest.has("config_schema")?manifest.getJSONObject("config_schema").getJSONArray("options"):new JSONArray();
                 for(int j=0;j<options.length();j++) {
                     JSONObject option=options.getJSONObject(j);String key=option.getString("id");
                     Object value=values.has(key)?values.get(key):option.get("default");
@@ -121,11 +128,39 @@ public final class ModActivity extends Activity {
                         });
                     } else if(option.getString("type").equals("Enum")) {
                         JSONArray choices=option.getJSONArray("options");
+                        JSONObject widgets=metadata.optInt("api",1)==2?metadata.optJSONObject("settings_ui"):null;
+                        if(choices.length()==2&&widgets!=null&&widgets.optString(key).equals("toggle")) {
+                            Switch setting=new Switch(this);setting.setText(option.getString("name"));setting.setTypeface(Typeface.create("Comic Sans MS",Typeface.NORMAL));
+                            setting.setChecked(value.toString().equals(choices.getString(1)));content.addView(setting);
+                            setting.setOnCheckedChangeListener((v,checked)->{try{action(request("option").put("id",id).put("key",key).put("value",choices.getString(checked?1:0)));}catch(Exception ignored){}});
+                            continue;
+                        }
                         for(int c=0;c<choices.length();c++) {
                             String choice=choices.getString(c);
                             JSONObject change=request("option").put("id",id).put("key",key).put("value",choice);
                             button(choice,()->action(change));
                         }
+                    } else if(option.getString("type").equals("String")) {
+                        EditText field=new EditText(this);field.setSingleLine(true);field.setText(value.toString());field.setTypeface(Typeface.create("Comic Sans MS",Typeface.NORMAL));content.addView(field);
+                        button("SAVE "+option.getString("name"),()->{try{action(request("option").put("id",id).put("key",key).put("value",field.getText().toString()));}catch(Exception ignored){}});
+                    }
+                }
+                if(metadata.optInt("api",1)==2) {
+                    JSONArray commands=metadata.optInt("api",1)==2?metadata.optJSONArray("commands"):null;
+                    if(commands!=null && snapshot.optBoolean("running"))for(int n=0;n<commands.length();n++) {
+                        JSONObject item=commands.getJSONObject(n);JSONObject execute=request("command").put("id",id).put("key",item.getString("id"));button(item.getString("name"),()->action(execute));
+                    }
+                    JSONObject actions=metadata.optInt("api",1)==2?metadata.optJSONObject("input_actions"):null,bindings=entry.optJSONObject("bindings");
+                    if(actions!=null)for(java.util.Iterator<String> it=actions.keys();it.hasNext();) {
+                        String key=it.next();JSONObject definition=actions.getJSONObject(key),assigned=bindings==null?null:bindings.optJSONObject(key);
+                        int mask=assigned==null?definition.optInt("n64"):assigned.optInt("n64",definition.optInt("n64"));
+                        String[] labels={"Unbound","A","B","Z","L","R","C up","C down","C left","C right"};
+                        int[] masks={0,0x8000,0x4000,0x2000,0x20,0x10,8,4,2,1};String selected="Button combination";
+                        for(int n=0;n<masks.length;n++)if(mask==masks[n])selected=labels[n];
+                        String title=definition.optString("name",key);
+                        button(title+" — touch "+selected,()->new android.app.AlertDialog.Builder(this).setTitle(title).setItems(labels,(dialog,choice)->{
+                            try{action(request("binding").put("id",id).put("key",key).put("device","n64").put("value",masks[choice]));}catch(Exception ignored){}
+                        }).show());
                     }
                 }
             }

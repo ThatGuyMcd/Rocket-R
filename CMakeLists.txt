@@ -31,6 +31,13 @@ if(NOT ANDROID)
         "${ROCKET_SOURCE_ROOT}/extern/rt64/src/contrib/hlslpp/include")
     add_test(NAME presentation_identity COMMAND RocketPresentationTests)
     find_package(Threads REQUIRED)
+    add_executable(RocketAndroidSupportTests tests/android_support_tests.cpp)
+    target_include_directories(RocketAndroidSupportTests PRIVATE
+        "${ROCKET_SOURCE_ROOT}/extern/rt64/src/contrib/plume"
+        "${ROCKET_SOURCE_ROOT}/extern/n64-modern-runtime/ultramodern/include")
+    target_link_libraries(RocketAndroidSupportTests PRIVATE Threads::Threads)
+    add_test(NAME android_support COMMAND RocketAndroidSupportTests)
+    set_tests_properties(android_support PROPERTIES TIMEOUT 30)
     add_executable(RocketRuntimeLogTests tests/runtime_log_tests.cpp src/runtime_log.cpp)
     target_include_directories(RocketRuntimeLogTests PRIVATE "${ROCKET_SOURCE_ROOT}/src")
     target_link_libraries(RocketRuntimeLogTests PRIVATE Threads::Threads)
@@ -89,14 +96,34 @@ add_subdirectory("${ROCKET_RT64_DIR}" "${CMAKE_BINARY_DIR}/rt64")
 target_compile_definitions(rt64 PRIVATE RT64_ROCKET_SAFE_AREA_CROP=1)
 add_subdirectory("${ROCKET_RUNTIME_DIR}" "${CMAKE_BINARY_DIR}/N64ModernRuntime")
 
-add_library(RocketModsCore STATIC src/mods/mod_library.cpp)
+add_library(RocketModsCore STATIC src/mods/mod_library.cpp src/mods/sdk_services.cpp src/mods/sdk_world.cpp src/mods/sdk_audio.cpp src/mods/asset_layers.cpp)
 target_include_directories(RocketModsCore PUBLIC "${ROCKET_SOURCE_ROOT}/src"
+    "${ROCKET_SOURCE_ROOT}/modding/include"
     "${ROCKET_RUNTIME_DIR}/thirdparty")
 target_link_libraries(RocketModsCore PUBLIC miniz)
 if(NOT ANDROID)
     add_executable(RocketModsTests tests/mods_tests.cpp)
     target_link_libraries(RocketModsTests PRIVATE RocketModsCore)
     add_test(NAME mods COMMAND RocketModsTests)
+    add_executable(RocketSdkServicesTests tests/sdk_services_tests.cpp)
+    target_link_libraries(RocketSdkServicesTests PRIVATE RocketModsCore)
+    add_test(NAME sdk_services COMMAND RocketSdkServicesTests)
+    add_executable(RocketSdkWorldTests tests/sdk_world_tests.cpp src/mods/sdk_render.cpp)
+    target_link_libraries(RocketSdkWorldTests PRIVATE RocketModsCore)
+    target_include_directories(RocketSdkWorldTests PRIVATE "${ROCKET_RUNTIME_DIR}/N64Recomp/include")
+    add_test(NAME sdk_world COMMAND RocketSdkWorldTests)
+    add_executable(RocketSdkAudioTests tests/sdk_audio_tests.cpp)
+    target_link_libraries(RocketSdkAudioTests PRIVATE RocketModsCore)
+    add_test(NAME sdk_audio COMMAND RocketSdkAudioTests)
+    add_executable(RocketAssetLayersTests tests/asset_layers_tests.cpp)
+    target_link_libraries(RocketAssetLayersTests PRIVATE RocketModsCore)
+    add_test(NAME asset_layers COMMAND RocketAssetLayersTests)
+    add_executable(RocketSdkCompatibilityTests tests/sdk_compatibility_tests.cpp)
+    target_link_libraries(RocketSdkCompatibilityTests PRIVATE RocketModsCore)
+    target_include_directories(RocketSdkCompatibilityTests PRIVATE "${ROCKET_SOURCE_ROOT}/modding/include")
+    if(EXISTS "${ROCKET_SOURCE_ROOT}/build/sdk1-compatibility/Rocket_Cheat_Menu_3.0.1.nrm")
+        add_test(NAME sdk1_compatibility COMMAND RocketSdkCompatibilityTests "${ROCKET_SOURCE_ROOT}/build/sdk1-compatibility")
+    endif()
     add_executable(RocketCameraModTests tests/camera_mod_tests.cpp tests/camera_mod_logic_tests.cpp src/mods/mod_runtime.cpp)
     target_link_libraries(RocketCameraModTests PRIVATE RocketModsCore)
     target_include_directories(RocketCameraModTests PRIVATE
@@ -108,6 +135,16 @@ if(NOT ANDROID)
         "$<TARGET_PROPERTY:ultramodern,INCLUDE_DIRECTORIES>"
         "$<TARGET_PROPERTY:librecomp,INCLUDE_DIRECTORIES>")
     add_test(NAME camera_mod COMMAND RocketCameraModTests)
+    add_executable(RocketSdkRuntimeTests tests/sdk_runtime_tests.cpp src/mods/sdk_runtime.cpp src/mods/sdk_render.cpp)
+    target_link_libraries(RocketSdkRuntimeTests PRIVATE RocketModsCore)
+    target_include_directories(RocketSdkRuntimeTests PRIVATE
+        "${ROCKET_SOURCE_ROOT}/modding/include"
+        "${ROCKET_RUNTIME_DIR}/N64Recomp/include"
+        "${ROCKET_RUNTIME_DIR}/ultramodern/include"
+        "${ROCKET_RUNTIME_DIR}/librecomp/include"
+        "$<TARGET_PROPERTY:ultramodern,INCLUDE_DIRECTORIES>"
+        "$<TARGET_PROPERTY:librecomp,INCLUDE_DIRECTORIES>")
+    add_test(NAME sdk_runtime COMMAND RocketSdkRuntimeTests)
     add_executable(RocketGraphicsCameraTests tests/graphics_camera_tests.cpp src/graphics_enhancements.cpp)
     target_include_directories(RocketGraphicsCameraTests PRIVATE
         "${ROCKET_SOURCE_ROOT}/src"
@@ -157,6 +194,8 @@ set(ROCKET_RUNTIME_SOURCES
     src/widescreen_culling.cpp
     src/game_registration.cpp
     src/mods/mod_runtime.cpp
+    src/mods/sdk_runtime.cpp
+    src/mods/sdk_render.cpp
     src/mods/mod_ui.cpp
     src/mods/mod_android.cpp
     src/crash_handler.cpp
@@ -199,6 +238,7 @@ target_include_directories(RocketR PRIVATE
     # Do not add the repository root here. On case-insensitive Windows, the
     # project VERSION file otherwise shadows the C++20 standard <version> header.
     "${ROCKET_SOURCE_ROOT}/src"
+    "${ROCKET_SOURCE_ROOT}/modding/include"
     "${ROCKET_SOURCE_ROOT}/generated"
     "${ROCKET_RUNTIME_DIR}/N64Recomp/include"
     "${ROCKET_RUNTIME_DIR}/ultramodern/include"

@@ -46,8 +46,14 @@ private:
         rocket::graphics::DisplayBuffering::Triple;
     std::string startup_custom_shader_;
     bool restart_notice_logged_ = false;
+    bool startup_hardware_resolve_ = false;
     std::chrono::steady_clock::time_point performance_window_started_{};
     std::uint64_t performance_present_base_ = 0U;
+    bool performance_trace_ = false;
+    bool environment_trace_ = false;
+    std::uint64_t trace_tasks_ = 0;
+    double trace_decode_ms_ = 0, trace_decode_max_ms_ = 0;
+    std::chrono::steady_clock::time_point trace_report_started_{};
 };
 
 std::unique_ptr<ultramodern::renderer::RendererContext> create_rt64_context(

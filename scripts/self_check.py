@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -52,22 +53,24 @@ def validate_patch_syntax(path: Path) -> None:
             f"malformed/corrupt dependency patch: {path}\n{detail}")
 
 def scan_checked_source(root: Path) -> None:
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        relative = path.relative_to(root)
-        if relative.parts and relative.parts[0] in IGNORED_TOP_LEVEL:
-            continue
-        if "__pycache__" in relative.parts:
-            continue
-        require(path.suffix.lower() not in ROM_SUFFIXES,
-                f"ROM-like file must not be checked into source: {relative}")
-        try:
-            with path.open("rb") as stream:
-                require(stream.read(4) not in ROM_MAGICS,
-                        f"N64 ROM header detected in checked source: {relative}")
-        except OSError as exc:
-            raise ValueError(f"could not inspect {relative}: {exc}") from exc
+    # Prune ignored caches before visiting their files. Walking them first is
+    # particularly expensive for container builds on a Windows-mounted drive.
+    for directory, folders, names in os.walk(root):
+        folders[:] = [name for name in folders if name != "__pycache__" and
+                      (Path(directory) != root or name not in IGNORED_TOP_LEVEL)]
+        for name in names:
+            path = Path(directory) / name
+            if not path.is_file():
+                continue
+            relative = path.relative_to(root)
+            require(path.suffix.lower() not in ROM_SUFFIXES,
+                    f"ROM-like file must not be checked into source: {relative}")
+            try:
+                with path.open("rb") as stream:
+                    require(stream.read(4) not in ROM_MAGICS,
+                            f"N64 ROM header detected in checked source: {relative}")
+            except OSError as exc:
+                raise ValueError(f"could not inspect {relative}: {exc}") from exc
 
 
 def main() -> int:
@@ -247,8 +250,8 @@ def main() -> int:
     builder = (root / "scripts/OneClickBuild.ps1").read_text(encoding="utf-8-sig")
     require('Banner "Rocket-R ${Version}: local static recompilation builder"' in builder,
             "OneClickBuild.ps1 must delimit Version before a literal colon for Windows PowerShell 5.1")
-    require("$BuilderRevision = 'RELEASE-1.0.1'" in builder,
-            "OneClickBuild.ps1 must identify the current stabilization pipeline")
+    require("$BuilderRevision = 'SDK2-1.1.0-dev'" in builder,
+            "OneClickBuild.ps1 must identify the current SDK pipeline")
     require(".Replace([char]0,'')" not in builder and '.Replace([char]0,"")' not in builder,
             "OneClickBuild.ps1 contains the PowerShell 5.1 Replace(char,char) empty-string trap")
     require("ROCKET_R_BUILDER_WINPATH" in builder and "$bridgeName + '/p'" in builder,
@@ -305,7 +308,7 @@ def main() -> int:
             "N64Recomp patch must retain deterministic configured entrypoint selection")
 
     modern_manifest = next((d for d in manifest.get("dependencies", []) if d.get("name") == "N64ModernRuntime"), None)
-    require(modern_manifest is not None and len(modern_manifest.get("patches", [])) == 13,
+    require(modern_manifest is not None and len(modern_manifest.get("patches", [])) >= 14,
             "Runtime must carry the stability, Android portability and mod profile/protected hook patches")
     modern_patch_text = "\n".join(
         (root / patch["path"]).read_text(encoding="utf-8")
@@ -317,8 +320,15 @@ def main() -> int:
                 f"N64ModernRuntime stability patch set is missing marker: {marker}")
 
     rt64_manifest = next((d for d in manifest.get("dependencies", []) if d.get("name") == "RT64"), None)
-    require(rt64_manifest is not None and len(rt64_manifest.get("patches", [])) == 26,
-            "Rocket-R self-check requires all 26 RT64 patches, including sky and player wheel interpolation")
+    require(rt64_manifest is not None and len(rt64_manifest.get("patches", [])) >= 31,
+            "Rocket-R requires the RT64 presentation patches and Android Vulkan correctness patches")
+    for required_patch in (
+        "patches/n64-modern-runtime/0013-reuse-immutable-graphics-snapshots.patch",
+        "patches/rt64/0029-vulkan-mapped-memory-and-queue-ownership.patch",
+        "patches/rt64/0030-android-background-shader-priority.patch",
+        "patches/rt64/0031-android-vulkan-device-diagnostics.patch",
+    ):
+        require(required_patch in listed_patches, f"missing Android support patch: {required_patch}")
     require(any(p.get("path") == "patches/rt64/0015-rocket-rigid-interpolation.patch"
                 for p in rt64_manifest["patches"]),
             "Rocket-R rigid interpolation patch is missing from the manifest")

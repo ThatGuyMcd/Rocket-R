@@ -1,5 +1,6 @@
 #include "runtime_ui.hpp"
 #include "mods/mod_ui.hpp"
+#include "mods/sdk_runtime.hpp"
 
 #include "game_registration.hpp"
 #include "graphics_enhancements.hpp"
@@ -8,6 +9,7 @@
 #include "runtime_input.hpp"
 #include "binding_capture.hpp"
 #include "controls_studio.hpp"
+#include "ui_theme.hpp"
 #include "runtime_log.hpp"
 #include "widescreen_culling.hpp"
 
@@ -48,6 +50,7 @@
 #include <sstream>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 static void LauncherHeading(const char* text) {
@@ -87,7 +90,7 @@ constexpr std::array<PageHeading, 6> kPageHeadings{{
 
 void DrawPageHeader(Page page) {
     const auto& heading = kPageHeadings[static_cast<size_t>(page)];
-    ImGui::TextUnformatted(heading.title);
+    rocket::ui::theme::heading(heading.title, 1.9F);
 
     // Reserve the same caption space on every page, including when the active
     // font or a narrow window makes the longer captions wrap.
@@ -99,7 +102,7 @@ void DrawPageHeader(Page page) {
     const float caption_y = ImGui::GetCursorPosY();
     UiHint("%s", heading.caption);
     ImGui::SetCursorPosY(caption_y + caption_height + ImGui::GetStyle().ItemSpacing.y);
-    ImGui::Separator();
+    ImGui::Dummy({0, 10});
 }
 
 std::filesystem::path g_config_directory;
@@ -108,8 +111,6 @@ std::mutex g_inspector_guard;
 RT64::Inspector* g_inspector = nullptr;
 int g_overlay_page = 0;
 int g_rocket_brand_rect = -1;
-
-// === ROCKET-R UI V36 SPINNING BRAND + 50% OVERLAY ===
 
 using CaptureDevice = rocket::input::BindingCapture::Device;
 rocket::input::BindingCapture g_capture;
@@ -120,20 +121,20 @@ rocket::input::BindingSlot g_capture_slot = rocket::input::BindingSlot::Keyboard
 int g_capture_action = -1;
 bool g_capture_shortcut = false;
 bool g_capture_camera = false;
+std::function<void(int)> g_capture_mod_commit;
+std::string g_capture_mod_name;
 rocket::input::ShortcutAction g_capture_shortcut_action = rocket::input::ShortcutAction::ToggleOverlay;
 bool g_capture_popup_pending = false;
 
 int g_controls_section = 0;
-int g_graphics_section = 0;
+bool g_layout_preview = false;
 
-constexpr ImVec4 kBackground{0.025F, 0.055F, 0.09F, 1.0F};
-constexpr ImVec4 kPanel{0.04F, 0.095F, 0.14F, 1.0F};
-constexpr ImVec4 kPanelSoft{0.065F, 0.15F, 0.20F, 1.0F};
-constexpr ImVec4 kText{0.96F, 0.97F, 0.94F, 1.0F};
-constexpr ImVec4 kMuted{0.65F, 0.72F, 0.75F, 1.0F};
-constexpr ImVec4 kAccent{0.13F, 0.78F, 0.70F, 1.0F};
-constexpr ImVec4 kWarm{1.0F, 0.48F, 0.08F, 1.0F};
-constexpr ImVec4 kRed{0.82F, 0.16F, 0.13F, 1.0F};
+constexpr auto kBackground = rocket::ui::theme::background;
+constexpr auto kPanel = rocket::ui::theme::panel;
+constexpr auto kPanelSoft = rocket::ui::theme::card;
+constexpr auto kAccent = rocket::ui::theme::green;
+constexpr auto kWarm = rocket::ui::theme::gold;
+constexpr auto kRed = rocket::ui::theme::red;
 
 
 std::string PathUtf8(const std::filesystem::path& path) {
@@ -222,27 +223,41 @@ void LoadRocketBrandIntoAtlas() {
         return;
     }
 
+    // Trim transparent padding once, while loading. The source asset stays intact.
+    int left = width, top = height, right = -1, bottom = -1;
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            if (source[(static_cast<std::size_t>(y) * width + x) * 4U + 3] > 8) {
+                left = std::min(left, x); right = std::max(right, x);
+                top = std::min(top, y); bottom = std::max(bottom, y);
+            }
+        }
+    }
+    if (right < left || bottom < top) { stbi_image_free(source); return; }
+    left = std::max(0, left - 2); top = std::max(0, top - 2);
+    right = std::min(width - 1, right + 2); bottom = std::min(height - 1, bottom + 2);
+    const int crop_width = right - left + 1, crop_height = bottom - top + 1;
     constexpr int kMaxBrandDimension = 384;
     const float scale = std::min(
         1.0F, static_cast<float>(kMaxBrandDimension) /
-                  static_cast<float>(std::max(width, height)));
-    const int dst_width = std::max(1, static_cast<int>(std::lround(width * scale)));
-    const int dst_height = std::max(1, static_cast<int>(std::lround(height * scale)));
+                  static_cast<float>(std::max(crop_width, crop_height)));
+    const int dst_width = std::max(1, static_cast<int>(std::lround(crop_width * scale)));
+    const int dst_height = std::max(1, static_cast<int>(std::lround(crop_height * scale)));
     std::vector<unsigned char> scaled(
         static_cast<std::size_t>(dst_width) * dst_height * 4U);
 
     // Bilinear downsample of the user's full-resolution source. Keeping at most
-    // 512 px in the font atlas avoids turning a high-res branding asset into a
+    // 384 px in the font atlas avoids turning a high-res branding asset into a
     // multi-megabyte per-context UI texture.
     for (int y = 0; y < dst_height; ++y) {
-        const float sy = (static_cast<float>(y) + 0.5F) / scale - 0.5F;
-        const int y0 = std::clamp(static_cast<int>(std::floor(sy)), 0, height - 1);
-        const int y1 = std::min(y0 + 1, height - 1);
+        const float sy = top + (static_cast<float>(y) + 0.5F) / scale - 0.5F;
+        const int y0 = std::clamp(static_cast<int>(std::floor(sy)), top, bottom);
+        const int y1 = std::min(y0 + 1, bottom);
         const float fy = std::clamp(sy - std::floor(sy), 0.0F, 1.0F);
         for (int x = 0; x < dst_width; ++x) {
-            const float sx = (static_cast<float>(x) + 0.5F) / scale - 0.5F;
-            const int x0 = std::clamp(static_cast<int>(std::floor(sx)), 0, width - 1);
-            const int x1 = std::min(x0 + 1, width - 1);
+            const float sx = left + (static_cast<float>(x) + 0.5F) / scale - 0.5F;
+            const int x0 = std::clamp(static_cast<int>(std::floor(sx)), left, right);
+            const int x1 = std::min(x0 + 1, right);
             const float fx = std::clamp(sx - std::floor(sx), 0.0F, 1.0F);
             for (int c = 0; c < 4; ++c) {
                 const auto at = [&](int px, int py) -> float {
@@ -311,74 +326,39 @@ void ApplyRocketWindowIcon(SDL_Window* window) {
 #endif
 }
 
-void DrawRocketBrandCoin(float available_width, float maximum_size = 230.0F) {
-    // === ROCKET-R UI V36.6 NO-REVERSE COIN ===
-    // Keep the front artwork facing the player for the entire animation.
-    // The logo still narrows like a turning coin, but it never swaps to a
-    // mirrored/reversed back face.
-    if (g_rocket_brand_rect < 0) {
-        ImGui::TextUnformatted("ROCKET-R");
-        UiHint("ROCKET: ROBOT ON WHEELS");
-        UiHint("RECOMPILED");
+void DrawRocketBrand(float available_width, float maximum_size = 232.0F) {
+    auto* atlas = ImGui::GetIO().Fonts;
+    const auto* rect = g_rocket_brand_rect >= 0 ? atlas->GetCustomRectByIndex(g_rocket_brand_rect) : nullptr;
+    if (!rect || !rect->IsPacked() || !atlas->TexID) {
+        rocket::ui::theme::heading("ROCKET-R");
         return;
     }
-
-    ImFontAtlas* atlas = ImGui::GetIO().Fonts;
-    const ImFontAtlasCustomRect* rect =
-        atlas->GetCustomRectByIndex(g_rocket_brand_rect);
-    if (rect == nullptr || !rect->IsPacked() || atlas->TexID == nullptr ||
-        atlas->TexWidth <= 0 || atlas->TexHeight <= 0) {
-        ImGui::TextUnformatted("ROCKET-R");
-        UiHint("ROCKET: ROBOT ON WHEELS");
-        UiHint("RECOMPILED");
-        return;
-    }
-
-    const float phase = static_cast<float>(ImGui::GetTime()) *
-        (2.0F * 3.14159265358979323846F / 4.8F);
-    const float facing = std::abs(std::cos(phase));
-    const float block_size = std::max(
-        std::min(available_width, maximum_size), 1.0F);
-    const float natural_aspect =
-        static_cast<float>(rect->Width) / static_cast<float>(rect->Height);
-
-    float image_width = block_size;
-    float image_height = image_width / natural_aspect;
-    if (image_height > block_size) {
-        image_height = block_size;
-        image_width = image_height * natural_aspect;
-    }
-
-    const float face_width = image_width * (0.06F + 0.94F * facing);
-    const float indent = std::max((available_width - block_size) * 0.5F, 0.0F);
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + indent);
-    const ImVec2 block_min = ImGui::GetCursorScreenPos();
-    const float image_left = block_min.x + (block_size - face_width) * 0.5F;
-    const float image_top = block_min.y + (block_size - image_height) * 0.5F;
-
-    ImVec2 uv_min{};
-    ImVec2 uv_max{};
+    const float block_height = ImGui::GetContentRegionAvail().y < 670 ? 84.0F : 108.0F;
+    const float w = std::max(1.0F, std::min({available_width, maximum_size,
+        (block_height - 4) * rect->Width / rect->Height}));
+    const float h = w * rect->Height / rect->Width;
+    const float phase = g_layout_preview ? 0.0F : static_cast<float>(ImGui::GetTime()) * (2.0F * 3.14159265F / 4.8F);
+    const float face_width = w * (0.06F + 0.94F * std::abs(std::cos(phase)));
+    const auto p = ImGui::GetCursorScreenPos();
+    const float left = p.x + (available_width - face_width) * 0.5F;
+    const float top = p.y + (block_height - h) * 0.5F;
+    const float tilt = std::sin(phase) * h * 0.022F;
+    ImVec2 uv_min{}, uv_max{};
     atlas->CalcCustomRectUV(rect, &uv_min, &uv_max);
-    ImDrawList* draw = ImGui::GetWindowDrawList();
-
-    const float perspective_tilt = std::sin(phase) * image_height * 0.022F;
-    const float brightness = 0.78F + 0.22F * facing;
-    const int tint = static_cast<int>(std::round(brightness * 255.0F));
-
-    draw->AddImageQuad(
-        atlas->TexID,
-        {image_left, image_top + perspective_tilt},
-        {image_left + face_width, image_top - perspective_tilt},
-        {image_left + face_width, image_top + image_height + perspective_tilt},
-        {image_left, image_top + image_height - perspective_tilt},
-        uv_min, {uv_max.x, uv_min.y}, uv_max, {uv_min.x, uv_max.y},
-        IM_COL32(tint, tint, tint, 255));
-    ImGui::Dummy({block_size, block_size});
+    // One cached image quad keeps the original turning motion and readable front.
+    ImGui::GetWindowDrawList()->AddImageQuad(atlas->TexID,
+        {left, top + tilt}, {left + face_width, top - tilt},
+        {left + face_width, top + h + tilt}, {left, top + h - tilt},
+        uv_min, {uv_max.x, uv_min.y}, uv_max, {uv_min.x, uv_max.y});
+    ImGui::Dummy({available_width, block_height});
 }
 
 void ConfigureUiFont() {
     ImGuiIO& io = ImGui::GetIO();
-    constexpr float kUiFontSize = 21.0F;
+    constexpr float kUiFontSize = 19.0F;
+    // These belong to this context's atlas; never carry pointers across contexts.
+    rocket::ui::theme::page_font = nullptr;
+    rocket::ui::theme::card_font = nullptr;
 
     std::array<std::filesystem::path, 8> candidates{};
     std::size_t candidate_count = 0;
@@ -408,6 +388,8 @@ void ConfigureUiFont() {
         const std::string path = PathUtf8(candidates[i]);
         if (ImFont* font = io.Fonts->AddFontFromFileTTF(path.c_str(), kUiFontSize)) {
             io.FontDefault = font;
+            rocket::ui::theme::page_font = io.Fonts->AddFontFromFileTTF(path.c_str(), 42.0F);
+            rocket::ui::theme::card_font = io.Fonts->AddFontFromFileTTF(path.c_str(), 26.0F);
             std::fprintf(stderr, "[ui] Comic Sans font: %s (%.0f px)\n",
                          path.c_str(), kUiFontSize);
             font_loaded = true;
@@ -418,6 +400,10 @@ void ConfigureUiFont() {
         ImFontConfig fallback{};
         fallback.SizePixels = kUiFontSize;
         io.FontDefault = io.Fonts->AddFontDefault(&fallback);
+        fallback.SizePixels = 42.0F;
+        rocket::ui::theme::page_font = io.Fonts->AddFontDefault(&fallback);
+        fallback.SizePixels = 26.0F;
+        rocket::ui::theme::card_font = io.Fonts->AddFontDefault(&fallback);
         std::fprintf(stderr,
                      "[ui] Comic Sans MS was not installed; using enlarged ImGui fallback (%.0f px)\n",
                      kUiFontSize);
@@ -434,38 +420,7 @@ std::filesystem::path LastRomPath() {
 }
 
 void ApplyStyle() {
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding = 0.0F;
-    style.ChildRounding = 16.0F;
-    style.FrameRounding = 10.0F;
-    style.PopupRounding = 12.0F;
-    style.GrabRounding = 10.0F;
-    style.WindowPadding = {22.0F, 22.0F};
-    style.FramePadding = {16.0F, 11.0F};
-    style.ItemSpacing = {13.0F, 13.0F};
-    style.WindowBorderSize = 0.0F;
-    style.ChildBorderSize = 1.0F;
-    style.FrameBorderSize = 1.0F;
-    style.Colors[ImGuiCol_WindowBg] = kBackground;
-    style.Colors[ImGuiCol_ChildBg] = kPanel;
-    style.Colors[ImGuiCol_PopupBg] = kPanel;
-    style.Colors[ImGuiCol_Border] = {0.15F, 0.34F, 0.38F, 1.0F};
-    style.Colors[ImGuiCol_Text] = kText;
-    style.Colors[ImGuiCol_TextDisabled] = kMuted;
-    style.Colors[ImGuiCol_FrameBg] = kPanelSoft;
-    style.Colors[ImGuiCol_FrameBgHovered] = {0.08F, 0.24F, 0.28F, 1.0F};
-    style.Colors[ImGuiCol_FrameBgActive] = {0.10F, 0.32F, 0.32F, 1.0F};
-    style.Colors[ImGuiCol_Button] = {0.06F, 0.35F, 0.43F, 1.0F};
-    style.Colors[ImGuiCol_ButtonHovered] = kWarm;
-    style.Colors[ImGuiCol_ButtonActive] = {0.92F, 0.31F, 0.05F, 1.0F};
-    style.Colors[ImGuiCol_Header] = {0.05F, 0.38F, 0.42F, 1.0F};
-    style.Colors[ImGuiCol_HeaderHovered] = kWarm;
-    style.Colors[ImGuiCol_HeaderActive] = {0.90F, 0.30F, 0.05F, 1.0F};
-    style.Colors[ImGuiCol_CheckMark] = kAccent;
-    style.Colors[ImGuiCol_SliderGrab] = kWarm;
-    style.Colors[ImGuiCol_SliderGrabActive] = {1.0F, 0.65F, 0.12F, 1.0F};
-    style.Colors[ImGuiCol_Separator] = {0.20F, 0.53F, 0.50F, 0.65F};
-    style.Colors[ImGuiCol_NavHighlight] = {1.0F, 0.72F, 0.15F, 1.0F};
+    rocket::ui::theme::apply();
 }
 
 void SaveSettings() {
@@ -501,6 +456,7 @@ void SaveSettings() {
     out << "post_process_strength=" << gx.post_process_strength << '\n';
     out << "custom_shader=" << gx.custom_shader << '\n';
     out << "performance_overlay=" << (gx.performance_overlay ? 1 : 0) << '\n';
+    out << "performance_logging=" << (gx.performance_logging ? 1 : 0) << '\n';
     out << "interpolation_overlay=" << (gx.interpolation_overlay ? 1 : 0) << '\n';
     out << "volume=" << rocket::platform::master_volume() << '\n';
     out << "audio_profile=2\n";
@@ -541,26 +497,27 @@ void SaveSettings() {
 void LoadSettings() {
     ultramodern::renderer::GraphicsConfig graphics{};
     graphics.developer_mode = false;
-    graphics.res_option = ultramodern::renderer::Resolution::Auto;
+    graphics.res_option = ultramodern::renderer::Resolution::Original2x;
     graphics.wm_option = ultramodern::renderer::WindowMode::Windowed;
     graphics.hr_option = ultramodern::renderer::HUDRatioMode::Original;
     graphics.api_option = ultramodern::renderer::GraphicsApi::Auto;
     graphics.ar_option = ultramodern::renderer::AspectRatio::Original;
     graphics.msaa_option = ultramodern::renderer::Antialiasing::None;
     graphics.rr_option = ultramodern::renderer::RefreshRate::Original;
-    graphics.hpfb_option = ultramodern::renderer::HighPrecisionFramebuffer::Auto;
+    graphics.hpfb_option = ultramodern::renderer::HighPrecisionFramebuffer::Off;
     graphics.rr_manual_value = 60;
     graphics.ds_option = 1;
     float volume = 0.65F;
     int audio_profile = 0;
     rocket::graphics::Settings graphics_extra{};
+    graphics_extra.framebuffer_precision = rocket::graphics::FramebufferPrecision::Original;
+    graphics_extra.anisotropy = 4;
 #if defined(__ANDROID__)
     // Start within a budget phone's GPU/memory budget, independent of the
     // display's physical resolution. Explicit saved choices still win below.
-    graphics.res_option = ultramodern::renderer::Resolution::Original2x;
+    graphics.res_option = ultramodern::renderer::Resolution::Original;
     graphics.hpfb_option = ultramodern::renderer::HighPrecisionFramebuffer::Off;
-    graphics_extra.anisotropy = 2;
-    graphics_extra.display_buffering = rocket::graphics::DisplayBuffering::Double;
+    graphics_extra = rocket::graphics::preset_settings(rocket::graphics::GraphicsPreset::LowPower);
 #endif
     bool aspect_preset_loaded = false;
 
@@ -617,7 +574,7 @@ void LoadSettings() {
             }
             else if (key == "refresh_manual") graphics.rr_manual_value = std::clamp(std::stoi(value), 30, 500);
             else if (key == "downsample") graphics.ds_option = std::clamp(std::stoi(value), 1, 4);
-            else if (key == "graphics_preset") graphics_extra.preset = static_cast<rocket::graphics::GraphicsPreset>(std::clamp(std::stoi(value), 0, 4));
+            else if (key == "graphics_preset") graphics_extra.preset = static_cast<rocket::graphics::GraphicsPreset>(std::clamp(std::stoi(value), 0, 5));
             else if (key == "aspect_preset") { graphics_extra.aspect = static_cast<rocket::graphics::AspectPreset>(std::clamp(std::stoi(value), 0, 5)); aspect_preset_loaded = true; }
             else if (key == "aspect_custom") graphics_extra.custom_aspect = std::stof(value);
             else if (key == "texture_filtering") graphics_extra.texture_filtering = static_cast<rocket::graphics::TextureFiltering>(std::clamp(std::stoi(value), 0, 2));
@@ -636,6 +593,7 @@ void LoadSettings() {
             else if (key == "post_process_strength") graphics_extra.post_process_strength = std::stof(value);
             else if (key == "custom_shader") graphics_extra.custom_shader = value;
             else if (key == "performance_overlay") graphics_extra.performance_overlay = std::stoi(value) != 0;
+            else if (key == "performance_logging") graphics_extra.performance_logging = std::stoi(value) != 0;
             else if (key == "interpolation_overlay") graphics_extra.interpolation_overlay = std::stoi(value) != 0;
             else if (key == "volume") volume = std::clamp(std::stof(value), 0.0F, 1.0F);
             else if (key == "rumble") rocket::platform::set_rumble_enabled(std::stoi(value) != 0);
@@ -796,6 +754,7 @@ const char* GraphicsPresetName(rocket::graphics::GraphicsPreset value) {
         case P::Modern: return "Modern";
         case P::HighQuality: return "High quality";
         case P::Performance: return "Performance";
+        case P::LowPower: return "Low power";
         case P::Custom: return "Custom";
         default: return "Original";
     }
@@ -893,24 +852,32 @@ void SyncExtraGraphicsConfig(const rocket::graphics::Settings& extra,
     }
 }
 
-std::vector<std::string> CustomShaderStems() {
+const std::vector<std::string>& CustomShaderStems() {
+    static std::vector<std::string> cached;
+    static std::filesystem::path scanned_directory;
+    static std::chrono::steady_clock::time_point scan_due{};
+    const auto directory = rocket::graphics::shader_directory();
+    const auto now = std::chrono::steady_clock::now();
+    if (scanned_directory == directory && now < scan_due) return cached;
+    scanned_directory = directory;
+    scan_due = now + std::chrono::seconds(2);
+    cached.clear();
     std::set<std::string> stems;
     std::error_code ec;
-    const auto directory = rocket::graphics::shader_directory();
-    if (!std::filesystem::is_directory(directory, ec)) return {};
+    if (!std::filesystem::is_directory(directory, ec)) return cached;
     for (const auto& entry : std::filesystem::directory_iterator(directory, ec)) {
         if (ec || !entry.is_regular_file(ec)) continue;
         const auto ext = entry.path().extension().string();
         if (ext != ".dxil" && ext != ".spv") continue;
         stems.insert(entry.path().stem().string());
     }
-    return {stems.begin(), stems.end()};
+    cached.assign(stems.begin(), stems.end());
+    return cached;
 }
 
 bool SectionTabs(const char* const* labels, int count, float width, int& selected) {
     const float gap = ImGui::GetStyle().ItemSpacing.x;
-    // Both sets of page tabs use the same grid and wrap at the same width.
-    float minimum = ImGui::CalcTextSize("CAMERA & DISTANCE").x + ImGui::GetStyle().FramePadding.x * 2.0F;
+    float minimum = 0;
     for (int i = 0; i < count; ++i)
         minimum = std::max(minimum, ImGui::CalcTextSize(labels[i]).x + ImGui::GetStyle().FramePadding.x * 2.0F);
     const int columns = width >= minimum * count + gap * (count - 1) ? count
@@ -920,12 +887,7 @@ bool SectionTabs(const char* const* labels, int count, float width, int& selecte
     for (int i = 0; i < count; ++i) {
         if (i % columns != 0) ImGui::SameLine();
         const bool active = selected == i;
-        if (active) {
-            ImGui::PushStyleColor(ImGuiCol_Button, kWarm);
-            ImGui::PushStyleColor(ImGuiCol_Text, kBackground);
-        }
-        if (ImGui::Button(labels[i], {button_width, 42.0F})) { selected = i; changed = true; }
-        if (active) ImGui::PopStyleColor(2);
+        if (rocket::ui::theme::button(labels[i], {button_width, 44.0F}, active)) { selected = i; changed = true; }
     }
     ImGui::Dummy({0.0F, 12.0F});
     return changed;
@@ -943,15 +905,15 @@ void DrawLiveLog() {
     }
 
     LauncherHeading("LIVE LOG");
-    if (ImGui::Button(paused ? "RESUME LOG" : "PAUSE LOG")) paused = !paused;
+    if (rocket::ui::theme::button(paused ? "RESUME LOG" : "PAUSE LOG")) paused = !paused;
     ImGui::SameLine();
-    if (ImGui::Button("COPY LOG")) {
+    if (rocket::ui::theme::button("COPY LOG")) {
         std::string text;
         for (const auto& line : snapshot.lines) { text += line; text += '\n'; }
         ImGui::SetClipboardText(text.c_str());
     }
     ImGui::SameLine();
-    if (ImGui::Button("CLEAR VIEW")) {
+    if (rocket::ui::theme::button("CLEAR VIEW")) {
         rocket::diagnostics::clear_log();
         snapshot = {};
     }
@@ -1000,21 +962,31 @@ void DrawGraphicsPage(float width, bool in_game) {
 
     DrawPageHeader(Page::Graphics);
 
-    constexpr const char* sections[]{"DISPLAY", "IMAGE", "CAMERA & DISTANCE", "DIAGNOSTICS"};
-    SectionTabs(sections, 4, width, g_graphics_section);
-
     ImGui::TextUnformatted("Preset");
+    const float preset_width = std::min(330.0F, ImGui::GetContentRegionAvail().x);
+    ImGui::SetNextItemWidth(preset_width);
     if (ImGui::BeginCombo("##graphics-preset", GraphicsPresetName(extra.preset))) {
-        const std::array<rocket::graphics::GraphicsPreset, 4> values{
+        const std::array<rocket::graphics::GraphicsPreset, 5> values{
             rocket::graphics::GraphicsPreset::Original,
             rocket::graphics::GraphicsPreset::Modern,
             rocket::graphics::GraphicsPreset::HighQuality,
-            rocket::graphics::GraphicsPreset::Performance};
+            rocket::graphics::GraphicsPreset::Performance,
+            rocket::graphics::GraphicsPreset::LowPower};
         for (auto value : values) {
             if (ImGui::Selectable(GraphicsPresetName(value), extra.preset == value)) {
                 rocket::graphics::apply_preset(value);
                 extra = rocket::graphics::settings();
                 SyncExtraGraphicsConfig(extra, config);
+                if (value == rocket::graphics::GraphicsPreset::Performance ||
+                    value == rocket::graphics::GraphicsPreset::LowPower) {
+                    config.res_option = value == rocket::graphics::GraphicsPreset::LowPower
+                        ? ultramodern::renderer::Resolution::Original
+                        : ultramodern::renderer::Resolution::Original2x;
+                    config.msaa_option = ultramodern::renderer::Antialiasing::None;
+                    config.ds_option = 1;
+                    config.rr_option = ultramodern::renderer::RefreshRate::Original;
+                    config.rr_manual_value = 60;
+                }
                 config_changed = true;
                 extra_changed = true;
                 keep_named_preset = true;
@@ -1023,10 +995,113 @@ void DrawGraphicsPage(float width, bool in_game) {
         ImGui::EndCombo();
     }
     UiHint("Changing a setting switches to Custom.");
-    ImGui::Separator();
+    if (extra.preset == rocket::graphics::GraphicsPreset::Performance)
+        UiHint("Original 2X, 30 FPS and no MSAA. You can raise the frame rate under Display.");
+    if (extra.preset == rocket::graphics::GraphicsPreset::LowPower)
+        UiHint("Original N64 resolution, 30 FPS and no MSAA. Restart the game after changing presets.");
+    ImGui::Spacing();
 
-    const float control_width = std::min(width, 560.0F);
-    if (g_graphics_section == 0) {
+    const auto draw_window = [&] {
+        ImGui::PushItemWidth(-FLT_MIN);
+        ImGui::TextUnformatted("Window mode");
+        bool fullscreen = config.wm_option == ultramodern::renderer::WindowMode::Fullscreen;
+        if (ImGui::BeginCombo("##window-mode", fullscreen ? "Borderless fullscreen" : "Windowed")) {
+            if (ImGui::Selectable("Windowed", !fullscreen)) {
+                config.wm_option = ultramodern::renderer::WindowMode::Windowed; config_changed = true;
+            }
+            if (ImGui::Selectable("Borderless fullscreen", fullscreen)) {
+                config.wm_option = ultramodern::renderer::WindowMode::Fullscreen; config_changed = true;
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::Checkbox("VSync", &extra.vsync)) extra_changed = true;
+        UiHint("Matches frames to your display to reduce tearing.");
+        UiHint("Press Alt+Enter to switch between windowed and fullscreen.");
+
+        ImGui::PopItemWidth();
+    };
+    const auto draw_aspect = [&] {
+        ImGui::PushItemWidth(-FLT_MIN);
+        ImGui::TextUnformatted("Aspect ratio");
+        if (ImGui::BeginCombo("##aspect-preset", AspectPresetName(extra.aspect))) {
+            const std::array<rocket::graphics::AspectPreset, 6> values{
+                rocket::graphics::AspectPreset::Original4x3,
+                rocket::graphics::AspectPreset::FitWindow,
+                rocket::graphics::AspectPreset::Ratio16x9,
+                rocket::graphics::AspectPreset::Ratio16x10,
+                rocket::graphics::AspectPreset::Ratio21x9,
+                rocket::graphics::AspectPreset::Custom};
+            for (auto value : values) {
+                if (ImGui::Selectable(AspectPresetName(value), extra.aspect == value)) {
+                    extra.aspect = value; extra_changed = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (extra.aspect == rocket::graphics::AspectPreset::Custom) {
+            ImGui::TextUnformatted("Custom ratio");
+            ImGui::SetNextItemWidth(std::min(ImGui::GetContentRegionAvail().x, 560.0F));
+            if (rocket::ui::theme::slider_float("##aspect-custom", &extra.custom_aspect, 1.0F, 3.5F, "%.3f:1")) extra_changed = true;
+        }
+        UiHint("On wide screens, the HUD stays within the centre 16:9 area.");
+
+        ImGui::PopItemWidth();
+    };
+    const auto draw_resolution = [&] {
+        ImGui::PushItemWidth(-FLT_MIN);
+        ImGui::TextUnformatted("Render resolution");
+        if (ImGui::BeginCombo("##resolution", ResolutionName(config.res_option))) {
+            const std::array<ultramodern::renderer::Resolution, 3> values{
+                ultramodern::renderer::Resolution::Auto,
+                ultramodern::renderer::Resolution::Original2x,
+                ultramodern::renderer::Resolution::Original};
+            for (auto value : values) {
+                if (ImGui::Selectable(ResolutionName(value), config.res_option == value)) {
+                    config.res_option = value; config_changed = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        int scale = std::clamp(config.ds_option, 1, 4);
+        ImGui::TextUnformatted("Downsampling");
+        ImGui::SetNextItemWidth(std::min(ImGui::GetContentRegionAvail().x, 560.0F));
+        if (rocket::ui::theme::slider_int("##internal-scale", &scale, 1, 4, "%dx")) {
+            config.ds_option = scale; config_changed = true;
+        }
+
+        ImGui::PopItemWidth();
+    };
+    const auto draw_rate = [&] {
+        ImGui::PushItemWidth(-FLT_MIN);
+        ImGui::TextUnformatted("Frame rate");
+        if (ImGui::BeginCombo("##refresh-rate", RefreshName(config.rr_option))) {
+            const std::array<ultramodern::renderer::RefreshRate, 3> values{
+                ultramodern::renderer::RefreshRate::Original,
+                ultramodern::renderer::RefreshRate::Display,
+                ultramodern::renderer::RefreshRate::Manual};
+            for (auto value : values) {
+                if (ImGui::Selectable(RefreshName(value), config.rr_option == value)) {
+                    config.rr_option = value; config_changed = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (config.rr_option == ultramodern::renderer::RefreshRate::Manual) {
+            ImGui::TextUnformatted("Target FPS");
+            int manual_rate = std::clamp(config.rr_manual_value, 30, 500);
+            ImGui::SetNextItemWidth(std::min(ImGui::GetContentRegionAvail().x, 560.0F));
+            if (rocket::ui::theme::slider_int("##refresh-manual", &manual_rate, 30, 500, "%d FPS")) {
+                config.rr_manual_value = manual_rate; config_changed = true;
+            }
+        }
+        UiHint(config.rr_option == ultramodern::renderer::RefreshRate::Original
+            ? "Original 30 FPS, without frame interpolation."
+            : "Smoother animation without changing the game's speed.");
+
+        ImGui::PopItemWidth();
+    };
+    const auto draw_renderer = [&] {
+        ImGui::PushItemWidth(-FLT_MIN);
         ImGui::TextUnformatted("Graphics renderer");
         if (in_game) {
             UiHint("%s. Change this in the launcher before starting the game.",
@@ -1050,87 +1125,6 @@ void DrawGraphicsPage(float width, bool in_game) {
             }
             ImGui::EndCombo();
         }
-
-        ImGui::TextUnformatted("Window mode");
-        bool fullscreen = config.wm_option == ultramodern::renderer::WindowMode::Fullscreen;
-        if (ImGui::BeginCombo("##window-mode", fullscreen ? "Borderless fullscreen" : "Windowed")) {
-            if (ImGui::Selectable("Windowed", !fullscreen)) {
-                config.wm_option = ultramodern::renderer::WindowMode::Windowed; config_changed = true;
-            }
-            if (ImGui::Selectable("Borderless fullscreen", fullscreen)) {
-                config.wm_option = ultramodern::renderer::WindowMode::Fullscreen; config_changed = true;
-            }
-            ImGui::EndCombo();
-        }
-        if (ImGui::Checkbox("VSync", &extra.vsync)) extra_changed = true;
-        UiHint("Matches frames to your display to reduce tearing.");
-        UiHint("Press Alt+Enter to switch between windowed and fullscreen.");
-
-        ImGui::TextUnformatted("Aspect ratio");
-        if (ImGui::BeginCombo("##aspect-preset", AspectPresetName(extra.aspect))) {
-            const std::array<rocket::graphics::AspectPreset, 6> values{
-                rocket::graphics::AspectPreset::Original4x3,
-                rocket::graphics::AspectPreset::FitWindow,
-                rocket::graphics::AspectPreset::Ratio16x9,
-                rocket::graphics::AspectPreset::Ratio16x10,
-                rocket::graphics::AspectPreset::Ratio21x9,
-                rocket::graphics::AspectPreset::Custom};
-            for (auto value : values) {
-                if (ImGui::Selectable(AspectPresetName(value), extra.aspect == value)) {
-                    extra.aspect = value; extra_changed = true;
-                }
-            }
-            ImGui::EndCombo();
-        }
-        if (extra.aspect == rocket::graphics::AspectPreset::Custom) {
-            ImGui::SetNextItemWidth(control_width);
-            if (ImGui::SliderFloat("##aspect-custom", &extra.custom_aspect, 1.0F, 3.5F, "%.3f:1")) extra_changed = true;
-        }
-        UiHint("On wide screens, the HUD stays within the centre 16:9 area.");
-
-        ImGui::TextUnformatted("Render resolution");
-        if (ImGui::BeginCombo("##resolution", ResolutionName(config.res_option))) {
-            const std::array<ultramodern::renderer::Resolution, 3> values{
-                ultramodern::renderer::Resolution::Auto,
-                ultramodern::renderer::Resolution::Original2x,
-                ultramodern::renderer::Resolution::Original};
-            for (auto value : values) {
-                if (ImGui::Selectable(ResolutionName(value), config.res_option == value)) {
-                    config.res_option = value; config_changed = true;
-                }
-            }
-            ImGui::EndCombo();
-        }
-        int scale = std::clamp(config.ds_option, 1, 4);
-        ImGui::TextUnformatted("Downsampling");
-        ImGui::SetNextItemWidth(control_width);
-        if (ImGui::SliderInt("##internal-scale", &scale, 1, 4, "%dx")) {
-            config.ds_option = scale; config_changed = true;
-        }
-
-        ImGui::TextUnformatted("Frame rate");
-        if (ImGui::BeginCombo("##refresh-rate", RefreshName(config.rr_option))) {
-            const std::array<ultramodern::renderer::RefreshRate, 3> values{
-                ultramodern::renderer::RefreshRate::Original,
-                ultramodern::renderer::RefreshRate::Display,
-                ultramodern::renderer::RefreshRate::Manual};
-            for (auto value : values) {
-                if (ImGui::Selectable(RefreshName(value), config.rr_option == value)) {
-                    config.rr_option = value; config_changed = true;
-                }
-            }
-            ImGui::EndCombo();
-        }
-        if (config.rr_option == ultramodern::renderer::RefreshRate::Manual) {
-            int manual_rate = std::clamp(config.rr_manual_value, 30, 500);
-            ImGui::SetNextItemWidth(control_width);
-            if (ImGui::SliderInt("##refresh-manual", &manual_rate, 30, 500, "%d FPS")) {
-                config.rr_manual_value = manual_rate; config_changed = true;
-            }
-        }
-        UiHint(config.rr_option == ultramodern::renderer::RefreshRate::Original
-            ? "Original 30 FPS, without frame interpolation."
-            : "Smoother animation without changing the game's speed.");
 
         ImGui::TextUnformatted("Display buffering");
         if (ImGui::BeginCombo("##buffering", DisplayBufferingName(extra.display_buffering))) {
@@ -1168,7 +1162,10 @@ void DrawGraphicsPage(float width, bool in_game) {
             }
             ImGui::EndCombo();
         }
-    } else if (g_graphics_section == 1) {
+        ImGui::PopItemWidth();
+    };
+    const auto draw_image = [&] {
+        ImGui::PushItemWidth(-FLT_MIN);
         ImGui::TextUnformatted("Anti-aliasing");
         if (ImGui::BeginCombo("##msaa", MsaaName(config.msaa_option))) {
             const std::array<ultramodern::renderer::Antialiasing, 4> values{
@@ -1197,15 +1194,15 @@ void DrawGraphicsPage(float width, bool in_game) {
         }
 
         ImGui::TextUnformatted("Anisotropic filtering");
-        ImGui::SetNextItemWidth(control_width);
-        if (ImGui::SliderInt("##anisotropy", &extra.anisotropy, 1, 16, "%dx")) extra_changed = true;
+        ImGui::SetNextItemWidth(std::min(ImGui::GetContentRegionAvail().x, 560.0F));
+        if (rocket::ui::theme::slider_int("##anisotropy", &extra.anisotropy, 1, 16, "%dx")) extra_changed = true;
         UiHint("Improves texture clarity at an angle.");
         if (in_game) UiHint("Restart the game to apply.");
 
         ImGui::TextUnformatted("Distant texture detail");
-        ImGui::SetNextItemWidth(control_width);
+        ImGui::SetNextItemWidth(std::min(ImGui::GetContentRegionAvail().x, 560.0F));
         float distance_detail_percent = extra.texture_detail_at_distance * 100.0F;
-        if (ImGui::SliderFloat("##distance-detail", &distance_detail_percent, 0.0F, 100.0F, "%.0f%%")) {
+        if (rocket::ui::theme::slider_float("##distance-detail", &distance_detail_percent, 0.0F, 100.0F, "%.0f%%")) {
             extra.texture_detail_at_distance = distance_detail_percent / 100.0F;
             extra_changed = true;
         }
@@ -1213,18 +1210,22 @@ void DrawGraphicsPage(float width, bool in_game) {
         ImGui::TextWrapped("Higher values keep distant textures sharper, but may shimmer or reduce performance. Changes apply immediately.");
 
         ImGui::TextUnformatted("Sky dithering reduction");
-        ImGui::SetNextItemWidth(control_width);
+        ImGui::SetNextItemWidth(std::min(ImGui::GetContentRegionAvail().x, 560.0F));
         float sky_reduction_percent = extra.sky_dither_reduction * 100.0F;
-        if (ImGui::SliderFloat("##sky-dither-reduction", &sky_reduction_percent, 0.0F, 100.0F, "%.0f%%")) {
+        if (rocket::ui::theme::slider_float("##sky-dither-reduction", &sky_reduction_percent, 0.0F, 100.0F, "%.0f%%")) {
             extra.sky_dither_reduction = sky_reduction_percent / 100.0F;
             extra_changed = true;
         }
         UiHint("0%%: Original   |   100%%: Smoothest");
         ImGui::TextWrapped("Softens the patterned shading in the sky. Set to 0%% for the original look. Changes apply immediately.");
 
+        ImGui::PopItemWidth();
+    };
+    const auto draw_advanced = [&] {
+        ImGui::PushItemWidth(-FLT_MIN);
         ImGui::TextUnformatted("Replacement texture mip bias");
-        ImGui::SetNextItemWidth(control_width);
-        if (ImGui::SliderFloat("##mip-bias", &extra.mip_lod_bias, -2.0F, 2.0F, "%+.2f")) extra_changed = true;
+        ImGui::SetNextItemWidth(std::min(ImGui::GetContentRegionAvail().x, 560.0F));
+        if (rocket::ui::theme::slider_float("##mip-bias", &extra.mip_lod_bias, -2.0F, 2.0F, "%+.2f")) extra_changed = true;
         UiHint("For replacement textures: lower values use sharper detail; higher values use softer detail.");
 
         ImGui::TextUnformatted("Screen effect");
@@ -1241,11 +1242,11 @@ void DrawGraphicsPage(float width, bool in_game) {
         }
         if (extra.post_process != rocket::graphics::PostProcessMode::Off) {
             ImGui::TextUnformatted("Effect strength");
-            ImGui::SetNextItemWidth(control_width);
-            if (ImGui::SliderFloat("##post-strength", &extra.post_process_strength, 0.0F, 100.0F, "%.0f%%")) extra_changed = true;
+            ImGui::SetNextItemWidth(std::min(ImGui::GetContentRegionAvail().x, 560.0F));
+            if (rocket::ui::theme::slider_float("##post-strength", &extra.post_process_strength, 0.0F, 100.0F, "%.0f%%")) extra_changed = true;
         }
         if (extra.post_process == rocket::graphics::PostProcessMode::Custom) {
-            const auto stems = CustomShaderStems();
+            const auto& stems = CustomShaderStems();
             const char* preview = extra.custom_shader.empty() ? "No shader selected" : extra.custom_shader.c_str();
             if (ImGui::BeginCombo("##custom-shader", preview)) {
                 for (const auto& stem : stems) {
@@ -1260,30 +1261,41 @@ void DrawGraphicsPage(float width, bool in_game) {
             }
             UiHint("Restart the game to apply your custom shader.");
         }
-    } else if (g_graphics_section == 2) {
+        ImGui::PopItemWidth();
+    };
+    const auto draw_camera = [&] {
+        ImGui::PushItemWidth(-FLT_MIN);
         ImGui::TextUnformatted("Field of view adjustment");
-        ImGui::SetNextItemWidth(control_width);
-        if (ImGui::SliderFloat("##fov-offset", &extra.fov_offset_degrees, -20.0F, 40.0F, "%+.1f deg")) extra_changed = true;
+        ImGui::SetNextItemWidth(std::min(ImGui::GetContentRegionAvail().x, 560.0F));
+        if (rocket::ui::theme::slider_float("##fov-offset", &extra.fov_offset_degrees, -20.0F, 40.0F, "%+.1f deg")) extra_changed = true;
 
         ImGui::TextUnformatted("Draw distance");
-        ImGui::SetNextItemWidth(control_width);
+        ImGui::SetNextItemWidth(std::min(ImGui::GetContentRegionAvail().x, 560.0F));
         int draw_distance_step = std::clamp(
             static_cast<int>(std::lround(extra.draw_distance_multiplier)), 1, 6);
-        if (ImGui::SliderInt("##draw-distance", &draw_distance_step, 1, 6, "%dx")) {
+        if (rocket::ui::theme::slider_int("##draw-distance", &draw_distance_step, 1, 6, "%dx")) {
             extra.draw_distance_multiplier = static_cast<float>(draw_distance_step);
             extra_changed = true;
         }
         UiHint("1x is the original distance. Higher values show objects farther away.");
-    } else {
+        ImGui::PopItemWidth();
+    };
+    const auto draw_diagnostics = [&] {
+        ImGui::PushItemWidth(-FLT_MIN);
         DrawLiveLog();
         ImGui::Spacing();
         if (ImGui::Checkbox("Show performance stats", &extra.performance_overlay)) extra_changed = true;
+        if (ImGui::Checkbox("Record performance log", &extra.performance_logging)) extra_changed = true;
+        UiHint("Adds a performance summary to the live log every four seconds.");
         if (ImGui::Checkbox("Show interpolation stats", &extra.interpolation_overlay)) extra_changed = true;
         if (ImGui::CollapsingHeader("Detailed statistics")) {
         const auto perf = rocket::graphics::performance_stats();
         const auto coverage = rocket::presentation::coverage_stats();
         ImGui::Separator();
         ImGui::Text("Frame rate: %.1f FPS (%.2f ms)", perf.fps, perf.frame_ms);
+        if (!perf.device_name.empty()) ImGui::TextWrapped("Graphics device: %s", perf.device_name.c_str());
+        if (perf.software_renderer)
+            UiHint("The game is rendering on the CPU. Check that your GPU's Vulkan driver is installed and selected.");
         ImGui::Text("Display: %d Hz  |  Target: %d Hz", perf.display_rate, perf.target_rate);
         ImGui::Text("Resolution scale: %.2fx", perf.resolution_scale);
         ImGui::Text("Frames presented: %llu  |  Interpolated: %llu",
@@ -1299,19 +1311,58 @@ void DrawGraphicsPage(float width, bool in_game) {
                     static_cast<unsigned long long>(coverage.sidecar_mismatches));
         UiHint("When a match between frames is uncertain, interpolation is skipped for that item.");
         }
+            ImGui::PopItemWidth();
+    };
+    {
+        rocket::ui::theme::Card card("display-card", "GAME DISPLAY");
+        {
+            rocket::ui::theme::FieldGrid fields("display-fields");
+            fields.next(); draw_window();
+            fields.next(); draw_aspect();
+            fields.next(); draw_resolution();
+            fields.next(); draw_rate();
+        }
+        if (ImGui::CollapsingHeader("Renderer & performance")) draw_renderer();
     }
+    const auto quality_card = [&] {
+        rocket::ui::theme::Card card("image-card", "IMAGE QUALITY");
+        draw_image();
+        if (ImGui::CollapsingHeader("Advanced image options")) draw_advanced();
+    };
+    const auto camera_card = [&] {
+        rocket::ui::theme::Card card("camera-card", "CAMERA & SCENERY");
+        draw_camera();
+    };
+    if (width >= 700 && ImGui::BeginTable("quality-camera-grid", 2, ImGuiTableFlags_SizingStretchSame)) {
+        ImGui::TableNextColumn(); quality_card();
+        ImGui::TableNextColumn(); camera_card();
+        ImGui::EndTable();
+    } else if (width < 700) { quality_card(); camera_card(); }
+    {
+        rocket::ui::theme::Card card("diagnostics-card");
+        if (ImGui::CollapsingHeader("Diagnostics")) draw_diagnostics();
+    }
+    UiHint("Changes are saved automatically.");
     ImGui::Separator();
     ImGui::Spacing();
-    if (ImGui::Button("RESET GRAPHICS", {std::min(width, 330.0F), 54.0F})) {
+    if (rocket::ui::theme::button("RESET GRAPHICS", {std::min(width, 330.0F), 54.0F})) {
         rocket::graphics::reset_settings();
         extra = rocket::graphics::settings();
+#if defined(__ANDROID__)
+        config.res_option = ultramodern::renderer::Resolution::Original;
+#else
         config.res_option = ultramodern::renderer::Resolution::Auto;
+#endif
         config.ar_option = ultramodern::renderer::AspectRatio::Original;
         config.msaa_option = ultramodern::renderer::Antialiasing::None;
         config.rr_option = ultramodern::renderer::RefreshRate::Original;
         config.rr_manual_value = 60;
         config.ds_option = 1;
+#if defined(__ANDROID__)
+        config.hpfb_option = ultramodern::renderer::HighPrecisionFramebuffer::Off;
+#else
         config.hpfb_option = ultramodern::renderer::HighPrecisionFramebuffer::Auto;
+#endif
         config_changed = true;
         extra_changed = true;
         keep_named_preset = true;
@@ -1334,10 +1385,11 @@ void DrawGraphicsPage(float width, bool in_game) {
 
 void DrawSoundPage(float width) {
     DrawPageHeader(Page::Sound);
+    rocket::ui::theme::Card card("sound-card", "GAME VOLUME");
     float volume = rocket::platform::master_volume() * 100.0F;
     ImGui::TextUnformatted("Master volume");
-    ImGui::SetNextItemWidth(std::min(width, 520.0F));
-    if (ImGui::SliderFloat("##volume", &volume, 0.0F, 100.0F, "%.0f%%")) {
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    if (rocket::ui::theme::slider_float("##volume", &volume, 0.0F, 100.0F, "%.0f%%")) {
         rocket::platform::set_master_volume(volume / 100.0F);
         SaveSettings();
     }
@@ -1363,6 +1415,7 @@ void BeginBindingCapture(rocket::input::Action action, rocket::input::BindingSlo
     g_capture_slot = slot;
     g_capture_shortcut = false;
     g_capture_camera = false;
+    g_capture_mod_commit={};
     StartCapture(slot == rocket::input::BindingSlot::KeyboardPrimary ||
                  slot == rocket::input::BindingSlot::KeyboardSecondary
         ? CaptureDevice::Keyboard : CaptureDevice::Controller);
@@ -1373,6 +1426,7 @@ void BeginShortcutCapture(CaptureDevice device, rocket::input::ShortcutAction ac
     g_capture_action = -1;
     g_capture_shortcut = true;
     g_capture_camera = false;
+    g_capture_mod_commit={};
     g_capture_shortcut_action = action;
     StartCapture(device);
 }
@@ -1380,12 +1434,15 @@ void BeginShortcutCapture(CaptureDevice device, rocket::input::ShortcutAction ac
 void FinishCapture() {
     g_capture.finish();
     g_capture_active.store(false);
+    g_capture_mod_commit={};g_capture_mod_name.clear();
     ImGui::GetIO().ClearInputKeys();
     ImGui::CloseCurrentPopup();
 }
 
 void CommitCapturedSource(int source) {
-    if (g_capture_camera) {
+    if(g_capture_mod_commit) {
+        auto commit=g_capture_mod_commit;commit(source);
+    } else if (g_capture_camera) {
         rocket::input::set_camera_binding(static_cast<rocket::input::CameraAction>(g_capture_action),
             g_capture.device == CaptureDevice::Keyboard, source);
     } else if (g_capture_shortcut) {
@@ -1445,13 +1502,24 @@ void DrawCapturePopup() {
     if (g_capture.phase == Phase::Cancelled || g_capture.phase == Phase::Idle) {
         FinishCapture(); ImGui::EndPopup(); return;
     }
-    ImGui::TextWrapped("%s", g_capture_camera
+    ImGui::TextWrapped("%s", g_capture_mod_commit?g_capture_mod_name.c_str():g_capture_camera
         ? rocket::input::camera_action_label(static_cast<rocket::input::CameraAction>(g_capture_action)) : g_capture_shortcut
         ? (g_capture_shortcut_action == rocket::input::ShortcutAction::ToggleOverlay
             ? "Open / close settings" : "Toggle fullscreen") : rocket::input::action_label(
         static_cast<rocket::input::Action>(g_capture_action)));
     ImGui::Separator();
     if (g_capture.phase == Phase::Ready) {
+        if(g_capture_mod_commit) {
+            const bool keyboard=g_capture.device==CaptureDevice::Keyboard;
+            bool reserved=false;
+            for(const auto shortcut:{rocket::input::ShortcutAction::ToggleOverlay,rocket::input::ShortcutAction::ToggleFullscreen})
+                reserved|=g_capture.source>=0&&g_capture.source==(keyboard?rocket::input::shortcut_keyboard_binding(shortcut):rocket::input::shortcut_controller_binding(shortcut));
+            if(reserved)ImGui::TextWrapped("This input is assigned to a launcher shortcut. Choose another input.");
+            else {CommitCapturedSource(g_capture.source);ImGui::EndPopup();return;}
+            if(rocket::ui::theme::button("TRY ANOTHER INPUT",{-1,44}))StartCapture(g_capture.device);
+            if(rocket::ui::theme::button("CANCEL",{-1,44}))FinishCapture();
+            ImGui::EndPopup();return;
+        }
         if (g_capture_camera) {
             const bool keyboard = g_capture.device == CaptureDevice::Keyboard;
             bool reserved = false;
@@ -1468,7 +1536,7 @@ void DrawCapturePopup() {
             else {
                 ImGui::TextWrapped("This input is also assigned to:");
                 for (const auto& label : conflicts) ImGui::BulletText("%s", label.c_str());
-                if (ImGui::Button("MOVE INPUT HERE", {-1, 44})) {
+                if (rocket::ui::theme::button("MOVE INPUT HERE", {-1, 44})) {
                     for (std::size_t i=0; i<rocket::input::camera_action_count(); ++i) {
                         const auto other = static_cast<rocket::input::CameraAction>(i);
                         if (static_cast<int>(i) != g_capture_action && rocket::input::camera_binding(other, keyboard) == g_capture.source)
@@ -1477,7 +1545,7 @@ void DrawCapturePopup() {
                     CommitCapturedSource(g_capture.source);
                 }
             }
-            if (ImGui::Button("CANCEL", {-1, 44})) FinishCapture();
+            if (rocket::ui::theme::button("CANCEL", {-1, 44})) FinishCapture();
             ImGui::EndPopup(); return;
         }
         const auto action = static_cast<rocket::input::Action>(g_capture_action);
@@ -1491,12 +1559,12 @@ void DrawCapturePopup() {
                                    conflict.slot == rocket::input::BindingSlot::ControllerSecondary;
             ImGui::TextWrapped("%s%s", rocket::input::action_label(conflict.action), alternate ? " (extra input)" : "");
         }
-        if (conflicts.size() == 1 && ImGui::Button("SWAP INPUTS", {-1, 44})) {
+        if (conflicts.size() == 1 && rocket::ui::theme::button("SWAP INPUTS", {-1, 44})) {
             if (rocket::input::swap_binding(action, g_capture_slot, g_capture.source, conflicts[0])) {
                 SaveSettings(); FinishCapture();
             }
         }
-        if (ImGui::Button("SHARE INPUT", {-1, 44})) CommitCapturedSource(g_capture.source);
+        if (rocket::ui::theme::button("SHARE INPUT", {-1, 44})) CommitCapturedSource(g_capture.source);
     } else {
         LauncherHeading("WAITING FOR INPUT");
         ImGui::TextWrapped(g_capture.device == CaptureDevice::Keyboard
@@ -1512,10 +1580,10 @@ void DrawCapturePopup() {
             if (motion) ImGui::TextWrapped("Move the mouse clearly up, down, left or right.");
         }
         ImGui::TextWrapped("Press Escape to cancel, or Backspace / Delete to remove this input.");
-        if (ImGui::Button("REMOVE INPUT", {-1, 44})) CommitCapturedSource(rocket::input::kUnbound);
+        if (rocket::ui::theme::button("REMOVE INPUT", {-1, 44})) CommitCapturedSource(rocket::input::kUnbound);
         mouse_control();
     }
-    if (ImGui::Button("CANCEL", {-1, 44})) FinishCapture();
+    if (rocket::ui::theme::button("CANCEL", {-1, 44})) FinishCapture();
     mouse_control();
     ImGui::EndPopup();
 }
@@ -1529,7 +1597,7 @@ void DrawCameraModSettings(float width) {
     if (mouse_enabled) {
         float sensitivity = rocket::input::camera_mouse_sensitivity();
         ImGui::SetNextItemWidth(std::min(width, 420.0F));
-        if (ImGui::SliderFloat("Mouse sensitivity", &sensitivity, 0.01F, 1.0F, "%.2f", ImGuiSliderFlags_AlwaysClamp)) {
+        if (rocket::ui::theme::slider_float("Mouse sensitivity", &sensitivity, 0.01F, 1.0F, "%.2f", ImGuiSliderFlags_AlwaysClamp)) {
             rocket::input::set_camera_mouse_sensitivity(sensitivity); SaveSettings();
         }
         constexpr const char* mouse_buttons[] = {"Not assigned", "Left button", "Middle button", "Right button", "Side button 1", "Side button 2"};
@@ -1553,11 +1621,12 @@ void DrawCameraModSettings(float width) {
             const auto label = CaptureBindingName(keyboard ? CaptureDevice::Keyboard : CaptureDevice::Controller,
                 rocket::input::camera_binding(action, keyboard));
             ImGui::PushID(keyboard ? "keyboard" : "controller");
-            if (ImGui::Button(label.c_str(), {ImGui::GetContentRegionAvail().x, 42})) {
+            if (rocket::ui::theme::button(label.c_str(), {ImGui::GetContentRegionAvail().x, 42})) {
                 std::lock_guard lock(g_capture_mutex);
                 g_capture_action = static_cast<int>(i);
                 g_capture_shortcut = false;
                 g_capture_camera = true;
+                g_capture_mod_commit={};
                 StartCapture(keyboard ? CaptureDevice::Keyboard : CaptureDevice::Controller);
             }
             ImGui::PopID();
@@ -1586,7 +1655,7 @@ void DrawCameraModSettings(float width) {
         ImGui::PopID();
     }
     ImGui::Spacing();
-    if (ImGui::Button("RESET CAMERA BINDINGS", {std::min(width, 420.0F), 44})) {
+    if (rocket::ui::theme::button("RESET CAMERA BINDINGS", {std::min(width, 420.0F), 44})) {
         rocket::input::reset_camera_bindings();
         rocket::input::set_camera_mouse_enabled(true);
         rocket::input::set_camera_mouse_sensitivity(0.15F);
@@ -1606,6 +1675,8 @@ void DrawControlsPage(float width) {
     if (SectionTabs(sections.data(), static_cast<int>(sections.size()), width, g_controls_section))
         rocket::ui::controls::end_test();
 
+    rocket::ui::theme::Card card("controls-card");
+    width = ImGui::GetContentRegionAvail().x;
     if (g_controls_section == 0) {
         ImGui::SeparatorText("ACTIVE CONTROLLER");
         const auto controller_choices = rocket::platform::controller_choices();
@@ -1642,7 +1713,7 @@ void DrawControlsPage(float width) {
             ImGui::TextColored(kWarm, "No controller connected.");
             UiHint("Connect a controller, then select RESCAN CONTROLLERS. You can also use the keyboard.");
         }
-        if (ImGui::Button("RESCAN CONTROLLERS", {std::min(width, 320.0F), 44.0F})) {
+        if (rocket::ui::theme::button("RESCAN CONTROLLERS", {std::min(width, 320.0F), 44.0F})) {
             rocket::platform::rescan_controller();
         }
         ImGui::Dummy({0.0F, 8.0F});
@@ -1664,12 +1735,12 @@ void DrawControlsPage(float width) {
             float strength = rocket::platform::rumble_strength() * 100.0F;
             ImGui::TextUnformatted("Rumble strength");
             ImGui::SetNextItemWidth(std::min(width, 620.0F));
-            if (ImGui::SliderFloat("##rumble-strength", &strength, 0.0F, 100.0F, "%.0f%%")) {
+            if (rocket::ui::theme::slider_float("##rumble-strength", &strength, 0.0F, 100.0F, "%.0f%%")) {
                 rocket::platform::set_rumble_strength(strength / 100.0F);
                 SaveSettings();
             }
             ImGui::BeginDisabled(!rocket::platform::controller_connected());
-            if (ImGui::Button("TEST RUMBLE", {220.0F, 42.0F})) {
+            if (rocket::ui::theme::button("TEST RUMBLE", {220.0F, 42.0F})) {
                 rocket::platform::test_rumble();
             }
             ImGui::EndDisabled();
@@ -1684,7 +1755,7 @@ void DrawControlsPage(float width) {
                                 auto setter) {
             ImGui::TextUnformatted(label);
             ImGui::SetNextItemWidth(std::min(width, 700.0F));
-            if (ImGui::SliderFloat(id, &value, minimum, maximum, format,
+            if (rocket::ui::theme::slider_float(id, &value, minimum, maximum, format,
                                    ImGuiSliderFlags_AlwaysClamp)) {
                 setter(value);
                 SaveSettings();
@@ -1714,7 +1785,7 @@ void DrawControlsPage(float width) {
         }
         UiHint("Adjust how your sticks and triggers respond.");
         ImGui::Spacing();
-        if (ImGui::Button("RESET STICK SETTINGS", {std::min(width, 420.0F), 44.0F})) {
+        if (rocket::ui::theme::button("RESET STICK SETTINGS", {std::min(width, 420.0F), 44.0F})) {
             rocket::input::reset_stick_settings();
             SaveSettings();
         }
@@ -1739,17 +1810,17 @@ void DrawControlsPage(float width) {
                 rocket::input::shortcut_keyboard_binding(row.action));
             const std::string controller = "Controller: " + rocket::input::controller_binding_name(
                 rocket::input::shortcut_controller_binding(row.action));
-            if (ImGui::Button(keyboard.c_str(), {button_width, 40.0F})) {
+            if (rocket::ui::theme::button(keyboard.c_str(), {button_width, 40.0F})) {
                 BeginShortcutCapture(CaptureDevice::Keyboard, row.action);
             }
             ImGui::SameLine();
-            if (ImGui::Button(controller.c_str(), {button_width, 40.0F})) {
+            if (rocket::ui::theme::button(controller.c_str(), {button_width, 40.0F})) {
                 BeginShortcutCapture(CaptureDevice::Controller, row.action);
             }
             ImGui::Spacing();
             ImGui::PopID();
         }
-        if (ImGui::Button("RESET SHORTCUTS", {std::min(width, 420.0F), 44.0F})) {
+        if (rocket::ui::theme::button("RESET SHORTCUTS", {std::min(width, 420.0F), 44.0F})) {
             rocket::input::reset_shortcuts();
             SaveSettings();
         }
@@ -1758,53 +1829,165 @@ void DrawControlsPage(float width) {
 
 
 
+enum class RomCardAction { None, Choose, Remove };
+
+RomCardAction DrawRomCard(bool ready, const std::filesystem::path& rom, const std::string& status) {
+    using namespace rocket::ui::theme;
+    Card card("rom-card", nullptr, 0, ready ? green : border);
+    auto* draw = ImGui::GetWindowDrawList();
+    const auto p = ImGui::GetCursorScreenPos();
+    draw->AddRectFilled(p, {p.x + 72, p.y + 24}, ImGui::GetColorU32(field), 12);
+    for (int i = 0; i < 3; ++i)
+        draw->AddCircleFilled({p.x + 14 + i * 22.0F, p.y + 12}, 6,
+            ImGui::GetColorU32(i == 2 && ready ? green : i == 1 && !ready ? gold : border));
+    ImGui::Dummy({72, 26});
+    if (ImGui::GetContentRegionAvail().x >= 380) ImGui::SameLine();
+    heading(ready ? "READY TO PLAY" : "CHOOSE YOUR ROM", 1.18F);
+    ImGui::TextWrapped("%s", rom.empty() ? "No ROM selected" : PathUtf8(rom.filename()).c_str());
+    UiHint("%s", status.c_str());
+    ImGui::Spacing();
+    const float width = ImGui::GetContentRegionAvail().x;
+    RomCardAction action = RomCardAction::None;
+    if (button("CHOOSE ROM...", {std::min(220.0F, width), 44})) action = RomCardAction::Choose;
+    if (ready) {
+        if (width >= 440) ImGui::SameLine();
+        if (button("Remove selection", {std::min(170.0F, width), 44})) action = RomCardAction::Remove;
+    }
+    UiHint("Or drop a .z64, .n64 or .v64 file onto the launcher.");
+    return action;
+}
+
+bool DrawLaunchProfile() {
+    using namespace rocket::ui::theme;
+    Card card("launch-profile-card");
+    const float width = ImGui::GetContentRegionAvail().x;
+    const auto origin = ImGui::GetCursorScreenPos();
+    ImGui::BeginGroup();
+    // Reserve the review button's column so long profile names wrap cleanly.
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + (width >= 430 ? width - 170 : width));
+    rocket::mods::ui::launch_summary();
+    ImGui::PopTextWrapPos();
+    ImGui::EndGroup();
+    if (width >= 430) {
+        ImGui::SameLine();
+        ImGui::SetCursorScreenPos({origin.x + width - 150, origin.y});
+    }
+    return button("Review mods", {std::min(width, 150.0F), 42});
+}
+
 void DrawAboutPage() {
     DrawPageHeader(Page::About);
-    ImGui::PushStyleColor(ImGuiCol_Text, kWarm);
-    ImGui::TextWrapped("Recompilation project by ThatGuyMcd");
-    ImGui::PopStyleColor();
-    ImGui::Spacing();
-    ImGui::TextWrapped("Play Rocket: Robot on Wheels on Windows, Linux and Android, with widescreen, higher resolutions and custom controls.");
-    ImGui::Spacing();
-    ImGui::SeparatorText("BUILT WITH");
-    ImGui::TextWrapped("N64Recomp, RSPRecomp, N64ModernRuntime and RT64.");
-    ImGui::TextWrapped("Based on the Rocket: Robot on Wheels decompilation by RocketRet and contributors.");
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::TextWrapped("Requires your own unmodified US ROM. The game is not included.");
-    ImGui::Spacing();
+    {
+        rocket::ui::theme::Card card("about-project", "THE PROJECT");
+        ImGui::TextWrapped("Recompilation project by ThatGuyMcd");
+        ImGui::Spacing();
+        ImGui::TextWrapped("Play Rocket: Robot on Wheels on Windows, Linux and Android, with widescreen, higher resolutions and custom controls.");
+    }
+    {
+        rocket::ui::theme::Card card("about-tools", "BUILT WITH");
+        ImGui::TextWrapped("N64Recomp, RSPRecomp, N64ModernRuntime and RT64.");
+        ImGui::Spacing();
+        ImGui::TextWrapped("Based on the Rocket: Robot on Wheels decompilation by RocketRet and contributors.");
+    }
+    {
+        rocket::ui::theme::Card card("about-rom", "YOUR GAME");
+        ImGui::TextWrapped("Requires your own unmodified US ROM. The game is not included.");
+    }
     UiHint("Version %s", ROCKET_R_VERSION);
 }
 
-void DrawSidebar(int& page, float width, bool overlay) {
-    // === ROCKET-R UI V36.5 DKR-R STYLE SIDEBAR BRAND ===
-    if (g_rocket_brand_rect >= 0) {
-        DrawRocketBrandCoin(width, overlay ? 160.0F : 180.0F);
-    } else {
-        ImGui::TextUnformatted("ROCKET-R");
-        UiHint("ROCKET: ROBOT ON WHEELS");
-        UiHint("RECOMPILED");
+void DrawSidebar(int& page, float width, bool overlay, bool compact = false) {
+    using namespace rocket::ui::theme;
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {12, overlay ? 8.0F : 12.0F});
+    width = ImGui::GetContentRegionAvail().x;
+    if (!compact) {
+        DrawRocketBrand(width);
+        ImGui::SetWindowFontScale(0.72F);
+        for (const char* caption : {"ROCKET: ROBOT ON WHEELS", "RECOMPILED"}) {
+            const float indent = std::max(0.0F, (width - ImGui::CalcTextSize(caption).x) * .5F);
+            ImGui::SetCursorPosX(ImGui::GetStyle().WindowPadding.x + indent);
+            UiHint("%s", caption);
+        }
+        ImGui::SetWindowFontScale(1.0F);
+        ImGui::Dummy({0, 4});
     }
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-    const std::array<const char*,6> labels{"PLAY","GRAPHICS","SOUND","CONTROLS","MODS","ABOUT"};
-    for (int i=0;i<static_cast<int>(labels.size());++i) {
-        if (i==page) ImGui::PushStyleColor(ImGuiCol_Button,kWarm);
-        if (ImGui::Button(labels[static_cast<std::size_t>(i)],{width,58.0F})) page=i;
-        if (i==page) ImGui::PopStyleColor();
+    constexpr std::array<const char*, 6> labels{"PLAY", "MODS", "GRAPHICS", "SOUND", "CONTROLS", "ABOUT"};
+    constexpr std::array<int, 6> pages{0, 4, 1, 2, 3, 5};
+    const int columns = compact ? (width >= 850 ? 6 : width >= 440 ? 3 : 2) : 1;
+    const float button_width = (width - ImGui::GetStyle().ItemSpacing.x * (columns - 1)) / columns;
+    const float button_height = compact ? 46 : std::clamp((ImGui::GetContentRegionAvail().y - 115) / (overlay ? 8 : 6) - 9, 30.0F, 47.0F);
+    for (int i = 0; i < 6; ++i) {
+        if (i % columns != 0) ImGui::SameLine();
+        if (button(labels[i], {button_width, button_height}, page == pages[i], i == 0)) page = pages[i];
     }
     if (overlay) {
         ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-        ImGui::PushStyleColor(ImGuiCol_Button,kRed);
+        if (button("RETURN TO GAME", {width, 48})) g_overlay_visible.store(false, std::memory_order_release);
+        ImGui::PushStyleColor(ImGuiCol_Button, red);
 #if defined(__ANDROID__)
         constexpr const char* exit_label = "EXIT GAME";
 #else
         constexpr const char* exit_label = "EXIT TO DESKTOP";
 #endif
-        if (ImGui::Button(exit_label,{width,58.0F})) ultramodern::quit();
+        if (button(exit_label, {width, 48})) ultramodern::quit();
         ImGui::PopStyleColor();
     }
+    if (!compact) {
+        ImGui::Spacing();
+        ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY(), ImGui::GetWindowHeight() - 42.0F));
+        ImGui::SetWindowFontScale(0.72F);
+        UiHint("Rocket-R %s", ROCKET_R_VERSION);
+        ImGui::SetWindowFontScale(1.0F);
+    }
+    ImGui::PopStyleVar();
+}
+
+// Launcher and overlay share the same responsive shell. The overlay's panel
+// backgrounds composite to 75% opacity; text, controls and modals stay clear.
+// Only the fullscreen root is square; the shared modal style stays rounded.
+void BeginPageShell(int& page, bool overlay) {
+    using namespace rocket::ui::theme;
+    const auto root = ImGui::GetWindowPos();
+    const float backdrop = overlay ? overlay_backdrop_opacity : 1.0F;
+    const float panel_alpha = overlay ? overlay_panel_opacity : 1.0F;
+    ImGui::GetWindowDrawList()->AddRectFilledMultiColor(root,
+        {root.x + ImGui::GetWindowWidth(), root.y + ImGui::GetWindowHeight()},
+        ImGui::GetColorU32(opacity(rgb(0x183a59), backdrop)), ImGui::GetColorU32(opacity(background, backdrop)),
+        ImGui::GetColorU32(opacity(rgb(0x112a43), backdrop)), ImGui::GetColorU32(opacity(rgb(0x0c1d31), backdrop)));
+    const float window_width = ImGui::GetWindowWidth();
+    const float margin = std::round(std::clamp(window_width * 0.022F, 16.0F, 34.0F));
+    const float gap = std::round(std::clamp(window_width * 0.018F, 14.0F, 28.0F));
+    const float height = std::max(1.0F, ImGui::GetWindowHeight() - margin * 2);
+    const bool compact = window_width < 780;
+    const float sidebar = std::round(std::clamp(window_width * 0.235F, 190.0F, 330.0F));
+    const float outer_width = std::max(1.0F, window_width - margin * 2);
+    const float nav_width = compact ? outer_width : sidebar;
+    const float nav_inner = std::max(1.0F, nav_width - 32);
+    const int columns = nav_inner >= 850 ? 6 : nav_inner >= 440 ? 3 : 2;
+    const float nav_height = compact ? 36 + (6 / columns) * 58 - 12 + (overlay ? 158 : 0) : height;
+    ImGui::SetCursorPos({margin, margin});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {16, 18});
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 2);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, opacity(navigation, panel_alpha));
+    ImGui::PushStyleColor(ImGuiCol_Border, gold);
+    ImGui::BeginChild(overlay ? "overlay-nav" : "launcher-nav", {nav_width, nav_height}, true);
+    DrawSidebar(page, ImGui::GetContentRegionAvail().x, overlay, compact);
+    ImGui::EndChild();
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(2);
+    if (page != 3) rocket::ui::controls::end_test();
+    const float content_x = compact ? margin : margin + sidebar + gap;
+    const float content_y = compact ? margin + nav_height + gap : margin;
+    const float content_width = compact ? outer_width : std::max(1.0F, window_width - content_x - margin);
+    const float content_height = std::max(1.0F, ImGui::GetWindowHeight() - content_y - margin);
+    ImGui::SetCursorPos({content_x, content_y});
+    const float padding = std::round(std::clamp(content_width * 0.045F, 22.0F, 43.0F));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {padding, padding});
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 2);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, opacity(panel, panel_alpha));
+    ImGui::BeginChild(overlay ? "overlay-content" : "launcher-content", {content_width, content_height}, true);
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
 }
 
 void DrawOverlayPage(int page, float width) {
@@ -1817,9 +2000,12 @@ void DrawOverlayPage(int page, float width) {
         case 5: DrawAboutPage(); break;
         default:
             DrawPageHeader(Page::Play);
-            ImGui::TextWrapped("Change your settings, then return to the game.");
+            {
+                rocket::ui::theme::Card card("return-card", "ADVENTURE IN PROGRESS");
+                ImGui::TextWrapped("Change your settings, then return to the game.");
+            }
             ImGui::Spacing();
-            if (ImGui::Button("RETURN TO GAME", {280.0F, 60.0F})) {
+            if (rocket::ui::theme::button("RETURN TO GAME", {width, 68.0F}, false, true)) {
                 g_overlay_visible.store(false, std::memory_order_release);
             }
             ImGui::Spacing();
@@ -1916,7 +2102,7 @@ rocket::ui::StartupResult rocket::ui::run_launcher(
 
     ApplyRocketWindowIcon(window);
     SDL_SetWindowTitle(window, "Rocket-R - Launcher");
-#if defined(__linux__) || defined(__ANDROID__)
+#if defined(__ANDROID__)
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
 #else
     SDL_Renderer* renderer = SDL_CreateRenderer(
@@ -1927,6 +2113,11 @@ rocket::ui::StartupResult rocket::ui::run_launcher(
         std::fprintf(stderr, "[launcher] SDL renderer failed: %s\n", SDL_GetError());
         return result;
     }
+    SDL_RendererInfo renderer_info{};
+    SDL_GetRendererInfo(renderer, &renderer_info);
+    std::fprintf(stderr, "[launcher] renderer=%s accelerated=%d; active cap=60 Hz, idle=30 Hz\n",
+        renderer_info.name ? renderer_info.name : "unknown",
+        (renderer_info.flags & SDL_RENDERER_ACCELERATED) != 0);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -1962,9 +2153,29 @@ rocket::ui::StartupResult rocket::ui::run_launcher(
 
     int page = 0;
     bool running = true;
+    using Clock = std::chrono::steady_clock;
+    auto last_interaction = Clock::now();
+    auto last_frame = last_interaction - std::chrono::milliseconds(17);
+    auto next_frame = last_interaction;
+    const char* trace_env = std::getenv("ROCKET_PERFORMANCE_TRACE");
+    const bool trace = trace_env != nullptr && trace_env[0] != '\0' && trace_env[0] != '0';
+    auto trace_start = last_interaction;
+    unsigned trace_frames = 0;
+    SDL_Event event{};
+    bool waited_event = false;
     while (running) {
-        SDL_Event event{};
-        while (SDL_PollEvent(&event)) {
+        bool had_event = false;
+        while (std::exchange(waited_event, false) || SDL_PollEvent(&event)) {
+            // Expose notifications and idle joystick noise can accompany each
+            // software present. They must not keep an untouched launcher busy.
+            had_event |= event.type == SDL_KEYDOWN || event.type == SDL_KEYUP ||
+                event.type == SDL_TEXTINPUT || event.type == SDL_MOUSEMOTION ||
+                event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP ||
+                event.type == SDL_MOUSEWHEEL || event.type == SDL_DROPFILE ||
+                event.type == SDL_CONTROLLERBUTTONDOWN || event.type == SDL_CONTROLLERBUTTONUP ||
+                (event.type == SDL_CONTROLLERAXISMOTION && std::abs(int(event.caxis.value)) > 8000) ||
+                (event.type == SDL_WINDOWEVENT && (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
+                    event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED || event.window.event == SDL_WINDOWEVENT_RESTORED));
             rocket::input::mouse_event(event);
             if (HandleInputCaptureEvent(&event)) {
                 continue;
@@ -2003,64 +2214,66 @@ rocket::ui::StartupResult rocket::ui::run_launcher(
                 rocket::platform::sample_input();
             }
         }
+        if (!running) break;
+        const auto now = Clock::now();
+        if (had_event) {
+            last_interaction = now;
+            next_frame = std::min(next_frame, last_frame + std::chrono::milliseconds(17));
+        }
+        if (now < next_frame) {
+            const auto wait_ms = std::chrono::ceil<std::chrono::milliseconds>(next_frame - now).count();
+            // Waiting releases the CPU. Keep the returned event for the next
+            // iteration, including clicks, drops and controller hotplug events.
+            waited_event = SDL_WaitEventTimeout(&event, static_cast<int>(wait_ms)) == 1;
+            continue;
+        }
+        const Uint32 flags = SDL_GetWindowFlags(window);
+        if ((flags & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_HIDDEN)) != 0) {
+            next_frame = now + std::chrono::milliseconds(250);
+            continue;
+        }
         rocket::platform::sample_input();
 
         ImGui_ImplSDLRenderer2_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
-        ApplyStyle();
 
         int win_w = 0, win_h = 0;
         SDL_GetWindowSize(window, &win_w, &win_h);
         ImGui::SetNextWindowPos({0.0F, 0.0F});
         ImGui::SetNextWindowSize({static_cast<float>(win_w), static_cast<float>(win_h)});
+        ImGui::SetNextWindowBgAlpha(0);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, kBackground);
         ImGui::Begin("Rocket-R Launcher", nullptr,
                      ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
-
-        const float margin = std::clamp(ImGui::GetWindowWidth() * 0.03F, 18.0F, 42.0F);
-        const float sidebar_width = std::clamp(ImGui::GetWindowWidth() * 0.23F, 220.0F, 330.0F);
-        const float gap = 20.0F;
-        const float height = ImGui::GetWindowHeight() - margin * 2.0F;
-        ImGui::SetCursorPos({margin, margin});
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, {0.025F, 0.08F, 0.12F, 1.0F});
-        ImGui::BeginChild("launcher-nav", {sidebar_width, height}, true);
-        DrawSidebar(page, sidebar_width - 32.0F, false);
-        if (page != 3) rocket::ui::controls::end_test();
-        ImGui::EndChild();
         ImGui::PopStyleColor();
+        ImGui::PopStyleVar();
 
-        const float content_x = margin + sidebar_width + gap;
-        const float content_width = ImGui::GetWindowWidth() - content_x - margin;
-        ImGui::SetCursorPos({content_x, margin});
-        ImGui::BeginChild("launcher-content", {content_width, height}, true);
+        BeginPageShell(page, false);
         const float inner = std::max(ImGui::GetContentRegionAvail().x, 1.0F);
         if (page == 0) {
             DrawPageHeader(Page::Play);
-            ImGui::TextWrapped("Choose your unmodified US ROM of Rocket: Robot on Wheels to get started.");
-            ImGui::Spacing();
-            if (ImGui::Button("CHOOSE ROM", {250.0F, 58.0F})) {
+            const auto rom_action = DrawRomCard(rom_ready, selected_rom, rom_status);
+            if (rom_action == RomCardAction::Choose) {
                 const auto chosen = BrowseForRom();
                 if (!chosen.empty()) try_rom(chosen);
+            } else if (rom_action == RomCardAction::Remove) {
+                selected_rom.clear(); rom_ready = false; rom_status = "Choose your unmodified US ROM.";
+                std::error_code remove_error;
+                std::filesystem::remove(LastRomPath(), remove_error);
             }
-            UiHint("Or drag your .z64, .n64 or .v64 file here.");
-            ImGui::Spacing();
-            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + inner);
-            if (rom_ready) ImGui::TextColored(kAccent, "%s", rom_status.c_str());
-            else ImGui::TextWrapped("%s", rom_status.c_str());
-            if (!selected_rom.empty()) UiHint("%s", PathUtf8(selected_rom).c_str());
-            ImGui::PopTextWrapPos();
-            ImGui::Spacing();
-            rocket::mods::ui::launch_summary();
-            if (!rom_ready) ImGui::BeginDisabled();
-            ImGui::PushStyleColor(ImGuiCol_Button, rom_ready ? kWarm : ImVec4{0.2F,0.2F,0.2F,1.0F});
-            if (ImGui::Button("PLAY ROCKET-R", {300.0F, 68.0F}) && rom_ready && rocket::mods::ui::prepare_launch()) {
+            if (DrawLaunchProfile()) page = 4;
+            ImGui::BeginDisabled(!rom_ready);
+            if (rocket::ui::theme::button("PLAY ROCKET-R", {inner, 68}, false, true) && rom_ready && rocket::mods::ui::prepare_launch()) {
                 result.launch = true;
                 result.rom_path = selected_rom;
                 running = false;
             }
-            ImGui::PopStyleColor();
-            if (!rom_ready) ImGui::EndDisabled();
+            ImGui::EndDisabled();
+            ImGui::Spacing();
+            UiHint("F1: In-game settings   |   Alt+Enter: Fullscreen");
         } else if (page == 1) {
             DrawGraphicsPage(inner, false);
         } else if (page == 2) {
@@ -2081,7 +2294,22 @@ rocket::ui::StartupResult rocket::ui::run_launcher(
         SDL_RenderClear(renderer);
         ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData());
         SDL_RenderPresent(renderer);
-        SDL_Delay(1);
+        if (trace && ++trace_frames != 0 && now - trace_start >= std::chrono::seconds(4)) {
+            std::fprintf(stderr, "[performance][launcher] fps=%.1f focus=%d renderer=%s\n",
+                trace_frames / std::chrono::duration<double>(now - trace_start).count(),
+                (flags & SDL_WINDOW_INPUT_FOCUS) != 0, renderer_info.name ? renderer_info.name : "unknown");
+            trace_frames = 0; trace_start = now;
+        }
+        const auto& io = ImGui::GetIO();
+        const bool held_input = std::any_of(std::begin(io.KeysData), std::end(io.KeysData),
+            [](const ImGuiKeyData& key) { return key.Down; });
+        const bool active = had_event || held_input || ImGui::IsAnyItemActive() ||
+            ImGui::IsAnyMouseDown() || input_capture_active() ||
+            now - last_interaction < std::chrono::milliseconds(750);
+        // Animate the cached logo while retaining event waits and background throttling.
+        const int interval_ms = (flags & SDL_WINDOW_INPUT_FOCUS) == 0 ? 250 : active ? 17 : 33;
+        last_frame = now;
+        next_frame = now + std::chrono::milliseconds(interval_ms);
     }
 
     ImGui_ImplSDLRenderer2_Shutdown();
@@ -2090,6 +2318,88 @@ rocket::ui::StartupResult rocket::ui::run_launcher(
     SDL_DestroyRenderer(renderer);
     std::fprintf(stderr, "[launcher] handoff complete; SDL window remains owned by main thread\n");
     return result;
+}
+
+bool rocket::ui::write_layout_previews(const std::filesystem::path& output_directory) {
+    // Run only with an explicitly supplied output/config folder. This uses the
+    // actual native page functions and SDL software rasterizer, rather than an
+    // approximation of the UI or automation of a visible desktop window.
+    std::filesystem::create_directories(output_directory);
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) return false;
+    SDL_Window* window = SDL_CreateWindow("Rocket-R UI check", 0, 0, 1280, 800, SDL_WINDOW_HIDDEN);
+    if (!window) { SDL_Quit(); return false; }
+    SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
+    if (!renderer) { SDL_DestroyWindow(window); SDL_Quit(); return false; }
+    ImGui::CreateContext();
+    ImGui::GetIO().IniFilename = nullptr;
+    g_layout_preview = true;
+    ConfigureUiFont(); ApplyStyle();
+    ImGui_ImplSDL2_InitForSDLRenderer(window, renderer);
+    ImGui_ImplSDLRenderer2_Init(renderer);
+    bool ok = true;
+    std::ofstream report(output_directory / "native-layout.txt");
+    constexpr const char* names[]{"play", "graphics", "sound", "controls", "mods", "about"};
+    report << "modal-rounding=" << ImGui::GetStyle().WindowRounding << " popup-rounding=" << ImGui::GetStyle().PopupRounding
+           << " overlay-panel-opacity=" << theme::overlay_backdrop_opacity +
+              (1 - theme::overlay_backdrop_opacity) * theme::overlay_panel_opacity << '\n';
+    for (const bool overlay : {false, true}) {
+    for (const ImVec2 size : {ImVec2{1280, 720}, ImVec2{1280, 800}, ImVec2{800, 600}, ImVec2{640, 960}}) {
+        SDL_SetWindowSize(window, static_cast<int>(size.x), static_cast<int>(size.y));
+        for (int page = 0; page < 6; ++page) {
+            g_controls_section = 1;
+            for (int frame = 0; frame < 4; ++frame) {
+                ImGui_ImplSDLRenderer2_NewFrame();
+                ImGui_ImplSDL2_NewFrame();
+                auto& io = ImGui::GetIO();
+                io.DisplaySize = size;
+                io.DisplayFramebufferScale = {1, 1};
+                io.DeltaTime = 1.0F / 60;
+                ImGui::NewFrame();
+                ImGui::SetNextWindowPos({0, 0}); ImGui::SetNextWindowSize(size);
+                ImGui::SetNextWindowBgAlpha(0);
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
+                ImGui::PushStyleColor(ImGuiCol_WindowBg, kBackground);
+                ImGui::Begin("Rocket-R native preview", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings);
+                ImGui::PopStyleColor(); ImGui::PopStyleVar();
+                BeginPageShell(page, overlay);
+                const float width = ImGui::GetContentRegionAvail().x;
+                if (page == 0 && overlay) DrawOverlayPage(page, width);
+                else if (page == 0) {
+                    DrawPageHeader(Page::Play);
+                    DrawRomCard(true, "Rocket - Robot on Wheels (USA).z64",
+                        "Example filename; no ROM is loaded by this check.");
+                    DrawLaunchProfile();
+                    theme::button("PLAY ROCKET-R", {width, 68}, false, true);
+                } else if (page == 1) DrawGraphicsPage(width, overlay);
+                else if (page == 2) DrawSoundPage(width);
+                else if (page == 3) DrawControlsPage(width);
+                else if (page == 4) { DrawPageHeader(Page::Mods); rocket::mods::ui::draw(true); }
+                else DrawAboutPage();
+                DrawCapturePopup();
+                ImGui::EndChild(); ImGui::End(); ImGui::Render();
+                SDL_SetRenderDrawColor(renderer, 9, 22, 38, 255); SDL_RenderClear(renderer);
+                ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData());
+                if (frame == 3) {
+                    const std::string stem = std::string(overlay ? "overlay-" : "") + names[page] + "-" + std::to_string(static_cast<int>(size.x)) + "x" + std::to_string(static_cast<int>(size.y));
+                    SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(0, static_cast<int>(size.x), static_cast<int>(size.y), 32, SDL_PIXELFORMAT_RGBA32);
+                    if (!surface) ok = false;
+                    else {
+                        ok &= SDL_RenderReadPixels(renderer, nullptr, SDL_PIXELFORMAT_RGBA32, surface->pixels, surface->pitch) == 0;
+                        ok &= SDL_SaveBMP(surface, PathUtf8(output_directory / (stem + ".bmp")).c_str()) == 0;
+                        SDL_FreeSurface(surface);
+                    }
+                    const auto* draw = ImGui::GetDrawData();
+                    report << stem << " vertices=" << draw->TotalVtxCount << " indices=" << draw->TotalIdxCount << '\n';
+                }
+                SDL_RenderPresent(renderer);
+            }
+        }
+    }
+    }
+    ImGui_ImplSDLRenderer2_Shutdown(); ImGui_ImplSDL2_Shutdown(); ImGui::DestroyContext();
+    SDL_DestroyRenderer(renderer); SDL_DestroyWindow(window); SDL_Quit();
+    g_layout_preview = false;
+    return ok;
 }
 
 void rocket::ui::detach(RT64::Application& application) {
@@ -2110,7 +2420,8 @@ void rocket::ui::draw(RT64::Application& application) {
     const auto graphics = rocket::graphics::settings();
     const bool diagnostics = graphics.performance_overlay ||
                              graphics.interpolation_overlay;
-    if (!visible && !diagnostics) {
+    const auto mod_hud=rocket::mods::sdk::hud_snapshot();
+    if (!visible && !diagnostics && mod_hud.empty()) {
         if (application.presentQueue->inspector != nullptr) detach(application);
         return;
     }
@@ -2123,37 +2434,38 @@ void rocket::ui::draw(RT64::Application& application) {
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard |
                                   ImGuiConfigFlags_NavEnableGamepad;
 
+    if(!mod_hud.empty()) {
+        const auto display=ImGui::GetIO().DisplaySize;
+        const float sx=display.x/320.0F,sy=display.y/240.0F;
+        auto* draw=ImGui::GetBackgroundDrawList();
+        for(const auto& item:mod_hud) {
+            const auto rgba=item.rgba;
+            const auto colour=IM_COL32((rgba>>24)&255,(rgba>>16)&255,(rgba>>8)&255,rgba&255);
+            const ImVec2 position{item.x*sx,item.y*sy};
+            if(item.kind==ROCKET_HUD_RECTANGLE)draw->AddRectFilled(position,{position.x+item.width*sx,position.y+item.height*sy},colour);
+            else draw->AddText(ImGui::GetFont(),std::clamp(item.height,1.0F,64.0F)*sy,position,colour,item.text);
+        }
+    }
+
     if (visible) {
         ImGuiIO& io = ImGui::GetIO();
         ImGui::SetNextWindowPos({0.0F, 0.0F});
         ImGui::SetNextWindowSize(io.DisplaySize);
-        ImGui::SetNextWindowBgAlpha(0.50F);
+        ImGui::SetNextWindowBgAlpha(0);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, kBackground);
         ImGui::Begin("Rocket-R Overlay", nullptr,
                      ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
-
-        const float margin = std::clamp(ImGui::GetWindowWidth() * 0.025F, 14.0F, 36.0F);
-        const float sidebar = std::clamp(ImGui::GetWindowWidth() * 0.24F, 210.0F, 330.0F);
-        const float gap = 18.0F;
-        const float height = ImGui::GetWindowHeight() - margin * 2.0F;
-        ImGui::SetCursorPos({margin, margin});
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, {0.02F, 0.07F, 0.10F, 0.50F});
-        ImGui::BeginChild("overlay-nav", {sidebar, height}, true);
-        DrawSidebar(g_overlay_page, sidebar - 32.0F, true);
-        ImGui::EndChild();
         ImGui::PopStyleColor();
+        ImGui::PopStyleVar();
 
-        const float content_x = margin + sidebar + gap;
-        const float content_width = ImGui::GetWindowWidth() - content_x - margin;
-        ImGui::SetCursorPos({content_x, margin});
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, {0.03F, 0.085F, 0.12F, 0.50F});
-        ImGui::BeginChild("overlay-content", {content_width, height}, true);
+        BeginPageShell(g_overlay_page, true);
         DrawOverlayPage(g_overlay_page, std::max(ImGui::GetContentRegionAvail().x, 1.0F));
         DrawCapturePopup();
         ImGui::EndChild();
-        ImGui::PopStyleColor();
         ImGui::End();
-    } else {
+    } else if(diagnostics) {
         // This overlay is presentation-only and deliberately does not capture
         // keyboard/controller input while the full settings overlay is closed.
         DrawDiagnosticsOverlay();
@@ -2203,6 +2515,11 @@ bool rocket::ui::input_capture_active() {
 }
 
 bool rocket::ui::bindings_test_active() { return controls::testing(); }
+void rocket::ui::begin_mod_binding_capture(const std::string& name,bool keyboard,std::function<void(int)> commit) {
+    std::lock_guard lock(g_capture_mutex);g_capture_camera=false;g_capture_shortcut=false;
+    g_capture_mod_commit=std::move(commit);g_capture_mod_name=name;
+    StartCapture(keyboard?CaptureDevice::Keyboard:CaptureDevice::Controller);
+}
 
 bool rocket::ui::n64_dithering_enabled() {
     return true;

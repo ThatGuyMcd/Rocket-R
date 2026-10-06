@@ -12,7 +12,7 @@ DOCS = (
     'docs/BUILDING.md', 'docs/CONTROLS.md', 'docs/DEVELOPMENT.md',
     'docs/ARCHITECTURE.md', 'docs/TROUBLESHOOTING.md',
     'docs/CUSTOM_SHADERS.md', 'docs/TESTING.md',
-    'docs/modding.md',
+    'docs/modding.md', 'docs/SDK2.md',
     'docs/custom-shaders/example-rocket-postprocess.hlsl',
 )
 DEPENDENCIES = ('rt64', 'n64-modern-runtime', 'sdl2')

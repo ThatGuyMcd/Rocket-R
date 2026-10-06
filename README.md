@@ -19,15 +19,20 @@ To keep up to date with news, Join the Discord!
 
 ## Getting started
 
+The current release is **1.0.2**, with SDK 2 and support for existing SDK 1 mods.
+See the [SDK 2 guide](docs/SDK2.md) for making mods and the Workshop example.
+Use the package for your device below. See [testing notes](docs/TESTING.md) for
+which builds have been checked on hardware.
+
 Download the package for your device, then follow the steps below:
 
 | Device | Package | Start the game |
 | --- | --- | --- |
-| Windows x64 | `Rocket-R-1.0.1-Windows-x64.zip` | Extract the ZIP and open `Rocket-R.exe`. Keep its DLLs and assets alongside it. |
-| Steam Deck | `Rocket-R-1.0.1-Linux-x86_64-SteamDeck.tar.gz` | Extract the archive and run `START-ROCKET-R.sh`. |
-| Linux x64 | `Rocket-R-1.0.1-Linux-x86_64.AppImage` | Make the AppImage executable, then open it. |
-| Linux ARM64 | `Rocket-R-1.0.1-Linux-aarch64.AppImage` | Make the AppImage executable, then open it. This build still needs gameplay testing on an ARM64 Linux device. |
-| Android ARM64 | `Rocket-R-1.0.1-Android-arm64-v8a.apk` | Install the APK, open Rocket-R and choose your ROM. |
+| Windows x64 | `Rocket-R-1.0.2-Windows-x64.zip` | Extract the ZIP and open `Rocket-R.exe`. Keep its DLLs and assets alongside it. |
+| Steam Deck | `Rocket-R-1.0.2-Linux-x86_64-SteamDeck.tar.gz` | Extract the archive and run `START-ROCKET-R.sh`. |
+| Linux x64 | `Rocket-R-1.0.2-Linux-x86_64.AppImage` | Make the AppImage executable, then open it. |
+| Linux ARM64 | `Rocket-R-1.0.2-Linux-aarch64.AppImage` | Make the AppImage executable, then open it. This build still needs gameplay testing on an ARM64 Linux device. |
+| Android ARM64 | `Rocket-R-1.0.2-Android-arm64-v8a.apk` | Install the APK, open Rocket-R and choose your ROM. |
 
 
 Linux portable archives are also available. Extract one and run
@@ -76,19 +81,25 @@ settings and on/off switch work during gameplay.
 Modded profiles have separate saves. **Original Game** uses your existing save
 and starts without mods. The catalogue is currently offline; add downloaded
 packages with **Add Mods**. See the [modding guide](docs/modding.md) for installing
-mods and making your own, and the [release notes](CHANGELOG.md) for v1.0.1.
+mods and making your own, and the [release notes](CHANGELOG.md) for v1.0.2.
 
 ## Platform notes
 
 Windows and Steam Deck have been tested in gameplay. Android gameplay, speakers
-and touch controls have been tested on the Honor Magic V5. The Android target
-is lower-cost phones with 3 GB RAM, but that hardware still needs testing.
+and touch controls have previously been tested on the Honor Magic V5. Users have
+reported graphical faults and poor performance on other Android devices. The
+current optimisation candidate still needs checks on affected GPUs. The Android
+target is lower-cost phones with 3 GB RAM, but that hardware still needs testing.
 The current renderer needs an ARM64 device with the required Vulkan 1.2 features.
 
 Linux ARM64 builds and automated tests pass, but gameplay on native ARM64 Linux
 hardware has not been confirmed. See [testing](docs/TESTING.md) for the details.
 
 If something goes wrong, **Graphics > Diagnostics** shows the live log.
+On Android, select **Low power** in Graphics and restart for the lightest settings.
+Existing installs keep their saved choices. Enable **Record performance log**
+before reproducing a fault, then use **Save diagnostics** in the Android launcher
+to export a ZIP for your report. ROMs and saves are excluded.
 The [troubleshooting guide](docs/TROUBLESHOOTING.md) covers log locations and
 common build and launch problems.
 

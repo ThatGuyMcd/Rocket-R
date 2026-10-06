@@ -1,0 +1,74 @@
+[manifest]
+id = "rocket_workshop"
+version = "0.2.2"
+display_name = "Rocket Workshop"
+short_description = "An SDK 2 example with a small custom arena."
+description = "Boost with V, right shoulder or touch R. Enable Workshop arena to try two authored rooms with gears, a patrol hazard, textures, music and saved progress. The cyan block is a stand-in player model. This example retains the game's player movement and camera. Turn the mod off to return to your original position."
+authors = ["ThatGuyMcd"]
+game_id = "rocket"
+minimum_recomp_version = "1.0.2"
+dependencies = []
+
+[[manifest.config_options]]
+id = "boost"
+name = "Boost strength"
+description = "How quickly Rocket moves upwards when you press Boost."
+type = "Number"
+min = 50.0
+max = 400.0
+step = 10.0
+default = 180.0
+
+[[manifest.config_options]]
+id = "arena"
+name = "Workshop arena"
+description = "Move into the custom SDK test room above your current level. Switch off to return."
+type = "Enum"
+options = ["No", "Yes"]
+default = "No"
+
+[[manifest.config_options]]
+id = "music"
+name = "Workshop music"
+type = "Enum"
+options = ["No", "Yes"]
+default = "Yes"
+
+[[manifest.config_options]]
+id = "show_hud"
+name = "Show counter"
+type = "Enum"
+options = ["No", "Yes"]
+default = "Yes"
+
+[build]
+sources = ["src/**/*.c"]
+
+[files]
+"workshop/title.txt" = "content/title.txt"
+"workshop/room1.json" = "content/room1.json"
+"workshop/room2.json" = "content/room2.json"
+
+[assets."workshop/cube.rrm"]
+source = "content/cube.obj"
+format = "obj"
+colour = "FFD866FF"
+
+[assets."workshop/tiles.rrm"]
+source = "content/cube.obj"
+format = "obj"
+texture = "content/tiles.ppm"
+
+[assets."workshop/hazard.rrm"]
+source = "content/cube.obj"
+format = "obj"
+colour = "FF5A5AFF"
+
+[assets."workshop/hero.rrm"]
+source = "content/cube.obj"
+format = "obj"
+colour = "56DAFFFF"
+
+[assets."workshop/music.wav"]
+source = "content/music.json"
+format = "tones"

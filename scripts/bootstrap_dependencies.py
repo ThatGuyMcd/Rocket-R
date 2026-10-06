@@ -98,6 +98,31 @@ def ensure_git_checkout(root: Path, destination: Path, repository: str) -> None:
         run(git_args("clone", "--filter=blob:none", "--no-checkout", repository, str(destination)), cwd=root)
 
 
+def clean_submodule_worktrees(repository: Path) -> None:
+    """Remove prior generated patch files from initialized nested checkouts.
+
+    submodule update --force restores tracked files, but leaves added headers.
+    Walk only Git's declared gitlinks and verify each cleanup target stays inside
+    its generated parent checkout. Ignored build caches are left in place.
+    """
+    parent = repository.resolve()
+    entries = run(git_args("ls-files", "--stage", "-z"), cwd=parent, capture=True)
+    for entry in entries.split("\0"):
+        if not entry or "\t" not in entry:
+            continue
+        metadata, relative = entry.split("\t", 1)
+        if not metadata.startswith("160000 "):
+            continue
+        child = (parent / relative).resolve()
+        if not child.is_relative_to(parent) or child == parent:
+            raise RuntimeError(f"Submodule cleanup target is outside {parent}: {child}")
+        if not (child / ".git").exists():
+            continue
+        run(git_args("reset", "--hard"), cwd=child)
+        run(git_args("clean", "-ffd"), cwd=child)
+        clean_submodule_worktrees(child)
+
+
 def checkout_dependency(root: Path, dep: dict[str, object], repair: bool) -> None:
     destination = root / str(dep["destination"])
     repository = str(dep["repository"])
@@ -138,6 +163,7 @@ def checkout_dependency(root: Path, dep: dict[str, object], repair: bool) -> Non
             destination,
             f"Populating submodules for {dep['name']}",
         )
+        clean_submodule_worktrees(destination)
 
     actual = run(git_args("rev-parse", "HEAD"), cwd=destination, capture=True)
     if actual.lower() != commit.lower():

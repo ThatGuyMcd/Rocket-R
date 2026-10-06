@@ -1,0 +1,17 @@
+--- a/src/contrib/plume/plume_vulkan.cpp
++++ b/src/contrib/plume/plume_vulkan.cpp
+@@ -3939,6 +3939,14 @@
+ 
+         // Store properties.
+         vkGetPhysicalDeviceProperties(physicalDevice, &physicalDeviceProperties);
++#if defined(__ANDROID__)
++        fprintf(stderr, "[vulkan][device] name=%s vendor=0x%X device=0x%X driver=0x%X api=%u.%u.%u\n",
++            physicalDeviceProperties.deviceName, physicalDeviceProperties.vendorID,
++            physicalDeviceProperties.deviceID, physicalDeviceProperties.driverVersion,
++            VK_VERSION_MAJOR(physicalDeviceProperties.apiVersion),
++            VK_VERSION_MINOR(physicalDeviceProperties.apiVersion),
++            VK_VERSION_PATCH(physicalDeviceProperties.apiVersion));
++#endif
+ 
+         // Check for supported features.
+         void *featuresChain = nullptr;

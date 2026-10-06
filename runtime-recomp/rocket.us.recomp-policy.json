@@ -147,7 +147,7 @@
     {
       "function": "update_gfx_context",
       "beforeVram": "0x80046D20",
-      "text": "extern void rocket_presentation_frame_begin(uint8_t*, recomp_context*); rocket_presentation_frame_begin(rdram, ctx);",
+      "text": "extern void rocket_presentation_frame_begin(uint8_t*, recomp_context*); rocket_presentation_frame_begin(rdram, ctx); extern void rocket_sdk_tick(uint8_t*, recomp_context*); rocket_sdk_tick(rdram, ctx);",
       "reason": "Begin Rocket's semantic presentation capture when the newly selected GfxTask becomes the active graphics context. This is before RenderEntry construction and before any later depth sorting can destroy owner order."
     },
     {
@@ -184,8 +184,8 @@
     {
       "function": "func_8008B694",
       "beforeVram": "0x8008B7F8",
-      "text": "/* ROCKET-R POLICY V42 V32 DRAW BASE */ ctx->r4 = S32(0X8060 << 16);",
-      "reason": "V42 golden-rule migration: renderer count base follows the same live queue."
+      "text": "extern void rocket_sdk_render(uint8_t*, recomp_context*); rocket_sdk_render(rdram, ctx); /* ROCKET-R POLICY V42 V32 DRAW BASE */ ctx->r4 = S32(0X8060 << 16);",
+      "reason": "V42 renderer count base follows the expanded live queue. The SDK bridge refreshes v1 after changing that queue because the preceding LW has already loaded the cursor."
     },
     {
       "function": "func_8008B694",

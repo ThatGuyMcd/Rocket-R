@@ -295,6 +295,7 @@ std::vector<BackgroundCommandRange> g_background_ranges;
 bool g_background_capture_active = false;
 std::uint32_t g_background_capture_begin = 0U;
 thread_local MatrixMap g_active_matrices;
+std::vector<std::pair<std::uint32_t,std::uint32_t>> g_mod_matrices;
 thread_local SubmodelMatrixCapture g_submodel_matrix_capture{};
 thread_local ModelRangeCapture g_model_range_captures[16]{};
 thread_local std::size_t g_model_range_depth = 0U;
@@ -880,14 +881,32 @@ std::vector<SharedMatrixSample> BuildSharedMatrixSamples() {
     return samples;
 }
 
+// Index only eligible preceding-frame tracks. Preserve their vector order so
+// equal-distance candidates retain exactly the same ambiguity behaviour.
+template<class T, class Key>
+auto PreviousTrackIndex(const std::vector<T>& tracks, Key key) {
+    std::unordered_map<std::uint64_t, std::vector<std::size_t>> index;
+    index.reserve(tracks.size());
+    for (std::size_t i = 0; i < tracks.size(); ++i) {
+        const auto& track = tracks[i];
+        if (!track.claimed && track.last_frame < g_frame && g_frame - track.last_frame == 1U)
+            index[key(track)].push_back(i);
+    }
+    return index;
+}
+
 void MatchSharedMatrixSamples(std::vector<SharedMatrixSample>& samples) {
     for (SharedMatrixTrack& track : g_shared_matrix_tracks) track.claimed = false;
     if (samples.empty()) return;
+    const auto previous = PreviousTrackIndex(g_shared_matrix_tracks,
+        [](const auto& track) { return track.signature; });
 
     std::vector<SharedCandidate> candidates;
     for (std::size_t si = 0; si < samples.size(); ++si) {
         const SharedMatrixSample& sample = samples[si];
-        for (std::size_t ti = 0; ti < g_shared_matrix_tracks.size(); ++ti) {
+        const auto eligible = previous.find(sample.signature);
+        if (eligible == previous.end()) continue;
+        for (std::size_t ti : eligible->second) {
             const SharedMatrixTrack& track = g_shared_matrix_tracks[ti];
             if (track.signature != sample.signature || track.claimed ||
                 track.last_frame >= g_frame ||
@@ -980,16 +999,17 @@ void MatchSharedMatrixSamples(std::vector<SharedMatrixSample>& samples) {
         }
     }
 
+    std::unordered_map<std::uint32_t, std::size_t> tokens;
+    tokens.reserve(g_shared_matrix_tracks.size());
+    for (std::size_t i = 0; i < g_shared_matrix_tracks.size(); ++i)
+        tokens.emplace(g_shared_matrix_tracks[i].token, i);
     for (const SharedMatrixSample& sample : samples) {
-        const auto found = std::find_if(
-            g_shared_matrix_tracks.begin(), g_shared_matrix_tracks.end(),
-            [&](const SharedMatrixTrack& track) {
-                return track.token == sample.track_token;
-            });
-        if (found == g_shared_matrix_tracks.end()) continue;
-        found->position = sample.position;
-        found->position_valid = sample.position_valid;
-        found->last_frame = g_frame;
+        const auto found = tokens.find(sample.track_token);
+        if (found == tokens.end()) continue;
+        auto& track = g_shared_matrix_tracks[found->second];
+        track.position = sample.position;
+        track.position_valid = sample.position_valid;
+        track.last_frame = g_frame;
     }
 
     g_trace_shared_samples.fetch_add(samples.size(), std::memory_order_relaxed);
@@ -1048,12 +1068,16 @@ void FinalizeDirectMatrixBindings(MatrixMap& out) {
         return g_frame > item.last_frame + kMaximumTrackAge;
     });
     for (DirectContinuity& item : g_direct_continuity) item.claimed = false;
+    const auto previous = PreviousTrackIndex(g_direct_continuity,
+        [](const auto& track) { return track.key; });
 
     std::vector<DirectCandidate> candidates;
     candidates.reserve(g_direct_samples.size() * 4U);
     for (std::size_t si = 0U; si < g_direct_samples.size(); ++si) {
         const DirectMatrixSample& sample = g_direct_samples[si];
-        for (std::size_t ti = 0U; ti < g_direct_continuity.size(); ++ti) {
+        const auto eligible = previous.find(sample.key);
+        if (eligible == previous.end()) continue;
+        for (std::size_t ti : eligible->second) {
             const DirectContinuity& item = g_direct_continuity[ti];
             if (item.key != sample.key || item.claimed ||
                 item.last_frame >= g_frame || g_frame - item.last_frame != 1U) {
@@ -1171,6 +1195,8 @@ void FinalizeSpecificMatrixBindings(MatrixMap& out) {
         return g_frame > item.last_frame + kMaximumTrackAge;
     });
     for (SpecificContinuity& item : g_specific_continuity) item.claimed = false;
+    const auto previous = PreviousTrackIndex(g_specific_continuity,
+        [](const auto& track) { return track.key; });
 
     std::unordered_map<std::uint32_t, std::uint32_t> specific_claims;
     specific_claims.reserve(g_specific_samples.size());
@@ -1192,7 +1218,10 @@ void FinalizeSpecificMatrixBindings(MatrixMap& out) {
         }
         SpecificContinuity* match = nullptr;
         bool ambiguous = false;
-        for (SpecificContinuity& item : g_specific_continuity) {
+        const auto eligible = previous.find(sample.key);
+        const std::vector<std::size_t> empty;
+        for (std::size_t ti : eligible == previous.end() ? empty : eligible->second) {
+            auto& item = g_specific_continuity[ti];
             if (item.key != sample.key || item.claimed ||
                 item.last_frame >= g_frame || g_frame - item.last_frame != 1U) {
                 continue;
@@ -1270,12 +1299,16 @@ void FinalizeSpecificMatrixBindings(MatrixMap& out) {
 void FinalizeTracksAndBindings(MatrixMap& out) {
     ExpireTracks();
     for (Track& track : g_tracks) track.claimed = false;
+    const auto previous = PreviousTrackIndex(g_tracks,
+        [](const auto& track) { return track.key; });
 
     std::vector<Candidate> candidates;
     candidates.reserve(g_entries.size() * 4U);
     for (std::size_t ei = 0; ei < g_entries.size(); ++ei) {
         const RecordedEntry& entry = g_entries[ei];
-        for (std::size_t ti = 0; ti < g_tracks.size(); ++ti) {
+        const auto eligible = previous.find(entry.key);
+        if (eligible == previous.end()) continue;
+        for (std::size_t ti : eligible->second) {
             const Track& track = g_tracks[ti];
             if (track.key != entry.key || track.claimed ||
                 track.last_frame >= g_frame) {
@@ -1391,11 +1424,13 @@ void FinalizeTracksAndBindings(MatrixMap& out) {
 
     // Update existing tracks only after all assignments are frozen. Velocity is
     // diagnostic/history only in v5; owner selection never extrapolates it.
+    std::unordered_map<std::uint32_t, std::size_t> tokens;
+    tokens.reserve(g_tracks.size());
+    for (std::size_t i = 0; i < g_tracks.size(); ++i) tokens.emplace(g_tracks[i].token, i);
     for (const RecordedEntry& entry : g_entries) {
-        const auto found = std::find_if(g_tracks.begin(), g_tracks.end(),
-            [&](const Track& track) { return track.token == entry.track_token; });
-        if (found == g_tracks.end()) continue;
-        Track& track = *found;
+        const auto found = tokens.find(entry.track_token);
+        if (found == tokens.end()) continue;
+        Track& track = g_tracks[found->second];
         if (entry.position_valid && track.position_valid &&
             track.last_frame < g_frame) {
             const float gap = static_cast<float>(g_frame - track.last_frame);
@@ -1782,6 +1817,12 @@ rocket::presentation::TaskIdentityScope::~TaskIdentityScope() {
     g_active_task_fail_closed = false;
 }
 
+void rocket::presentation::mod_matrix(std::uint32_t address,std::uint32_t handle) {
+    if(handle==0||!ValidRange(address,64))return;
+    std::scoped_lock lock(g_mutex);
+    if(g_mod_matrices.size()<256)g_mod_matrices.emplace_back(Physical(address),handle);
+}
+
 bool rocket::presentation::matrix_binding(
     std::uint32_t physical_matrix_address, MatrixBinding& binding) {
     const auto found = g_active_matrices.find(physical_matrix_address & kRdramMask);
@@ -1878,6 +1919,7 @@ extern "C" bool rocket_presentation_background_display_list(
 extern "C" void rocket_presentation_frame_begin(std::uint8_t*,
                                                   recomp_context*) {
     std::scoped_lock lock(g_mutex);
+    g_mod_matrices.clear();
     g_specific_samples.clear();
     g_submodel_matrix_capture = {};
     g_model_range_samples.clear();
@@ -2650,6 +2692,10 @@ extern "C" void rocket_presentation_task_submitted(std::uint8_t* rdram,
     FinalizeDirectMatrixBindings(frame.matrices);
     FinalizeCameraMatrixBindings(frame.matrices);
     FinalizeSpecificMatrixBindings(frame.matrices);
+    for(const auto& [address,handle]:g_mod_matrices) {
+        const auto id=NormalizeIdentity(Mix64(0x53444B324143544FULL^handle));
+        frame.matrices[address]={rocket::presentation::MatrixBinding{id,false,false,false,true,true}};
+    }
     if (g_trace_wheel_matrix != 0) {
         const auto found = frame.matrices.find(g_trace_wheel_matrix);
         if (found != frame.matrices.end()) std::fprintf(stderr, "[rocket-wheel-binding] matrix=%08x id=%08x rigid=%d shape=%d\n",

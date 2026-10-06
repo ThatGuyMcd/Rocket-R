@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$ProjectRoot = '',
-    [string]$OutputDirectory = ''
+    [string]$OutputDirectory = '',
+    [string]$AndroidWorkDirectory = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -10,7 +11,7 @@ if (-not $ProjectRoot) { $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $ProjectRoot 'dist' }
 $Version = (Get-Content (Join-Path $ProjectRoot 'VERSION') -Raw).Trim()
 $BuildRoot = Join-Path $ProjectRoot 'build'
-$AndroidProject = Join-Path $BuildRoot 'android-project'
+$AndroidProject = if ($AndroidWorkDirectory) { [IO.Path]::GetFullPath($AndroidWorkDirectory) } else { Join-Path $BuildRoot 'android-project' }
 $ToolRoot = Join-Path $BuildRoot 'tools'
 function Assert-ChildPath([string]$Path, [string]$Parent) {
     $resolvedBuild = [IO.Path]::GetFullPath($Parent).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
@@ -353,7 +354,7 @@ if (-not (Test-Path $Keystore)) {
     )
     if ($keyExit -ne 0) { throw "Could not create the local Android signing key (exit $keyExit)." }
 }
-$Aligned = Join-Path $BuildRoot 'android-project\app-release-aligned.apk'
+$Aligned = Join-Path $AndroidProject 'app-release-aligned.apk'
 $Final = Join-Path $OutputDirectory "Rocket-R-$Version-Android-arm64-v8a.apk"
 Remove-Item $Aligned, $Final -Force -ErrorAction SilentlyContinue
 $zipExit = Invoke-NativeVisible $ZipAlign @('-f','4',$Unsigned,$Aligned)
@@ -377,7 +378,7 @@ try {
 }
 finally { $archive.Dispose() }
 
-$ScanDir = Join-Path $BuildRoot 'android-apk-scan'
+$ScanDir = Join-Path $AndroidProject 'apk-scan'
 Assert-BuildPath $ScanDir
 Remove-Item -LiteralPath $ScanDir -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $ScanDir | Out-Null

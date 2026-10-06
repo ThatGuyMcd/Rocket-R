@@ -1,0 +1,27 @@
+--- a/src/common/rt64_thread.cpp
++++ b/src/common/rt64_thread.cpp
+@@ -6,6 +6,10 @@
+ 
+ #include <cassert>
+ #include <thread>
++#if defined(__ANDROID__)
++#include <sys/resource.h>
++#include <unistd.h>
++#endif
+ 
+ #if defined(_WIN64)
+ #   include <Windows.h>
+@@ -55,6 +59,13 @@
+     void Thread::setCurrentThreadPriority(Priority priority) {
+ #   if defined(_WIN32)
+         SetThreadPriority(GetCurrentThread(), toWindowsPriority(priority));
++#   elif defined(__ANDROID__)
++        // Android/Linux nice values are per-thread. Raising nice requires no
++        // special privileges; leave foreground render/audio threads unchanged.
++        if (priority == Priority::Idle || priority == Priority::Lowest)
++            setpriority(PRIO_PROCESS, static_cast<id_t>(gettid()), 10);
++        else if (priority == Priority::Low)
++            setpriority(PRIO_PROCESS, static_cast<id_t>(gettid()), 5);
+ #   elif defined(__linux__) || defined(__APPLE__)
+         // On Linux, thread priorities can't be changed under the default scheduler policy (SCHED_OTHER) and the other policies
+         // that are available without root privileges are lower priority. Instead you can set the thread's "nice" value, which ranges

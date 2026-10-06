@@ -54,10 +54,12 @@ def main():
          'v36 camera continuity bridge missing')
 
     for token in (
-        'ROCKET-R UI V36 SPINNING BRAND + 50% OVERLAY',
-        'LoadRocketBrandIntoAtlas', 'DrawRocketBrandCoin',
+        'LoadRocketBrandIntoAtlas', 'DrawRocketBrand', 'BeginPageShell',
         'Rocket-R-green-full-resolution.png', 'ApplyRocketWindowIcon'):
         need(token in ui, 'v36 UI token missing: ' + token)
+
+    need('AddImageQuad' in ui,
+         'cached turning sidebar brand draw missing')
 
     hooks = {(x.get('function'), str(x.get('beforeVram','')).lower())
              for x in policy.get('functionHooks', [])}

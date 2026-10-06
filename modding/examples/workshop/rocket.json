@@ -1,0 +1,84 @@
+{
+  "schema": 1,
+  "api": 2,
+  "activation": "managed",
+  "live_settings": true,
+  "category": "SDK examples",
+  "requires": {
+    "lifecycle": 1,
+    "input": 1,
+    "native_objects": 1,
+    "resources": 1,
+    "saves": 1,
+    "hud": 1,
+    "events": 1,
+    "systems": 1,
+    "native_audio": 1,
+    "meshes": 1,
+    "actors": 1,
+    "custom_scenes": 1,
+    "custom_collision": 1,
+    "custom_audio": 1,
+    "native_render": 1,
+    "commands": 1
+  },
+  "systems": [
+    "rocket_workshop.boost",
+    "world.render",
+    "audio.music"
+  ],
+  "settings_ui": {
+    "arena": "toggle",
+    "music": "toggle",
+    "show_hud": "toggle"
+  },
+  "commands": [
+    {
+      "id": "restart",
+      "name": "Start Workshop again",
+      "description": "Clear the Workshop gear progress. Your original game save is unaffected."
+    }
+  ],
+  "resources": {
+    "title": {
+      "file": "workshop/title.txt",
+      "type": "text"
+    },
+    "cube": {
+      "file": "workshop/cube.rrm",
+      "type": "mesh/rrm2"
+    },
+    "tiles": {
+      "file": "workshop/tiles.rrm",
+      "type": "mesh/rrm2"
+    },
+    "hazard": {
+      "file": "workshop/hazard.rrm",
+      "type": "mesh/rrm2"
+    },
+    "hero": {
+      "file": "workshop/hero.rrm",
+      "type": "mesh/rrm2"
+    },
+    "room1": {
+      "file": "workshop/room1.json",
+      "type": "scene/json"
+    },
+    "room2": {
+      "file": "workshop/room2.json",
+      "type": "scene/json"
+    },
+    "music": {
+      "file": "workshop/music.wav",
+      "type": "audio/wav"
+    }
+  },
+  "input_actions": {
+    "boost": {
+      "name": "Boost upwards",
+      "keyboard": 25,
+      "controller": 10,
+      "n64": 16
+    }
+  }
+}

@@ -52,6 +52,8 @@ public:
 
 bool matrix_binding(std::uint32_t physical_matrix_address,
                     MatrixBinding& binding);
+// Managed SDK actors use their persistent handle as a lifetime key.
+void mod_matrix(std::uint32_t physical_matrix_address,std::uint32_t actor_handle);
 
 } // namespace rocket::presentation
 

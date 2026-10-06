@@ -1,5 +1,7 @@
 #include "mod_library.hpp"
 #include "sha256.hpp"
+#include "sdk_services.hpp"
+#include "asset_layers.hpp"
 #include "miniz.h"
 #include <algorithm>
 #include <array>
@@ -45,6 +47,18 @@ std::array<unsigned,3> semver(const std::string& s) {
         if(empty)fail("Invalid version label.");
     }
     return out;
+}
+bool legacy_sdk2_minimum(const Package& package, const std::string& host) {
+    // SDK 2 previews were labelled 1.1.0-dev before their release was numbered
+    // 1.0.2. Module validation still rejects unavailable imports/capabilities.
+    const auto version = semver(host);
+    return package.metadata.value("api", 1) == 2 &&
+        semver(package.manifest.at("minimum_recomp_version")) == std::array<unsigned,3>{1,1,0} &&
+        version >= std::array<unsigned,3>{1,0,2} && version < std::array<unsigned,3>{1,1,0};
+}
+bool host_supports(const Package& package, const std::string& host) {
+    return semver(host) >= semver(package.manifest.at("minimum_recomp_version")) ||
+        legacy_sdk2_minimum(package, host);
 }
 class Archive {
 public:
@@ -200,7 +214,18 @@ Package inspect_package(std::span<const std::uint8_t> bytes,const std::string& e
     if(zip.has("rocket.json")) {
         p.metadata=zip.json("rocket.json");
         if(p.metadata.value("schema",0)!=1) fail("Unsupported Rocket metadata version.");
-        if(p.metadata.value("api",1)>1) fail("This mod requires a newer Rocket API.");
+        sdk::validate_metadata(p.metadata);
+        if(p.metadata.value("api",1)==2) {
+            if(zip.has("patch.bps"))sdk::validate_asset_patch(zip.read("patch.bps",32*1024*1024));
+            const auto resources=p.metadata.value("resources",Json::object());
+            for(const auto& resource:resources)zip.read(resource.at("file").get<std::string>(),16*1024*1024);
+            if(sdk::managed_activation(p)&&zip.has("mod_syms.bin")) {
+                const auto symbols=zip.read("mod_syms.bin",16*1024*1024);
+                auto le32=[&](std::size_t offset){return static_cast<std::uint32_t>(symbols[offset])|(static_cast<std::uint32_t>(symbols[offset+1])<<8)|(static_cast<std::uint32_t>(symbols[offset+2])<<16)|(static_cast<std::uint32_t>(symbols[offset+3])<<24);};
+                if(symbols.size()<52||std::memcmp(symbols.data(),"N64RSYMS",8)!=0||le32(8)!=1)fail("Managed activation needs a supported code symbol format.");
+                if(le32(28)!=0||le32(44)!=0||zip.has("patch.bps"))fail("Mods with raw hooks, replacements or ROM patches must use restart activation.");
+            }
+        }
         p.kind=p.metadata.value("category",p.kind);
         for(const char* key:{"conflicts","exclusive_resources"}) if(p.metadata.contains(key)) {
             const auto& values=p.metadata.at(key);
@@ -220,6 +245,15 @@ Package inspect_package(std::span<const std::uint8_t> bytes,const std::string& e
             check_option(o,o.at("default"));
         }
     }
+    if(p.metadata.value("api",1)==2) {
+        const auto widgets=p.metadata.value("settings_ui",Json::object());
+        for(auto widget=widgets.begin();widget!=widgets.end();++widget) {
+            bool found=false;
+            if(m.contains("config_schema"))for(const auto& o:m["config_schema"]["options"])
+                if(o.at("id")==widget.key()&&o.at("type")=="Enum"&&o.at("options").size()==2)found=true;
+            if(!found)fail("Toggle widgets require a two-choice Enum setting.");
+        }
+    }
     for(const char* key:{"dependencies","optional_dependencies"}) if(m.contains(key)) {
         if(!m[key].is_array()||m[key].size()>128) fail("Invalid dependency list.");
         for(const auto& d:m[key]) {
@@ -228,6 +262,7 @@ Package inspect_package(std::span<const std::uint8_t> bytes,const std::string& e
             if(sep!=std::string::npos) semver(s.substr(sep+1));
         }
     }
+    p.asset_patch=extension==".nrm"&&zip.has("patch.bps");
     p.filename=p.hash+extension;
     return p;
 }
@@ -265,6 +300,21 @@ void Library::open(const std::filesystem::path& root,const std::string& engine_v
     refresh_locked();
     profile_locked();
 }
+template<class F>void write_archive(const std::filesystem::path& path,F&& fill) {
+    mz_zip_archive zip{};if(!mz_zip_writer_init_heap(&zip,0,0))fail("Could not create staged mod archive.");
+    struct Close{mz_zip_archive* zip;~Close(){mz_zip_writer_end(zip);}}close{&zip};
+    fill(zip);void* allocation=nullptr;std::size_t size=0;
+    if(!mz_zip_writer_finalize_heap_archive(&zip,&allocation,&size))fail("Could not finish staged mod archive.");
+    struct Free{void* data;~Free(){mz_free(data);}}free{allocation};
+    if(size>kPackageLimit)fail("Staged package exceeds the import limit.");
+    write_bytes(path,{static_cast<const std::uint8_t*>(allocation),size});
+}
+void archive_add(mz_zip_archive& zip,const char* name,std::span<const std::uint8_t> bytes) {
+    if(!mz_zip_writer_add_mem(&zip,name,bytes.data(),bytes.size(),MZ_BEST_SPEED))fail("Could not stage mod file: "+std::string(name));
+}
+void archive_add_json(mz_zip_archive& zip,const char* name,const Json& data) {
+    const auto text=data.dump();archive_add(zip,name,{reinterpret_cast<const std::uint8_t*>(text.data()),text.size()});
+}
 void Library::migrate_bundled_package(std::span<const std::uint8_t> bytes, const std::string& legacy_hash) {
     std::lock_guard lock(mutex_);
     if (running_) return;
@@ -280,7 +330,7 @@ void Library::migrate_bundled_package(std::span<const std::uint8_t> bytes, const
         }
     }
     if (!changed) return;
-    if (semver(version_) < semver(package.manifest.at("minimum_recomp_version")))
+    if (!host_supports(package, version_))
         fail("The included mod requires a newer Rocket-R.");
     const auto path = root_ / "mod-library" / package.filename;
     if (!std::filesystem::exists(path)) {
@@ -292,7 +342,7 @@ void Library::migrate_bundled_package(std::span<const std::uint8_t> bytes, const
     }
     write_json_atomic(root_ / "mod-library" / (package.hash + ".json"), {
         {"id",package.id},{"version",package.version},{"hash",package.hash},{"filename",package.filename},
-        {"kind",package.kind},{"manifest",package.manifest},{"metadata",package.metadata}});
+        {"kind",package.kind},{"manifest",package.manifest},{"metadata",package.metadata},{"asset_patch",package.asset_patch}});
     write_json_atomic(root_ / "mod-profiles.json", updated);
     state_ = std::move(updated);
     refresh_locked();
@@ -302,9 +352,15 @@ Json& Library::profile_locked() {
     for(auto& p:state_["profiles"]) if(p.value("id",std::string())==id) return p;
     fail("The selected mod profile is missing.");
 }
-void Library::persist_locked(){write_json_atomic(root_/"mod-profiles.json",state_);}
+void Library::invalidate_views_locked() {
+    snapshot_cache_.reset();
+    resolution_cache_.reset();
+}
+void Library::persist_locked(){invalidate_views_locked();write_json_atomic(root_/"mod-profiles.json",state_);}
 void Library::refresh_locked() {
+    invalidate_views_locked();
     packages_.clear();
+    asset_cache_key_.clear();asset_cache_error_.clear();asset_cache_.clear();
     // Index is metadata only. Full package/hash verification is repeated before launch.
     for(const auto& e:std::filesystem::directory_iterator(root_/"mod-library")) {
         if(e.is_symlink()||!e.is_regular_file()||e.path().extension()!=".json") continue;
@@ -312,6 +368,7 @@ void Library::refresh_locked() {
             auto j=read_json_file(e.path()); Package p;
             p.id=j.at("id");p.version=j.at("version");p.hash=j.at("hash");p.filename=j.at("filename");
             p.kind=j.at("kind");p.manifest=j.at("manifest");p.metadata=j.value("metadata",Json::object());
+            p.asset_patch=j.value("asset_patch",false);
             if(!valid_id(p.id)||p.hash.size()!=64||p.filename!=p.hash+std::filesystem::path(p.filename).extension().string()) continue;
             if(p.hash.find_first_not_of("0123456789abcdef")!=std::string::npos)continue;
             const auto ext=std::filesystem::path(p.filename).extension();
@@ -319,6 +376,12 @@ void Library::refresh_locked() {
             if(p.filename.find_first_of("/\\:")!=std::string::npos) continue;
             p.path=root_/"mod-library"/p.filename;
             if(std::filesystem::is_regular_file(p.path)&&!std::filesystem::is_symlink(p.path)) {
+                if(ext==".nrm"&&!j.contains("asset_patch")) {
+                    const auto checked=inspect_package(read_bounded(p.path,kPackageLimit),".nrm");
+                    if(checked.hash!=p.hash)continue;
+                    p.asset_patch=checked.asset_patch;j["asset_patch"]=p.asset_patch;
+                    write_json_atomic(e.path(),j);
+                }
                 // Development builds assigned 1.1.0 to packs with no manifest.
                 // Correct only that generated metadata after verifying the payload.
                 if (ext == ".rtz" && p.manifest.value("minimum_recomp_version", "") == "1.1.0") {
@@ -348,10 +411,15 @@ const Package* Library::find_locked(const std::string& id,const std::string& has
     return found;
 }
 Snapshot Library::snapshot() const {
+    return *snapshot_view();
+}
+std::shared_ptr<const Snapshot> Library::snapshot_view() const {
     std::lock_guard lock(mutex_);
+    if (snapshot_cache_) return snapshot_cache_;
     Snapshot s; s.packages=packages_;s.profiles=state_.at("profiles");s.active=active_;s.running=running_;s.recovery=recovery_;
     for(const auto& p:s.profiles) if(p.at("id")==state_.at("selected")) s.profile=p;
-    return s;
+    snapshot_cache_ = std::make_shared<const Snapshot>(std::move(s));
+    return snapshot_cache_;
 }
 void Library::ensure_editable_locked(){
     if(profile_locked().at("id")=="original") create_profile("My Mods",false);
@@ -379,7 +447,7 @@ std::vector<std::string> Library::install_bytes(std::span<const std::uint8_t> by
     std::set<std::string> ids;
     for(const auto& [p,data]:pending) {
         if(!ids.insert(p.id).second) fail("Bundle contains the same mod ID twice.");
-        if(semver(version_)<semver(p.manifest.at("minimum_recomp_version"))) fail(p.manifest.at("display_name").get<std::string>()+" needs a newer Rocket-R.");
+        if(!host_supports(p,version_)) fail(p.manifest.at("display_name").get<std::string>()+" needs a newer Rocket-R.");
     }
     // Publish the profile only after all immutable packages and indexes are present.
     for(auto& [p,data]:pending) {
@@ -389,7 +457,7 @@ std::vector<std::string> Library::install_bytes(std::span<const std::uint8_t> by
             write_bytes(stage,data);
             std::filesystem::rename(stage,p.path);
         }
-        Json entry={{"id",p.id},{"version",p.version},{"hash",p.hash},{"filename",p.filename},{"kind",p.kind},{"manifest",p.manifest},{"metadata",p.metadata}};
+        Json entry={{"id",p.id},{"version",p.version},{"hash",p.hash},{"filename",p.filename},{"kind",p.kind},{"manifest",p.manifest},{"metadata",p.metadata},{"asset_patch",p.asset_patch}};
         write_json_atomic(root_/"mod-library"/(p.hash+".json"),entry);
     }
     refresh_locked();ensure_editable_locked();
@@ -409,6 +477,7 @@ void Library::set_enabled(const std::string& id,bool enabled){
         if(can_toggle_live(id,item.at("hash"))) {
             live_toggle_handler_(id,enabled);
             for(auto& active:active_.at("packages")) if(active.at("id")==id) active["enabled"]=enabled;
+            invalidate_views_locked();
         }
         return;
     }
@@ -446,6 +515,7 @@ void Library::set_option(const std::string& id,const std::string& key,const Json
                     else update.value=value.get<std::string>();
                     live_option_handler_(update);
                     active["settings"][key]=value;
+                    invalidate_views_locked();
                     break;
                 }
             }
@@ -474,6 +544,36 @@ void Library::set_active_enabled(const std::string& id,bool enabled) {
 }
 void Library::set_live_option_handler(std::function<void(const OptionUpdate&)> handler) {
     std::lock_guard lock(mutex_);live_option_handler_=std::move(handler);
+}
+void Library::set_live_action_handler(std::function<void(const std::string&,const std::string&,const std::string&,int)> handler){std::lock_guard lock(mutex_);live_action_handler_=std::move(handler);}
+void Library::set_action_binding(const std::string& id,const std::string& action,bool keyboard,int source) {
+    std::lock_guard lock(mutex_);ensure_editable_locked();
+    const bool valid=keyboard?source>=-1&&(source<512||(source>=2001&&source<=2005)||(source>=2100&&source<=2103)||(source>=2200&&source<=2203)):
+        source>=-1&&(source<=20||(source>=1000&&source<=1011));
+    if(!valid)fail("Invalid action input.");
+    for(auto& entry:profile_locked()["mods"])if(entry.at("id")==id) {
+        const auto* package=find_locked(id,entry.at("hash"));
+        if(!package||!package->metadata.value("input_actions",Json::object()).contains(action))fail("Unknown mod input action.");
+        const char* device=keyboard?"keyboard":"controller";
+        entry["bindings"][action][device]=source;persist_locked();
+        if(running_&&live_action_handler_&&active_.at("profile")==state_.at("selected"))
+            for(auto& active:active_.at("packages"))if(active.at("id")==id&&active.at("hash")==package->hash){active["bindings"][action][device]=source;live_action_handler_(id,action,device,source);invalidate_views_locked();break;}
+        return;
+    }
+    fail("Mod is not selected in this profile.");
+}
+void Library::set_action_touch(const std::string& id,const std::string& action,int mask) {
+    std::lock_guard lock(mutex_);ensure_editable_locked();
+    if(mask<0||mask>65535)fail("Invalid touch input mask.");
+    for(auto& entry:profile_locked()["mods"])if(entry.at("id")==id) {
+        const auto* package=find_locked(id,entry.at("hash"));
+        if(!package||package->metadata.value("api",1)!=2||!package->metadata.value("input_actions",Json::object()).contains(action))fail("Unknown SDK 2 input action.");
+        entry["bindings"][action]["n64"]=mask;persist_locked();
+        if(running_&&live_action_handler_&&active_.at("profile")==state_.at("selected"))
+            for(auto& active:active_.at("packages"))if(active.at("id")==id&&active.at("hash")==package->hash){active["bindings"][action]["n64"]=mask;live_action_handler_(id,action,"n64",mask);invalidate_views_locked();break;}
+        return;
+    }
+    fail("Mod is not selected in this profile.");
 }
 void Library::allow_live_toggle(const std::string& id,const std::string& hash) {
     std::lock_guard lock(mutex_);
@@ -530,6 +630,21 @@ void Library::import_profile(const std::filesystem::path& path) {
     p["id"]="profile_"+stamp();
     state_["profiles"].push_back(p);state_["selected"]=p["id"];persist_locked();
 }
+void Library::compose_assets_locked(const std::vector<Package>& packages) const {
+    std::vector<const Package*> layers;std::string key;
+    for(const auto& p:packages)if(p.asset_patch){layers.push_back(&p);key+=p.hash;}
+    if(key==asset_cache_key_)return;
+    asset_cache_key_=key;asset_cache_error_.clear();asset_cache_.clear();
+    if(layers.size()<2)return;
+    try {
+        std::vector<sdk::AssetLayer> patches;
+        for(const auto* p:layers){
+            if(p->metadata.value("api",1)!=2)fail("Only SDK 2 asset patches can be combined. Keep SDK 1 asset patches in their own profile.");
+            patches.push_back({p->id,sdk::read_package_entry(p->path,"patch.bps",32*1024*1024)});
+        }
+        asset_cache_=sdk::compose_asset_layers(patches);
+    }catch(const std::exception& e){asset_cache_error_=e.what();}
+}
 Resolution Library::resolve_locked(const Json& profile) const {
     Resolution out;
     if(profile.at("id")=="original") return out;
@@ -546,7 +661,7 @@ Resolution Library::resolve_locked(const Json& profile) const {
             return;
         }
         visit[id]=1;
-        if(semver(version_)<semver(p->manifest.at("minimum_recomp_version"))) out.errors.push_back(id+" requires a newer Rocket-R.");
+        if(!host_supports(*p,version_)) out.errors.push_back(id+" requires a newer Rocket-R.");
         for(const auto& dep:p->manifest.value("dependencies",Json::array())) {
             auto d=dep.get<std::string>();auto split=d.find(':');auto dep_id=d.substr(0,split);
             std::string dep_hash;
@@ -575,18 +690,29 @@ Resolution Library::resolve_locked(const Json& profile) const {
                 adventure=p.id;
             }
         }
+        compose_assets_locked(out.packages);
+        if(!asset_cache_error_.empty())out.errors.push_back(asset_cache_error_);
     } catch(const std::exception& e){out.errors.push_back(std::string("Invalid profile or package metadata: ")+e.what());}
     return out;
 }
 Resolution Library::resolve() const {
+    return *resolution_view();
+}
+std::shared_ptr<const Resolution> Library::resolution_view() const {
     std::lock_guard lock(mutex_);
-    for(const auto& p:state_.at("profiles")) if(p.at("id")==state_.at("selected")) return resolve_locked(p);
-    return {{},{"Selected profile is missing."}};
+    if (resolution_cache_) return resolution_cache_;
+    Resolution resolved{{},{"Selected profile is missing."}};
+    for(const auto& p:state_.at("profiles")) if(p.at("id")==state_.at("selected")) {
+        resolved=resolve_locked(p);break;
+    }
+    resolution_cache_=std::make_shared<const Resolution>(std::move(resolved));
+    return resolution_cache_;
 }
 std::filesystem::path Library::prepare_launch(bool without_mods) {
     std::lock_guard lock(mutex_);
     if(running_) fail("Restart Rocket-R to apply package changes.");
     live_option_handler_={};
+    live_action_handler_={};
     live_toggle_handler_={};
     const Json profile=without_mods?blank_profile("original","Original Game"):profile_locked();
     auto resolved=resolve_locked(profile);
@@ -597,7 +723,9 @@ std::filesystem::path Library::prepare_launch(bool without_mods) {
     Json load_profile=profile;
     for(auto& entry:load_profile.at("mods")) if(!entry.at("enabled").get<bool>()) {
         const auto approved=live_toggle_packages_.find(entry.at("id").get<std::string>());
-        if(approved==live_toggle_packages_.end() || approved->second!=entry.at("hash").get<std::string>()) continue;
+        const auto* selected=find_locked(entry.at("id"),entry.at("hash"));
+        const bool managed=selected&&sdk::managed_activation(*selected);
+        if(!managed&&(approved==live_toggle_packages_.end() || approved->second!=entry.at("hash").get<std::string>())) continue;
         entry["enabled"]=true;
         auto with_standby=resolve_locked(load_profile);
         const bool only_camera_added=with_standby && with_standby.packages.size()==resolved.packages.size()+1;
@@ -605,6 +733,8 @@ std::filesystem::path Library::prepare_launch(bool without_mods) {
         else entry["enabled"]=false;
     }
     const auto runtime=root_/"mod-runs"/("run_"+stamp());
+    compose_assets_locked(resolved.packages);if(!asset_cache_error_.empty())fail(asset_cache_error_);
+    const bool combined_assets=!asset_cache_.empty();
     std::filesystem::create_directories(runtime/"mods");
     std::filesystem::create_directories(runtime/"mod_config");
     Json ids=Json::array(),locklist=Json::array();
@@ -615,8 +745,24 @@ std::filesystem::path Library::prepare_launch(bool without_mods) {
         ids.push_back(p.id);
         if(p.path.extension()==".nrm") {
             const auto dest=runtime/"mods"/(p.id+".nrm");
-            std::error_code ec;std::filesystem::create_hard_link(p.path,dest,ec);
-            if(ec) std::filesystem::copy_file(p.path,dest);
+            const bool legacy_sdk2 = legacy_sdk2_minimum(p, version_);
+            if((combined_assets&&p.asset_patch)||legacy_sdk2) {
+                Archive source(bytes);
+                write_archive(dest,[&](mz_zip_archive& zip){
+                    for(const auto& file:source.entries()) {
+                        if(file=="patch.bps"&&combined_assets&&p.asset_patch) continue;
+                        if(file=="mod.json"&&legacy_sdk2) {
+                            auto manifest=p.manifest;manifest["minimum_recomp_version"]=version_;
+                            archive_add_json(zip,"mod.json",manifest);
+                        } else {
+                            const auto payload=source.read(file,kPackageLimit);archive_add(zip,file.c_str(),payload);
+                        }
+                    }
+                });
+            } else {
+                std::error_code ec;std::filesystem::create_hard_link(p.path,dest,ec);
+                if(ec) std::filesystem::copy_file(p.path,dest);
+            }
         }
         Json settings=Json::object();
         if(p.manifest.contains("config_schema"))
@@ -629,13 +775,22 @@ std::filesystem::path Library::prepare_launch(bool without_mods) {
         bool enabled=true;
         for(const auto& entry:profile.at("mods")) if(entry.at("id")==p.id) enabled=entry.at("enabled").get<bool>();
         const auto approved=live_toggle_packages_.find(p.id);
-        bool live_toggle=approved!=live_toggle_packages_.end() && approved->second==p.hash;
+        bool live_toggle=(approved!=live_toggle_packages_.end() && approved->second==p.hash)||sdk::managed_activation(p);
         for(const auto& other:resolved.packages) for(const auto& dep:other.manifest.value("dependencies",Json::array())) {
             const auto dependency=dep.get<std::string>();
             if(dependency.substr(0,dependency.find(':'))==p.id) live_toggle=false;
         }
+        Json bindings=Json::object();
+        for(const auto& entry:profile.at("mods"))if(entry.at("id")==p.id)bindings=entry.value("bindings",Json::object());
+        sdk::validate_bindings(p,bindings);
         locklist.push_back({{"id",p.id},{"hash",p.hash},{"version",p.version},{"kind",p.kind},{"path",p.path.generic_string()},
-            {"settings",settings},{"enabled",enabled},{"live_toggle",live_toggle}});
+            {"settings",settings},{"bindings",bindings},{"enabled",enabled},{"live_toggle",live_toggle}});
+    }
+    if(combined_assets) {
+        std::string id="rocket_sdk_asset_layers";unsigned suffix=1;
+        while(std::find(ids.begin(),ids.end(),Json(id))!=ids.end())id="rocket_sdk_asset_layers_"+std::to_string(suffix++);
+        const Json manifest={{"id",id},{"game_id","rocket"},{"version","1.0.0"},{"minimum_recomp_version","1.0.2"},{"display_name","Rocket asset layers"},{"authors",Json::array({"ThatGuyMcd"})},{"dependencies",Json::array()}};
+        write_archive(runtime/"mods"/(id+".nrm"),[&](mz_zip_archive& zip){archive_add_json(zip,"mod.json",manifest);archive_add(zip,"patch.bps",asset_cache_);});ids.push_back(id);
     }
     write_json_atomic(runtime/"mods.json",{{"enabled_mods",ids},{"mod_order",ids}});
     active_={{"profile",profile.at("id")},{"name",profile.at("name")},{"packages",locklist},{"runtime",runtime.generic_string()}};
@@ -643,15 +798,16 @@ std::filesystem::path Library::prepare_launch(bool without_mods) {
     active_save_=profile.at("id")=="original"?root_/"saves":root_/"mod-saves"/profile.at("id").get<std::string>();
     std::filesystem::create_directories(active_save_);
     write_json_atomic(root_/"mod-session.json",active_);
-    running_=true;return runtime;
+    running_=true;invalidate_views_locked();return runtime;
 }
 std::filesystem::path Library::active_save_path() const {std::lock_guard lock(mutex_);return active_save_;}
 void Library::finish_session() {
-    std::lock_guard lock(mutex_);running_=false;
+    std::lock_guard lock(mutex_);running_=false;invalidate_views_locked();
     live_option_handler_={};
+    live_action_handler_={};
     live_toggle_handler_={};
     std::error_code ec;std::filesystem::remove(root_/"mod-session.json",ec);
 }
-void Library::dismiss_recovery(){std::lock_guard lock(mutex_);recovery_=false;}
+void Library::dismiss_recovery(){std::lock_guard lock(mutex_);recovery_=false;invalidate_views_locked();}
 }
 

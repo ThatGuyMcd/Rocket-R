@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cmath>
 #include <mutex>
+#include <map>
 
 namespace {
 std::atomic<bool> g_camera_input_owned{false};
@@ -86,6 +87,15 @@ constexpr std::array<BindingSet, static_cast<std::size_t>(Action::Count)> kDefau
 
 std::array<BindingSet, static_cast<std::size_t>(Action::Count)> g_bindings = kDefaults;
 std::mutex g_binding_mutex;
+struct ModActionEntry {rocket::input::ModAction binding;rocket::input::ModActionState state;bool held=false;};
+struct ModActions {bool enabled=false;std::vector<ModActionEntry> entries;};
+std::map<std::string,ModActions> g_mod_actions;
+void PublishModAction(ModActionEntry& entry,float value) {
+    const bool held=value>0.5F;
+    if(held&&!entry.held)++entry.state.presses;
+    if(!held&&entry.held)++entry.state.releases;
+    entry.held=held;entry.state.value=value;
+}
 struct CameraBinding { int keyboard; int controller; };
 using CameraBindings = std::array<CameraBinding, static_cast<std::size_t>(rocket::input::CameraAction::Count)>;
 constexpr CameraBindings kCameraDefaults{{
@@ -418,7 +428,7 @@ rocket::input::State rocket::input::poll(SDL_GameController* controller,
     const Uint8* keys = include_keyboard ? SDL_GetKeyboardState(nullptr) : nullptr;
     SDL_GameController* pad = include_controller ? controller : nullptr;
     UpdateShortcutRequests(pad, keys, allow_shortcuts);
-    if (blocked && preview == nullptr) return state;
+    if (blocked && preview == nullptr) {sample_mod_n64(0,true);return state;}
 
     std::array<BindingSet, static_cast<std::size_t>(Action::Count)> bindings;
     CameraBindings camera_bindings;
@@ -510,8 +520,29 @@ rocket::input::State rocket::input::poll(SDL_GameController* controller,
     state.stick_x = ShapeStick(state.stick_x, stick_x_inverted());
     state.stick_y = ShapeStick(state.stick_y, stick_y_inverted());
     if (preview != nullptr) *preview = state;
+    if(preview==nullptr) {
+        std::lock_guard lock(g_binding_mutex);
+        for(auto& [owner,mod]:g_mod_actions) for(auto& action:mod.entries) {
+            float amount=0;
+            if(mod.enabled&&!blocked) {
+                const auto& binding=action.binding;
+                if(!keyboard_suppressed(binding.keyboard)) amount=DesktopValue(keys,binding.keyboard);
+                if(!controller_suppressed(binding.controller)&&!CameraUses(camera_bindings,binding.controller,false))amount=std::max(amount,SourceValue(pad,binding.controller));
+                if(binding.n64&&(state.buttons&binding.n64))amount=1;
+            }
+            PublishModAction(action,amount);
+        }
+    }
     return blocked ? State{} : state;
 }
+
+void rocket::input::clear_mod_actions(){std::lock_guard lock(g_binding_mutex);g_mod_actions.clear();}
+void rocket::input::register_mod_actions(const std::string& owner,const std::vector<ModAction>& actions){std::lock_guard lock(g_binding_mutex);auto& target=g_mod_actions[owner];target={};for(const auto& action:actions)target.entries.push_back({action,{}});}
+void rocket::input::set_mod_actions_enabled(const std::string& owner,bool enabled){std::lock_guard lock(g_binding_mutex);auto found=g_mod_actions.find(owner);if(found==g_mod_actions.end())return;found->second.enabled=enabled;if(!enabled)for(auto& action:found->second.entries)PublishModAction(action,0);}
+void rocket::input::set_mod_action_binding(const std::string& owner,const std::string& name,bool keyboard,int source){std::lock_guard lock(g_binding_mutex);auto found=g_mod_actions.find(owner);if(found==g_mod_actions.end())return;for(auto& action:found->second.entries)if(action.binding.id==name){(keyboard?action.binding.keyboard:action.binding.controller)=source;PublishModAction(action,0);}}
+void rocket::input::set_mod_action_touch(const std::string& owner,const std::string& name,std::uint16_t mask){std::lock_guard lock(g_binding_mutex);auto found=g_mod_actions.find(owner);if(found==g_mod_actions.end())return;for(auto& action:found->second.entries)if(action.binding.id==name){action.binding.n64=mask;PublishModAction(action,0);}}
+rocket::input::ModActionState rocket::input::mod_action_state(const std::string& owner,const std::string& name){std::lock_guard lock(g_binding_mutex);auto found=g_mod_actions.find(owner);if(found!=g_mod_actions.end())for(const auto& action:found->second.entries)if(action.binding.id==name)return action.state;return {};}
+void rocket::input::sample_mod_n64(std::uint16_t buttons,bool blocked){std::lock_guard lock(g_binding_mutex);for(auto& [owner,mod]:g_mod_actions)for(auto& action:mod.entries)if(blocked||action.binding.n64)PublishModAction(action,!blocked&&mod.enabled&&(buttons&action.binding.n64)?1.0F:0.0F);}
 
 void rocket::input::set_camera_input_owned(bool value) { g_camera_input_owned.store(value); }
 bool rocket::input::camera_input_owned() { return g_camera_input_owned.load() && g_camera_runtime_enabled.load(); }
@@ -596,6 +627,7 @@ bool rocket::input::mouse_motion_bound() {
     for (const auto& b : g_bindings)
         if (is_mouse_motion(b.keyboard_primary) || is_mouse_motion(b.keyboard_secondary)) return true;
     if (camera_input_owned()) for (const auto& b : g_camera_bindings) if (is_mouse_motion(b.keyboard)) return true;
+    for(const auto& [owner,mod]:g_mod_actions)if(mod.enabled)for(const auto& action:mod.entries)if(is_mouse_motion(action.binding.keyboard))return true;
     return false;
 }
 void rocket::input::clear_mouse_transients() {

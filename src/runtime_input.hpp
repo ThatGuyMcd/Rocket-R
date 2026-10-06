@@ -11,6 +11,21 @@ typedef struct _SDL_GameController SDL_GameController;
 
 namespace rocket::input {
 
+struct ModAction {
+    std::string id;
+    int keyboard=-1,controller=-1;
+    std::uint16_t n64=0;
+};
+struct ModActionState {float value=0;std::uint32_t presses=0,releases=0;};
+void clear_mod_actions();
+void register_mod_actions(const std::string& owner,const std::vector<ModAction>& actions);
+void set_mod_actions_enabled(const std::string& owner,bool enabled);
+void set_mod_action_binding(const std::string& owner,const std::string& action,bool keyboard,int source);
+void set_mod_action_touch(const std::string& owner,const std::string& action,std::uint16_t mask);
+ModActionState mod_action_state(const std::string& owner,const std::string& action);
+// Android's mapped touch buttons are published through this same fallback.
+void sample_mod_n64(std::uint16_t buttons,bool blocked);
+
 constexpr int kUnbound = -1;
 void set_camera_input_owned(bool owned);
 bool camera_input_owned();

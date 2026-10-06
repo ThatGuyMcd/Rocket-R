@@ -12,7 +12,9 @@ You'll be asked for your own unmodified US ROM.
 The builder prepares the pinned dependencies, validates the ROM, builds the
 matching ELF, generates the CPU and audio code, then compiles each platform.
 The generated game code is shared between platforms. Desktop builds compile
-and run all seven CTest suites before packaging.
+and run the desktop CTest suites before packaging. SDK 2 adds five suites;
+the published SDK 1 fixture check brings the total to thirteen when those
+packages are available in `build/sdk1-compatibility`.
 
 For a specific set of platforms, use PowerShell:
 
@@ -53,8 +55,8 @@ The Android builder uses Java 17, SDK/build-tools 34, NDK 26.1.10909125,
 CMake 3.22.1 and Gradle 8.7. It packages `arm64-v8a` only, using the pinned
 SDL2 2.26.3 source. The manifest targets SDK 34 with a minimum SDK of 24;
 the device must also meet the renderer's Vulkan requirements. The APK version
-name follows `VERSION`; its numeric update code is major × 10000 + minor × 100
-+ patch. Release 1.0.1 uses 10001, above the earlier development APKs' 10000.
+name follows `VERSION`; its numeric update code normally uses major × 10000 +
+minor × 100 + patch. Release 1.0.2 uses 11001 so it can install over SDK 2 preview APKs, which used 11000.
 
 The signing key is stored in `build/private/android-signing/`. Keep this key
 backed up and private. Updates need the same signing identity to install over
@@ -65,20 +67,20 @@ an existing build. The local builder does not publish to an app store.
 Release packages go in `dist/`, using the version from `VERSION`:
 
 ```text
-Rocket-R-1.0.1-Windows-x64.zip
-Rocket-R-1.0.1-Linux-x86_64.AppImage
-Rocket-R-1.0.1-Linux-x86_64-Portable.tar.gz
-Rocket-R-1.0.1-Linux-x86_64-SteamDeck.tar.gz
-Rocket-R-1.0.1-Linux-aarch64.AppImage
-Rocket-R-1.0.1-Linux-aarch64-Portable.tar.gz
-Rocket-R-1.0.1-Android-arm64-v8a.apk
+Rocket-R-1.0.2-Windows-x64.zip
+Rocket-R-1.0.2-Linux-x86_64.AppImage
+Rocket-R-1.0.2-Linux-x86_64-Portable.tar.gz
+Rocket-R-1.0.2-Linux-x86_64-SteamDeck.tar.gz
+Rocket-R-1.0.2-Linux-aarch64.AppImage
+Rocket-R-1.0.2-Linux-aarch64-Portable.tar.gz
+Rocket-R-1.0.2-Android-arm64-v8a.apk
 rocket_modern_camera.nrm
 ```
 
 The Windows executable is in `build/windows/bin/Release/`. The private working
 ROM and its identity record are in `build/private/`; they are never packaged.
 Release scans reject ROM files and N64 ROM headers. The final verification step
-also writes `Rocket-R-1.0.1-build-info.json` and `Rocket-R-1.0.1-SHA256SUMS.txt`
+also writes `Rocket-R-1.0.2-build-info.json` and `Rocket-R-1.0.2-SHA256SUMS.txt`
 with the source and package hashes.
 
 `-NoLaunch` skips the final launch prompt. `-NoPackage` skips the Windows ZIP;

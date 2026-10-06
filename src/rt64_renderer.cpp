@@ -32,6 +32,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cmath>
 #include <utility>
 
@@ -284,6 +285,9 @@ void apply_config(RT64::Application& app,
             app.userConfig.refreshRateTarget = requested;
         }
     }
+#if defined(__ANDROID__)
+    rocket::platform::set_android_presentation_rate(g_effective_presentation_rate);
+#endif
     switch (config.hpfb_option) {
         case ultramodern::renderer::HighPrecisionFramebuffer::On:
             app.userConfig.internalColorFormat = RT64::UserConfiguration::InternalColorFormat::High;
@@ -466,8 +470,20 @@ rocket::renderer::RT64Context::RT64Context(
         application_->swapChain->setVsyncEnabled(startup_extra.vsync);
     }
     graphics_revision_ = 0U;
+    startup_hardware_resolve_ = application_->shaderLibrary != nullptr &&
+        application_->shaderLibrary->usesHardwareResolve;
     apply_extra_graphics(true);
     performance_window_started_ = std::chrono::steady_clock::now();
+    trace_report_started_ = performance_window_started_;
+    const char* trace = std::getenv("ROCKET_PERFORMANCE_TRACE");
+    environment_trace_ = trace != nullptr && trace[0] != '\0' && trace[0] != '0';
+    performance_trace_ = environment_trace_ || rocket::graphics::settings().performance_logging;
+    const auto description = application_->device->getDescription();
+    std::fprintf(stderr, "[rt64][device] %s; type=%s; hardware rendering=%d\n",
+        description.name.c_str(), description.type == plume::RenderDeviceType::CPU ? "CPU" :
+        description.type == plume::RenderDeviceType::INTEGRATED ? "integrated" :
+        description.type == plume::RenderDeviceType::DISCRETE ? "discrete" : "other",
+        description.type != plume::RenderDeviceType::CPU);
     performance_present_base_ = application_->sharedQueueResources != nullptr
         ? application_->sharedQueueResources->totalPresentations.load(
               std::memory_order_relaxed)
@@ -578,8 +594,16 @@ void rocket::renderer::RT64Context::send_dl(
     application_->interpreter->loadUCodeGBI(task->t.ucode & 0x03FFFFFF,
                                              task->t.ucode_data & 0x03FFFFFF,
                                              true);
+    const auto decode_start = performance_trace_ ? std::chrono::steady_clock::now() :
+        std::chrono::steady_clock::time_point{};
     application_->processDisplayLists(rdram_snapshot,
                                       task->t.data_ptr & 0x03FFFFFF, 0, true);
+    if (performance_trace_) {
+        const double ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - decode_start).count();
+        ++trace_tasks_; trace_decode_ms_ += ms;
+        trace_decode_max_ms_ = std::max(trace_decode_max_ms_, ms);
+    }
 }
 
 void rocket::renderer::RT64Context::update_screen() {
@@ -622,9 +646,18 @@ void rocket::renderer::RT64Context::apply_extra_graphics(bool force) {
     if (!application_) return;
 
     const std::uint64_t revision = rocket::graphics::revision();
-    const auto extra = rocket::graphics::settings();
     if (!force && revision == graphics_revision_) {
         return;
+    }
+    const auto extra = rocket::graphics::settings();
+
+    const bool trace = environment_trace_ || extra.performance_logging;
+    if (trace != performance_trace_) {
+        performance_trace_ = trace;
+        trace_tasks_ = 0;
+        trace_decode_ms_ = trace_decode_max_ms_ = 0;
+        trace_report_started_ = std::chrono::steady_clock::now();
+        std::fprintf(stderr, "[performance] logging %s\n", trace ? "enabled" : "disabled");
     }
 
     const auto old_user = application_->userConfig;
@@ -651,6 +684,8 @@ void rocket::renderer::RT64Context::apply_extra_graphics(bool force) {
         } else if (extra.hardware_resolve ==
                    rocket::graphics::HardwareResolve::Off) {
             application_->shaderLibrary->usesHardwareResolve = false;
+        } else {
+            application_->shaderLibrary->usesHardwareResolve = startup_hardware_resolve_;
         }
     }
     if (application_->swapChain != nullptr) {
@@ -710,6 +745,19 @@ void rocket::renderer::RT64Context::update_performance_stats() {
     stats.presents = total;
     stats.interpolated_presents = application_->sharedQueueResources->
         totalInterpolatedPresentations.load(std::memory_order_relaxed);
+    const auto device = application_->device->getDescription();
+    stats.device_name = device.name;
+    stats.software_renderer = device.type == plume::RenderDeviceType::CPU;
+    if (performance_trace_ && now - trace_report_started_ >= std::chrono::seconds(4)) {
+        const auto coverage = rocket::presentation::coverage_stats();
+        std::fprintf(stderr, "[performance] fps=%.1f target=%d scale=%.2f tasks=%llu decode_avg_ms=%.3f decode_max_ms=%.3f sidecar_mismatches=%llu software=%d\n",
+            stats.fps, stats.target_rate, stats.resolution_scale,
+            static_cast<unsigned long long>(trace_tasks_),
+            trace_tasks_ ? trace_decode_ms_ / trace_tasks_ : 0.0, trace_decode_max_ms_,
+            static_cast<unsigned long long>(coverage.sidecar_mismatches), stats.software_renderer);
+        trace_tasks_ = 0; trace_decode_ms_ = trace_decode_max_ms_ = 0;
+        trace_report_started_ = now;
+    }
     rocket::graphics::publish_performance(stats);
 
     performance_window_started_ = now;

@@ -15,7 +15,7 @@ New-Item -ItemType Directory -Force -Path $LogRoot | Out-Null
 $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $LogPath = Join-Path $LogRoot "one-click-$Stamp.log"
 $Version = (Get-Content (Join-Path $Root 'VERSION') -Raw).Trim()
-$BuilderRevision = 'RELEASE-1.0.1'
+$BuilderRevision = 'SDK2-1.1.0-dev'
 if ($Version -notmatch '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z._-]+)?$') {
     throw "Invalid VERSION value: '$Version'"
 }
@@ -1213,7 +1213,7 @@ inline constexpr std::uint32_t kBootstrapBssEnd = $($RocketBootstrap.BssEnd)U;
         Write-Host "Rocket runtime build log: $RuntimeLog"
         $runtimeConfigureExit = Invoke-NativeLogged $NativeCMake @('-S',$Root,'-B',$WindowsBuild,'-G','Ninja',"-DCMAKE_MAKE_PROGRAM=$NativeNinja",'-DCMAKE_BUILD_TYPE=Release',"-DCMAKE_C_COMPILER=$ClangCl","-DCMAKE_CXX_COMPILER=$ClangCl") $RuntimeLog
         if ($runtimeConfigureExit -ne 0) { throw "Rocket-R Windows CMake configuration failed (exit $runtimeConfigureExit). See $RuntimeLog" }
-        $runtimeBuildExit = Invoke-NativeLogged $NativeCMake @('--build',$WindowsBuild,'--target','RocketR','RocketPresentationTests','RocketRuntimeLogTests','RocketControlsTests','RocketControlsUiTests','RocketModsTests','RocketCameraModTests','RocketGraphicsCameraTests','--parallel') $RuntimeLog
+        $runtimeBuildExit = Invoke-NativeLogged $NativeCMake @('--build',$WindowsBuild,'--target','RocketR','RocketPresentationTests','RocketRuntimeLogTests','RocketAndroidSupportTests','RocketControlsTests','RocketControlsUiTests','RocketModsTests','RocketCameraModTests','RocketGraphicsCameraTests','RocketSdkServicesTests','RocketSdkWorldTests','RocketSdkRuntimeTests','RocketSdkCompatibilityTests','RocketSdkAudioTests','RocketAssetLayersTests','--parallel') $RuntimeLog
         if ($runtimeBuildExit -ne 0) { throw "Rocket-R Windows build failed (exit $runtimeBuildExit). See $RuntimeLog" }
         $NativeCTest = Join-Path (Split-Path -Parent $NativeCMake) 'ctest.exe'
         $runtimeTestExit = Invoke-NativeLogged $NativeCTest @('--test-dir',$WindowsBuild,'--output-on-failure') $RuntimeLog

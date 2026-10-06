@@ -43,6 +43,16 @@ Vulkan 1.0 support alone is not enough. Check media volume and the active audio
 output if the game is silent. Android Back and the Settings touch button open
 the overlay.
 
+For low frame rates, choose **Low power** in Graphics and restart the game. It
+uses native N64 resolution and 30 FPS. You can then raise resolution and frame
+rate one at a time. Installing an update keeps your previous settings.
+
+For graphical faults, enable **Graphics > Diagnostics > Record performance log**,
+reproduce the problem for around 30 seconds, then return to the Android launcher
+and choose **Save diagnostics**. Attach the ZIP and a screenshot or clip to your
+report, with the level and steps to reproduce it. This export includes device
+details, graphics settings and recent logs. It does not include your ROM or saves.
+
 For a crash log, connect the device with USB debugging enabled and run
 `CAPTURE-ANDROID-CRASH.cmd` from the source folder. It writes the captured logs
 under `build/logs/`. Review them before sharing, as Android logs can contain

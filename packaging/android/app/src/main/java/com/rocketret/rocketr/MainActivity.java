@@ -1,12 +1,14 @@
 package com.rocketret.rocketr;
 
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.animation.ObjectAnimator;
 import android.animation.ValueAnimator;
 import android.content.Intent;
 import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Build;
 import android.provider.OpenableColumns;
 import android.view.Gravity;
 import android.view.View;
@@ -16,13 +18,17 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.widget.ScrollView;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.IOException;
+import java.io.OutputStream;
 
 public final class MainActivity extends Activity {
     private static final int PICK_ROM = 1001;
+    private static final int SAVE_DIAGNOSTICS = 1002;
     private File privateRom;
     // ROCKET-R UI V36 ANDROID SPINNING BRAND
     private ObjectAnimator brandAnimator;
@@ -96,7 +102,22 @@ public final class MainActivity extends Activity {
         mods.setTypeface(Typeface.create("Comic Sans MS", Typeface.BOLD));
         mods.setOnClickListener(v -> startActivity(new Intent(this, ModActivity.class)));
         root.addView(mods);
-        setContentView(root);
+        Button diagnostics = new Button(this);
+        diagnostics.setText("Save diagnostics");
+        diagnostics.setTextSize(20.0f);
+        diagnostics.setTypeface(Typeface.create("Comic Sans MS", Typeface.BOLD));
+        diagnostics.setOnClickListener(v -> {
+            Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType("application/zip");
+            intent.putExtra(Intent.EXTRA_TITLE, "Rocket-R-Android-diagnostics.zip");
+            startActivityForResult(intent, SAVE_DIAGNOSTICS);
+        });
+        root.addView(diagnostics);
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.addView(root);
+        setContentView(scroll);
     }
 
     private void chooseRom() {
@@ -109,6 +130,24 @@ public final class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == SAVE_DIAGNOSTICS && resultCode == RESULT_OK && data != null && data.getData() != null) {
+            Uri destination = data.getData();
+            String device = deviceSummary();
+            File config = new File(getFilesDir(), "config");
+            new Thread(() -> {
+                String result;
+                try (OutputStream output = getContentResolver().openOutputStream(destination, "wt")) {
+                    if (output == null) throw new IOException("Could not open the destination.");
+                    DiagnosticsReport.write(output, config, device);
+                    result = "Diagnostics saved. You can attach the ZIP to your bug report.";
+                } catch (Exception failure) {
+                    result = "Could not save diagnostics: " + failure.getMessage();
+                }
+                final String message = result;
+                runOnUiThread(() -> Toast.makeText(this, message, Toast.LENGTH_LONG).show());
+            }, "RocketDiagnostics").start();
+            return;
+        }
         if (requestCode != PICK_ROM || resultCode != RESULT_OK || data == null || data.getData() == null) {
             return;
         }
@@ -131,6 +170,21 @@ public final class MainActivity extends Activity {
     private void launchGame() {
         Intent intent = new Intent(this, RocketActivity.class);
         startActivity(intent);
+    }
+
+    private String deviceSummary() {
+        ActivityManager manager = (ActivityManager)getSystemService(ACTIVITY_SERVICE);
+        ActivityManager.MemoryInfo memory = new ActivityManager.MemoryInfo();
+        if (manager != null) manager.getMemoryInfo(memory);
+        String version = "unknown";
+        try { version = getPackageManager().getPackageInfo(getPackageName(), 0).versionName; }
+        catch (android.content.pm.PackageManager.NameNotFoundException ignored) { }
+        return "Rocket-R " + version + "\nDevice: " + Build.MANUFACTURER + " " + Build.MODEL +
+               "\nAndroid: " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ")" +
+               "\nABIs: " + android.text.TextUtils.join(", ", Build.SUPPORTED_ABIS) +
+               "\nRAM MiB: " + memory.totalMem / (1024 * 1024) +
+               "\nAvailable RAM MiB: " + memory.availMem / (1024 * 1024) +
+               "\nLow RAM device: " + (manager != null && manager.isLowRamDevice()) + "\n";
     }
 
     @Override

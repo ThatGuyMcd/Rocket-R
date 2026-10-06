@@ -69,13 +69,19 @@ WORK="$WORK_BASE/FIXED34-$ARCH"
 mkdir -p "$WORK"
 rsync -a --delete \
   --exclude '.git/' --exclude 'build/' --exclude 'dist/' --exclude 'extern/' \
-  --exclude '*.zip' --exclude '*.rar' --exclude '/Payload/' \
+  --exclude '*.zip' --exclude '*.rar' --exclude '/Payload/' --exclude '/Live_Check_Windows/' \
   "$PROJECT_ROOT/" "$WORK/"
 mkdir -p "$WORK/dist-container"
+if [[ -d "$PROJECT_ROOT/build/sdk1-compatibility" ]]; then
+  mkdir -p "$WORK/build/sdk1-compatibility"
+  for fixture in Rocket_Cheat_Menu_3.0.1.nrm Rocket_Colour_Studio_1.0.0.nrm rocket_modern_camera.1.0.0.nrm; do
+    [[ ! -f "$PROJECT_ROOT/build/sdk1-compatibility/$fixture" ]] || cp "$PROJECT_ROOT/build/sdk1-compatibility/$fixture" "$WORK/build/sdk1-compatibility/$fixture"
+  done
+fi
 
 PLATFORM="linux/amd64"
 [[ "$ARCH" == aarch64 ]] && PLATFORM="linux/arm64"
-IMAGE="ubuntu:22.04"
+IMAGE="${ROCKET_LINUX_BUILD_IMAGE:-ubuntu:22.04}"
 
 cat > "$WORK/.rocket-linux-container-build.sh" <<'CONTAINER'
 #!/usr/bin/env bash
@@ -98,7 +104,7 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 rm -rf "build/linux-${ROCKET_TARGET_ARCH}"
 cmake -S . -B "build/linux-${ROCKET_TARGET_ARCH}" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release
-cmake --build "build/linux-${ROCKET_TARGET_ARCH}" --target RocketR RocketPresentationTests RocketRuntimeLogTests RocketControlsTests RocketControlsUiTests RocketModsTests RocketCameraModTests RocketGraphicsCameraTests --parallel
+cmake --build "build/linux-${ROCKET_TARGET_ARCH}" --target RocketR RecompModTool RocketPresentationTests RocketRuntimeLogTests RocketAndroidSupportTests RocketControlsTests RocketControlsUiTests RocketModsTests RocketCameraModTests RocketGraphicsCameraTests RocketSdkServicesTests RocketSdkRuntimeTests RocketSdkCompatibilityTests RocketSdkWorldTests RocketSdkAudioTests RocketAssetLayersTests --parallel "${ROCKET_BUILD_JOBS:-6}"
 ctest --test-dir "build/linux-${ROCKET_TARGET_ARCH}" --output-on-failure
 BINARY="build/linux-${ROCKET_TARGET_ARCH}/bin/Rocket-R"
 if [[ ! -x "$BINARY" ]]; then
@@ -118,6 +124,7 @@ chmod +x "$WORK/.rocket-linux-container-build.sh"
 
 sudo docker run --rm --platform "$PLATFORM" \
   -e ROCKET_TARGET_ARCH="$ARCH" -e ROCKET_VERSION="$VERSION" \
+  -e ROCKET_BUILD_JOBS="${ROCKET_BUILD_JOBS:-6}" \
   -v "$WORK:/work" -w /work "$IMAGE" \
   /bin/bash /work/.rocket-linux-container-build.sh
 

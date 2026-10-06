@@ -13,6 +13,7 @@ enum class GraphicsPreset : int {
     HighQuality,
     Performance,
     Custom,
+    LowPower,
 };
 
 enum class AspectPreset : int {
@@ -103,6 +104,7 @@ struct Settings {
     std::string custom_shader;
 
     bool performance_overlay = false;
+    bool performance_logging = false;
     bool interpolation_overlay = false;
 };
 
@@ -114,6 +116,8 @@ struct PerformanceStats {
     int target_rate = 0;
     std::uint64_t presents = 0;
     std::uint64_t interpolated_presents = 0;
+    std::string device_name;
+    bool software_renderer = false;
 };
 
 void set_config_directory(const std::filesystem::path& path);
@@ -123,6 +127,7 @@ std::string custom_shader_base_path();
 Settings settings();
 void set_settings(const Settings& value, bool mark_custom = true);
 void reset_settings();
+Settings preset_settings(GraphicsPreset preset);
 void apply_preset(GraphicsPreset preset);
 std::uint64_t revision();
 

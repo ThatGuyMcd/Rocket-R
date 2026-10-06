@@ -1,0 +1,113 @@
+--- a/src/hle/rt64_rdp_tmem.h
++++ b/src/hle/rt64_rdp_tmem.h
+@@ -19,6 +19,7 @@
+         void uploadEmpty(State *state, TextureCache *textureCache, uint64_t creationFrame, uint16_t width, uint16_t height, uint64_t replacementHash);
+         uint64_t uploadTMEM(State *state, const LoadTile &loadTile, TextureCache *textureCache, uint64_t creationFrame, uint16_t byteOffset, uint16_t byteCount, uint16_t width, uint16_t height, uint32_t tlut);
+         uint64_t uploadTexture(State *state, const LoadTile &loadTile, TextureCache *textureCache, uint64_t creationFrame, uint16_t width, uint16_t height, uint32_t tlut, bool rocketSky = false);
++        uint64_t uploadSkyTexture(State *state, const LoadTile &loadTile, TextureCache *textureCache, uint64_t creationFrame, uint16_t width, uint16_t height, uint32_t tlut, bool rawTMEM);
+         void dumpTexture(uint64_t hash, State *state, const LoadTile &loadTile, uint16_t width, uint16_t height, uint32_t tlut);
+         void removeHashes(const std::vector<uint64_t> &hashes);
+     };
+--- a/src/hle/rt64_rdp_tmem.cpp
++++ b/src/hle/rt64_rdp_tmem.cpp
+@@ -56,15 +56,45 @@
+     uint64_t TextureManager::uploadTexture(State *state, const LoadTile &loadTile, TextureCache *textureCache, uint64_t creationFrame, uint16_t width, uint16_t height, uint32_t tlut, bool rocketSky) {
+         const uint8_t *TMEM = reinterpret_cast<const uint8_t *>(state->rdp->TMEM);
+         uint64_t hash = TMEMHasher::hash(TMEM, loadTile, width, height, tlut, TMEMHasher::CurrentHashVersion);
+-        const unsigned level = rocketSky ? rocketSkyFilterLevel(getRocketSkyDitherReduction()) : 0;
++        if (rocketSky) {
++            const uint64_t filtered = uploadSkyTexture(state, loadTile, textureCache, creationFrame, width, height, tlut, false);
++            if (filtered != 0) return filtered;
++        }
++        if (hashSet.find(hash) == hashSet.end()) {
++            hashSet.insert(hash);
++            textureCache->queueGPUUploadTMEM(hash, creationFrame, TMEM, RDP_TMEM_BYTES, width, height, tlut, loadTile, true);
++        }
++
++        // Dump memory contents into a file if the process is active.
++        if (!state->dumpingTexturesDirectory.empty()) {
++            dumpTexture(hash, state, loadTile, width, height, tlut);
++        }
++
++        return hash;
++    }
++
++    uint64_t TextureManager::uploadSkyTexture(State *state, const LoadTile &loadTile, TextureCache *textureCache, uint64_t creationFrame, uint16_t width, uint16_t height, uint32_t tlut, bool rawTMEM) {
++        const uint8_t *TMEM = reinterpret_cast<const uint8_t *>(state->rdp->TMEM);
++        const uint64_t hash = TMEMHasher::hash(TMEM, loadTile, width, height, tlut, TMEMHasher::CurrentHashVersion);
++        const unsigned level = rocketSkyFilterLevel(getRocketSkyDitherReduction());
+         static const bool traceSky = std::getenv("ROCKET_SKY_FILTER_TRACE") != nullptr;
+         static thread_local unsigned traceCount = 0;
+-        const bool trace = traceSky && rocketSky && ((traceCount++ % 120) == 0);
++        const bool trace = traceSky && ((traceCount++ % 120) == 0);
+         if (trace) std::fprintf(stderr, "[rocket-sky-filter] size=%ux%u format=%u/%u tlut=%u strength=%u\n",
+             unsigned(width), unsigned(height), unsigned(loadTile.fmt), unsigned(loadTile.siz), tlut, level);
+         if (level != 0 && width == 8 && height <= 256 && loadTile.fmt == G_IM_FMT_CI &&
+             loadTile.siz == G_IM_SIZ_8b && tlut == G_TT_RGBA16) {
+             bool replaced = textureCache->hasReplacement(hash);
++            if (rawTMEM && !replaced) {
++                // Keep packs keyed to the original raw upload working too.
++                XXH3_state_t rawState;
++                XXH3_64bits_reset(&rawState);
++                const uint16_t offset = 0, count = RDP_TMEM_BYTES;
++                XXH3_64bits_update(&rawState, TMEM, count);
++                XXH3_64bits_update(&rawState, &offset, sizeof(offset));
++                XXH3_64bits_update(&rawState, &count, sizeof(count));
++                replaced = textureCache->hasReplacement(XXH3_64bits_digest(&rawState));
++            }
+             // Replacement packs may use any supported RT64 texture hash version.
+             for (uint32_t v = 1; !replaced && v < TMEMHasher::CurrentHashVersion; ++v)
+                 replaced = textureCache->hasReplacement(TMEMHasher::hash(TMEM, loadTile, width, height, tlut, v));
+@@ -85,17 +115,7 @@
+                 }
+             }
+         }
+-        if (hashSet.find(hash) == hashSet.end()) {
+-            hashSet.insert(hash);
+-            textureCache->queueGPUUploadTMEM(hash, creationFrame, TMEM, RDP_TMEM_BYTES, width, height, tlut, loadTile, true);
+-        }
+-
+-        // Dump memory contents into a file if the process is active.
+-        if (!state->dumpingTexturesDirectory.empty()) {
+-            dumpTexture(hash, state, loadTile, width, height, tlut);
+-        }
+-
+-        return hash;
++        return 0;
+     }
+ 
+     void TextureManager::dumpTexture(uint64_t hash, State *state, const LoadTile &loadTile, uint16_t width, uint16_t height, uint32_t tlut) {
+--- a/src/hle/rt64_state.cpp
++++ b/src/hle/rt64_state.cpp
+@@ -686,7 +686,30 @@
+                     textureManager.uploadEmpty(this, ext.textureCache, workload.submissionFrame, callTile.sampleWidth, callTile.sampleHeight, callTile.tmemHashOrID);
+                 }
+                 else if (callTile.rawTMEM) {
+-                    callTile.tmemHashOrID = textureManager.uploadTMEM(this, callTile.loadTile, ext.textureCache, workload.submissionFrame, 0, RDP_TMEM_BYTES, callTile.sampleWidth, callTile.sampleHeight, callTile.tlut);
++                    const auto &tile = callTile.loadTile;
++                    // Rocket declares a 1024-row wrapping sky, while loading a
++                    // 256-row CI8 slab into the lower 2 KiB of TMEM. Its raw
++                    // sampler therefore repeats every 256 rows. Decode that
++                    // physical period, not the declared source texture height.
++                    const bool nativeSkySlab = drawCall.rocketSkyBackground &&
++                        callTile.sampleWidth == 8 && callTile.sampleHeight == 1024 &&
++                        tile.fmt == G_IM_FMT_CI && tile.siz == G_IM_SIZ_8b &&
++                        callTile.tlut == G_TT_RGBA16 && tile.tmem == 0 && tile.line == 1 &&
++                        tile.masks == 3 && tile.maskt == 10 && tile.cmt == G_TX_WRAP &&
++                        tile.uls == 0 && tile.ult == 0 && tile.lrs == 28 && tile.lrt == 1020;
++                    const uint64_t filtered = nativeSkySlab ? textureManager.uploadSkyTexture(
++                        this, tile, ext.textureCache, workload.submissionFrame, 8, 256, callTile.tlut, true) : 0;
++                    if (filtered != 0) {
++                        callTile.tmemHashOrID = filtered;
++                        callTile.rawTMEM = false;
++                        callTile.sampleHeight = 256;
++                        // Explicit addressing and native samplers must agree on
++                        // the physical TMEM period, including negative UVs.
++                        workload.drawData.rdpTiles[rdpTileIndex].maskt = 256;
++                    }
++                    else {
++                        callTile.tmemHashOrID = textureManager.uploadTMEM(this, tile, ext.textureCache, workload.submissionFrame, 0, RDP_TMEM_BYTES, callTile.sampleWidth, callTile.sampleHeight, callTile.tlut);
++                    }
+                 }
+                 else {
+                     callTile.tmemHashOrID = textureManager.uploadTexture(this, callTile.loadTile, ext.textureCache, workload.submissionFrame, callTile.sampleWidth, callTile.sampleHeight, callTile.tlut, drawCall.rocketSkyBackground);

@@ -20,6 +20,7 @@ import tomllib
 import zipfile
 
 from stage_release_docs import release_documents
+from rocket_sdk import validate_package, MODULES
 
 
 def require(condition: bool, message: str) -> None:
@@ -51,7 +52,7 @@ def elf(data: bytes, machine: int, appimage: bool = False) -> None:
 def source_files(root: Path) -> list[Path]:
     """Include new owned source files even when they have not been committed."""
     excluded = {'.git', 'build', 'dist', 'extern', 'generated', '__pycache__',
-                '.vs', '.vscode', '.idea', 'RecompiledFuncs', 'RecompiledRSP', 'RecompiledPatches'}
+                '.vs', '.vscode', '.idea', 'RecompiledFuncs', 'RecompiledRSP', 'RecompiledPatches', 'Live_Check_Windows'}
     result = []
     for directory, folders, names in os.walk(root):
         folders[:] = sorted(name for name in folders if name not in excluded)
@@ -200,6 +201,34 @@ def main() -> None:
     def git(*arguments: str) -> str:
         return subprocess.check_output(['git', *arguments], cwd=root, text=True).strip()
 
+    sdk_path = dist / f'{prefix}-SDK2.zip'
+    if sdk_path.exists():
+        with zipfile.ZipFile(sdk_path) as package:
+            require(package.testzip() is None, 'Corrupt SDK archive')
+            metadata = json.loads(package.read('sdk.json'))
+            require(metadata['sdk'] == 2 and metadata['modules'] == MODULES, 'SDK module manifest is outdated')
+            require(package.read('modding/include/rocket/mod.h') == (root/'modding/include/rocket/mod.h').read_bytes(),
+                    'SDK 1 header changed in SDK bundle')
+            for name, value in metadata['symbols_sha256'].items():
+                require(hashlib.sha256(package.read(name)).hexdigest() == value, 'SDK symbol checksum mismatch')
+                require(package.read(name) == (root/'build/generated'/Path(name).name).read_bytes(), 'SDK symbols do not match this build')
+            for item in package.infolist():
+                if not item.is_dir(): rom_check(item.filename, package.read(item.filename)[:4])
+            for name, machine in (('tools/linux-x86_64/RecompModTool', 62), ('tools/linux-aarch64/RecompModTool', 183)):
+                elf(package.read(name), machine)
+                require((package.getinfo(name).external_attr >> 16) & 0o111, 'SDK native tool is not executable')
+            require(package.read('tools/RecompModTool.exe')[:2] == b'MZ', 'SDK Windows tool missing')
+            require(package.read('docs/SDK2.md') == (root/'docs/SDK2.md').read_bytes(), 'SDK guide outdated')
+        artifacts.append(sdk_path)
+        workshop = dist/'rocket_workshop.nrm'
+        actual_workshop = validate_package(workshop)
+        expected_workshop = tomllib.loads((root/'modding/examples/workshop/mod.toml').read_text())['manifest']
+        require(actual_workshop['api'] == 2, 'Workshop needs SDK 2 metadata')
+        require(actual_workshop['id'] == expected_workshop['id'] and
+                actual_workshop['version'] == expected_workshop['version'],
+                'Workshop package does not match the source manifest')
+        artifacts.append(workshop)
+
     hashes = {p.relative_to(root).as_posix(): digest(p) for p in source_files(root)}
     record = {
         'version': version, 'createdAt': datetime.now(timezone.utc).isoformat(),
@@ -212,6 +241,7 @@ def main() -> None:
         'checks': ['ZIP integrity', 'ROM scans', 'CPU architectures', 'Windows GUI subsystem',
                    'Android 16 KiB ELF alignment', 'AppImage extraction', 'portable binary equality',
                    'current guides and dependency notices'] +
+                  (['SDK modules, frozen SDK 1 header, symbols, native tools and Workshop package'] if sdk_path.exists() else []) +
                   (['camera mod version and embedded package equality'] if camera_payload is not None else []),
         'coverageNote': 'These are packaging checks. See docs/TESTING.md for separate test and gameplay coverage. APK signing is checked by the Android builder.',
         'artifacts': [{'file': p.name, 'bytes': p.stat().st_size, 'sha256': digest(p)} for p in artifacts],

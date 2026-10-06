@@ -1,6 +1,6 @@
 # Mods
 
-Rocket-R 1.0.1 supports code mods, RT64 texture packs and separate mod profiles. Modern Analogue Camera 1.0.0 is included. Keep a copy of any save you care about before trying a new gameplay mod.
+Rocket-R supports code mods, RT64 texture packs and separate mod profiles. Modern Analogue Camera 1.0.0 is included. Rocket-R 1.0.2 adds [SDK 2](SDK2.md) for custom gameplay, models, scenes, collision, music and live managed mods. SDK 1 packages remain supported without rebuilding. Keep a copy of any save you care about before trying a new gameplay mod.
 
 ## Adding a mod
 
@@ -65,7 +65,7 @@ Manifest options support Number, Enum and String settings. The manager draws the
 
 Optional `rocket.json` metadata declares the Rocket API version, category, conflicts and exclusive resources. For example, two mods that both own `camera.orbit` cannot be enabled together. These declarations help catch conflicts; they cannot detect every possible interaction between arbitrary code mods.
 
-Live on/off is currently a host feature for the exact camera package included with the build. Its code stays loaded and the host switches its camera hooks and inputs at a safe update boundary. Disabled third-party packages are not preloaded. The camera cannot wait in standby alongside a conflicting camera mod, and a mod required by another running mod cannot be switched off live. Original Game and recovery mode still load no mods.
+SDK 1 live on/off remains a host feature for the exact camera package included with the build. Its code stays loaded and the host switches its camera hooks and inputs at a safe update boundary. SDK 2 managed packages can also wait in standby and switch during gameplay; raw hooks, function replacements and ROM patches still require restart activation. Standby never adds extra dependencies or conflicting replacements. A mod required by another running mod cannot be switched off live. Original Game and recovery mode still load no mods.
 
 ## Rocket API version 1
 
@@ -100,7 +100,7 @@ The manager accepts RT64 `.rtz` archives containing `rt64.json` and replacement 
 
 The replacement cache is capped at 128 MiB on Android and 512 MiB on desktop. This is the replacement pool budget, not a cap on every allocation made while loading a pack. Keep mobile packs small and test on the intended device.
 
-Models, collision, level data, music and arbitrary files do not become replacement assets just by placing them in a package. Those need game-specific importers and runtime adapters. Rocket-R does not currently include those tools.
+SDK 2 adds an OBJ importer, managed scene files, box collision and PCM WAV playback. See the [SDK 2 guide](SDK2.md) and Workshop example. These are authored resources with explicit loading APIs; putting a file in a package does not automatically replace a native model, level or music bank. Cartridge asset patches still need format-specific authoring tools.
 
 ## Compatibility limits
 

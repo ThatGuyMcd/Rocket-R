@@ -1,5 +1,27 @@
 # Runtime architecture
 
+## Mod SDK
+
+SDK 1 retains its imports, packet layouts and original event order. SDK 2 adds
+versioned modules in owned `src/mods` code. The lifecycle bridge dispatches MIPS
+callbacks on authored game updates and restores the caller's CPU context.
+Native observations expire each update; managed actor handles persist until
+removal, scene exit or disable. Host UI changes queue activation, settings and
+commands for the game thread.
+
+`sdk_services` owns resources and schema-tagged profile saves. `sdk_world` owns
+static meshes, actor transforms and custom box collision. `sdk_render` appends
+bounded F3DEX2 draws before the game's render sort and registers actor lifetime
+identities with the existing interpolation path. `sdk_audio` mixes owned WAV
+voices into the existing output blocks without changing native audio timing.
+`asset_layers` combines disjoint SDK-generated BPS edits in private launch
+staging; installed packages remain immutable.
+
+Managed live packages cannot contain raw hooks, replacements or ROM patches.
+Restart mods retain the native code path and protected port-function checks.
+These are ownership and compatibility rules, not a sandbox for guest code.
+See [SDK 2](SDK2.md) for the public contract and current resource budgets.
+
 Rocket-R translates the original US game's MIPS code with N64Recomp. RocketRet's
 matching decompilation supplies the ELF and symbols used for that translation.
 RSPRecomp handles the game's Nintendo n_audio microcode. N64ModernRuntime provides
@@ -22,6 +44,15 @@ IMEM `0x04001080`. The game uses standard F3DEX2 graphics tasks; it does not nee
 DKR's custom graphics microcode interpreter.
 
 ## Threads and rendering
+
+The desktop launcher uses SDL's accelerated renderer with a software fallback.
+On Linux it starts in a window suitable for OpenGL. After the launcher releases
+its renderer, the main thread recreates that window for Vulkan, preserving its
+size and window mode. Direct game launches create the Vulkan window immediately.
+The launcher waits for events between frames, updates at most 60 times a second
+while active, and reduces its refresh rate when idle, unfocused or minimised.
+Immutable mod-library views are rebuilt after changes, rather than copied and
+resolved on every UI frame. File lists are cached and only visible rows are drawn.
 
 The main thread owns SDL window events and input sampling. The runtime runs on
 a worker thread, and game startup waits for the renderer's first safe VI
@@ -46,6 +77,11 @@ retain component interpolation. Secondary matrices in vehicle attachment draws
 have their own role within the owning model invocation. Ambiguous identities,
 conflicting matrix uses, cull gaps and teleports are handled conservatively.
 
+Matching indexes the eligible previous-frame tracks by semantic key. Candidates
+within a key retain their original order and use the same distance and ambiguity
+checks. This removes scans through unrelated objects and older history without
+changing which owners qualify for interpolation.
+
 Rocket's rolling wheel is identified by its checked draw call and the player's
 wheel-model pointer. Its squash and rotation matrices can combine into a sheared
 basis, so the final rolling transform also interpolates scale and shear. Other
@@ -62,12 +98,18 @@ Camera cuts and changes of sky texture start fresh history.
 The row displacement uses the rendered camera FOV and perspective projection,
 so widening the view does not make the horizon scroll faster than the scenery.
 
-Graphics → Image has a Sky dithering reduction slider. It filters the sky texture
-before compositing, so it does not blur the level, Rocket or the HUD. The filter
-averages all eight columns of Rocket's narrow sky gradient at full strength.
-Wider textures use a 4×4 filter that limits blending across strong colour edges.
-Both preserve alpha. The default is 0%; changing it applies immediately and
-saves with the other graphics settings. Replacement textures bypass the filter.
+Graphics → Image has a Sky dithering reduction slider. The host filters the
+verified eight-column CI8 sky at its native size, then caches an RGBA texture.
+The game declares 1,024 wrapping rows but loads a 256-row slab into TMEM.
+The filter decodes that physical slab and keeps its 256-row wrapping period;
+other raw-TMEM layouts retain the original sampler.
+Full strength averages every column and smooths the neighbouring rows. The
+cache key includes the source pixels, palette and slider strength; scrolling
+can reuse a cached result. Rendering takes the normal texture-sampling path,
+without extra per-pixel filter taps or a full-screen pass. Unsupported formats,
+transparent artwork and replacement textures keep their normal handling.
+The default is 0%; changing it applies to the next game frame and saves with
+the other graphics settings. Rocket, the level and the HUD are not filtered.
 
 ## Audio, saves and input
 

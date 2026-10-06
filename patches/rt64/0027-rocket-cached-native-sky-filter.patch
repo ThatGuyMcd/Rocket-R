@@ -1,0 +1,309 @@
+--- /dev/null
++++ b/src/common/rt64_rocket_sky_filter.h
+@@ -0,0 +1,60 @@
++// Filter Rocket's verified opaque eight-column CI8 sky at native resolution.
++// No screen-size work, frame history, guest-memory writes or GPU filter pass.
++#pragma once
++#include <algorithm>
++#include <array>
++#include <cmath>
++#include <cstddef>
++#include <cstdint>
++#include <vector>
++
++namespace RT64 {
++inline unsigned rocketSkyFilterLevel(float reduction) {
++    return std::isfinite(reduction) ? unsigned(std::lround(std::clamp(reduction, 0.0f, 1.0f) * 100.0f)) : 0;
++}
++
++inline std::vector<uint8_t> rocketFilterSkyCI8(const uint8_t *tmem, size_t bytes,
++        unsigned width, unsigned height, unsigned start, unsigned stride, unsigned level) {
++    if (!tmem || bytes < 4096 || width != 8 || height == 0 || height > 256 ||
++        start >= 2048 || stride < width || stride > 2048 || (stride & 7) != 0 || level > 100) return {};
++    std::vector<uint8_t> rgba(width * height * 4);
++    std::array<std::array<unsigned, 3>, 256> rowSums{};
++    for (unsigned y = 0; y < height; ++y) {
++        for (unsigned x = 0; x < width; ++x) {
++            // RDP TMEM swaps the two 32-bit words on odd rows. TLUT entries
++            // occupy eight bytes each, with the RGBA16 value in the first two.
++            const unsigned address = (start + y * stride + (x ^ ((y & 1) ? 4U : 0U))) & 2047;
++            const unsigned palette = 2048 + unsigned(tmem[address]) * 8;
++            const unsigned color = (unsigned(tmem[palette]) << 8) | tmem[palette + 1];
++            if ((color & 1) == 0) return {}; // Preserve non-gradient/transparent skies.
++            const unsigned pixel = (y * width + x) * 4;
++            for (unsigned c = 0; c < 3; ++c) {
++                const unsigned value = (((color >> (11 - 5 * c)) & 31) * 255 + 15) / 31;
++                rgba[pixel + c] = uint8_t(value);
++                rowSums[y][c] += value;
++            }
++            rgba[pixel + 3] = 255;
++        }
++    }
++    if (level == 0) return rgba;
++    // Four half-texel vertical taps become this five-row kernel. Averaging
++    // all eight columns removes horizontal dither independently of scroll phase.
++    constexpr unsigned weights[] = {1, 2, 2, 2, 1};
++    for (unsigned y = 0; y < height; ++y) {
++        std::array<unsigned, 3> sum{};
++        for (int offset = -2; offset <= 2; ++offset) {
++            const unsigned row = unsigned(std::clamp(int(y) + offset, 0, int(height) - 1));
++            for (unsigned c = 0; c < 3; ++c) sum[c] += rowSums[row][c] * weights[offset + 2];
++        }
++        for (unsigned x = 0; x < width; ++x) {
++            const unsigned pixel = (y * width + x) * 4;
++            for (unsigned c = 0; c < 3; ++c) {
++                // Keep precision until the final RGBA8 result; round once.
++                const unsigned value = rgba[pixel + c] * (100 - level) * 64 + sum[c] * level;
++                rgba[pixel + c] = uint8_t((value + 3200) / 6400);
++            }
++        }
++    }
++    return rgba;
++}
++}
+--- a/src/shaders/RocketSky.hlsli
++++ b/src/shaders/RocketSky.hlsli
+@@ -1,46 +1,12 @@
+-#include "shared/rt64_rocket_sky_filter.h"
+-
+-// A fixed texture-space filter: no frame history, random taps or framebuffer blur.
++// Sky smoothing is cached at native texture size before upload.
++// Presentation only adjusts the fractional source row and samples normally.
+ float4 sampleRocketSkyTexture(OtherMode otherMode, RenderFlags flags, float2 uv,
+     float2 dx, float2 dy, RDPTile tile, GPUTile gpuTile, bool nextPixelBug,
+-    float mipBias, float detail, float reduction, float rowOffset, bool sky) {
++    float mipBias, float detail, float rowOffset, bool sky) {
+     if (sky) {
+         uv.y += rowOffset / max(abs(tile.shiftt), 0.0001f);
+         otherMode.H = (otherMode.H & ~(3U << G_MDSFT_TEXTFILT)) | G_TF_BILERP;
+         flags |= (1U << 4);
+     }
+-    float4 center = sampleTexture(otherMode, flags, uv, dx, dy, tile, gpuTile, nextPixelBug, mipBias, detail);
+-    [branch]
+-    if (reduction <= 0.0f || gpuTileFlagHighRes(gpuTile.flags) || gpuTileFlagAlphaIsCvg(gpuTile.flags)) return center;
+-
+-    // Cover every phase of the original 4x4 dither pattern. Offsets
+-    // are native texels, so output resolution/FOV cannot change the strength.
+-    float correction = (otherMode.textPersp() == G_TP_PERSP || renderFlagRect(flags)) ? 1.0f : 0.5f;
+-    float2 stepUV = 1.0f / max(abs(float2(tile.shifts, tile.shiftt) * correction), 0.0001f);
+-    OtherMode filteredMode = otherMode;
+-    filteredMode.H = (filteredMode.H & ~(3U << G_MDSFT_TEXTFILT)) | G_TF_BILERP;
+-    RenderFlags filteredFlags = flags | (1U << 4); // true bilinear only for the smoothing taps
+-    // Rocket's narrow CI8 sky is a colour gradient with horizontal dithering.
+-    // Average all eight columns, independent of the rectangle's screen phase.
+-    const bool narrowGradient = sky && abs((tile.lrs - tile.uls) - 28.0f) < 0.01f;
+-    float3 sum = float3(0.0f, 0.0f, 0.0f);
+-    float weightSum = 0.0f;
+-    [unroll]
+-    for (uint i = 0; i < 16; ++i) {
+-        float2 offset = float2(rocketSkyFilterAxis(i & 3), rocketSkyFilterAxis(i >> 2));
+-        float2 tapUV = uv + offset * stepUV;
+-        if (narrowGradient) tapUV.x = (rocketSkyGradientColumn(i & 3) + tile.uls / 4.0f) / tile.shifts;
+-        float4 tap = sampleTexture(filteredMode, filteredFlags, tapUV,
+-            dx, dy, tile, gpuTile, nextPixelBug, mipBias, detail);
+-        float3 delta = abs(tap.rgb - center.rgb);
+-        // Preserve stars/cloud edges and the source alpha. Small quantisation
+-        // steps get full weight; large colour changes do not bleed into them.
+-        float difference = max(delta.r, max(delta.g, delta.b));
+-        float weight = narrowGradient ? 1.0f : 1.0f - smoothstep(0.055f, 0.12f, difference);
+-        weight *= 1.0f - smoothstep(0.02f, 0.10f, abs(tap.a - center.a));
+-        sum += tap.rgb * weight;
+-        weightSum += weight;
+-    }
+-    if (weightSum > 0.0001f) center.rgb = lerp(center.rgb, sum / weightSum, saturate(reduction));
+-    return center;
++    return sampleTexture(otherMode, flags, uv, dx, dy, tile, gpuTile, nextPixelBug, mipBias, detail);
+ }
+--- a/src/shaders/RasterPS.hlsl
++++ b/src/shaders/RasterPS.hlsl
+@@ -144,7 +144,7 @@
+         
+         const GPUTile gpuTile = GPUTiles[globalTileIndex];
+         const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags) ? vertexUV : lowResUV;
+-        texVal0 = sampleRocketSkyTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, false, gConstants.mipLODBias, gConstants.textureDetailAtDistance, gConstants.skyDitherReduction, gConstants.skyRowOffset, gConstants.skyRectangle != 0);
++        texVal0 = sampleRocketSkyTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, false, gConstants.mipLODBias, gConstants.textureDetailAtDistance, gConstants.skyRowOffset, gConstants.skyRectangle != 0);
+     }
+     
+     if (renderFlagUsesTexture1(rp.flags)) {
+@@ -160,7 +160,7 @@
+         const GPUTile gpuTile = GPUTiles[globalTileIndex];
+         const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags) ? vertexUV : lowResUV;
+         const uint nativeSampler = renderFlagNativeSampler1(rp.flags);
+-        texVal1 = sampleRocketSkyTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, oneCycleHardwareBug, gConstants.mipLODBias, gConstants.textureDetailAtDistance, gConstants.skyDitherReduction, gConstants.skyRowOffset, gConstants.skyRectangle != 0);
++        texVal1 = sampleRocketSkyTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, oneCycleHardwareBug, gConstants.mipLODBias, gConstants.textureDetailAtDistance, gConstants.skyRowOffset, gConstants.skyRectangle != 0);
+     }
+     
+     // Color combiner.
+--- a/src/shared/rt64_raster_params.h
++++ b/src/shared/rt64_raster_params.h
+@@ -16,7 +16,6 @@
+         float textureDetailAtDistance;
+         float2 screenScale;
+         float2 screenOffset;
+-        float skyDitherReduction;
+         float skyRowOffset;
+         uint skyRectangle;
+     };
+--- a/src/render/rt64_framebuffer_renderer.cpp
++++ b/src/render/rt64_framebuffer_renderer.cpp
+@@ -472,7 +472,6 @@
+         const RenderPipeline *previousPipeline = nullptr;
+         RenderRect previousScissor;
+         interop::RasterParams rasterParams{};
+-        const float skyDitherReduction = getRocketSkyDitherReduction();
+         rasterParams.mipLODBias = getDefaultSamplerMipLODBias();
+         rasterParams.textureDetailAtDistance = getTextureDetailAtDistance();
+         rasterParams.zFightToleranceScale = getRocketZFightToleranceScale();
+@@ -579,7 +578,6 @@
+                 rasterParams.renderIndex = i;
+                 rasterParams.screenScale = triangles.screenScale;
+                 rasterParams.screenOffset = triangles.screenOffset;
+-                rasterParams.skyDitherReduction = triangles.rocketSky ? skyDitherReduction : 0.0f;
+                 rasterParams.skyRectangle = triangles.rocketSky;
+                 rasterParams.skyRowOffset = triangles.rocketSky ?
+                     triangles.rocketSkyPreviousRow + (triangles.rocketSkyCurrentRow - triangles.rocketSkyPreviousRow) * rocketPresentationWeight : 0.0f;
+--- a/src/hle/rt64_rdp_tmem.h
++++ b/src/hle/rt64_rdp_tmem.h
+@@ -18,7 +18,7 @@
+ 
+         void uploadEmpty(State *state, TextureCache *textureCache, uint64_t creationFrame, uint16_t width, uint16_t height, uint64_t replacementHash);
+         uint64_t uploadTMEM(State *state, const LoadTile &loadTile, TextureCache *textureCache, uint64_t creationFrame, uint16_t byteOffset, uint16_t byteCount, uint16_t width, uint16_t height, uint32_t tlut);
+-        uint64_t uploadTexture(State *state, const LoadTile &loadTile, TextureCache *textureCache, uint64_t creationFrame, uint16_t width, uint16_t height, uint32_t tlut);
++        uint64_t uploadTexture(State *state, const LoadTile &loadTile, TextureCache *textureCache, uint64_t creationFrame, uint16_t width, uint16_t height, uint32_t tlut, bool rocketSky = false);
+         void dumpTexture(uint64_t hash, State *state, const LoadTile &loadTile, uint16_t width, uint16_t height, uint32_t tlut);
+         void removeHashes(const std::vector<uint64_t> &hashes);
+     };
+--- a/src/hle/rt64_state.cpp
++++ b/src/hle/rt64_state.cpp
+@@ -689,7 +689,7 @@
+                     callTile.tmemHashOrID = textureManager.uploadTMEM(this, callTile.loadTile, ext.textureCache, workload.submissionFrame, 0, RDP_TMEM_BYTES, callTile.sampleWidth, callTile.sampleHeight, callTile.tlut);
+                 }
+                 else {
+-                    callTile.tmemHashOrID = textureManager.uploadTexture(this, callTile.loadTile, ext.textureCache, workload.submissionFrame, callTile.sampleWidth, callTile.sampleHeight, callTile.tlut);
++                    callTile.tmemHashOrID = textureManager.uploadTexture(this, callTile.loadTile, ext.textureCache, workload.submissionFrame, callTile.sampleWidth, callTile.sampleHeight, callTile.tlut, drawCall.rocketSkyBackground);
+                 }
+             }
+             else if (callTile.reinterpretTile) {
+--- a/src/hle/rt64_rdp_tmem.cpp
++++ b/src/hle/rt64_rdp_tmem.cpp
+@@ -6,10 +6,14 @@
+ 
+ #include <cassert>
+ #include <cinttypes>
++#include <cstdio>
++#include <cstdlib>
+ 
+ #include "xxHash/xxh3.h"
+ 
+ #include "common/rt64_tmem_hasher.h"
++#include "common/rt64_rocket_configuration.h"
++#include "common/rt64_rocket_sky_filter.h"
+ 
+ #include "rt64_state.h"
+ 
+@@ -49,9 +53,38 @@
+         return hash;
+     }
+ 
+-    uint64_t TextureManager::uploadTexture(State *state, const LoadTile &loadTile, TextureCache *textureCache, uint64_t creationFrame, uint16_t width, uint16_t height, uint32_t tlut) {
++    uint64_t TextureManager::uploadTexture(State *state, const LoadTile &loadTile, TextureCache *textureCache, uint64_t creationFrame, uint16_t width, uint16_t height, uint32_t tlut, bool rocketSky) {
+         const uint8_t *TMEM = reinterpret_cast<const uint8_t *>(state->rdp->TMEM);
+         uint64_t hash = TMEMHasher::hash(TMEM, loadTile, width, height, tlut, TMEMHasher::CurrentHashVersion);
++        const unsigned level = rocketSky ? rocketSkyFilterLevel(getRocketSkyDitherReduction()) : 0;
++        static const bool traceSky = std::getenv("ROCKET_SKY_FILTER_TRACE") != nullptr;
++        static thread_local unsigned traceCount = 0;
++        const bool trace = traceSky && rocketSky && ((traceCount++ % 120) == 0);
++        if (trace) std::fprintf(stderr, "[rocket-sky-filter] size=%ux%u format=%u/%u tlut=%u strength=%u\n",
++            unsigned(width), unsigned(height), unsigned(loadTile.fmt), unsigned(loadTile.siz), tlut, level);
++        if (level != 0 && width == 8 && height <= 256 && loadTile.fmt == G_IM_FMT_CI &&
++            loadTile.siz == G_IM_SIZ_8b && tlut == G_TT_RGBA16) {
++            bool replaced = textureCache->hasReplacement(hash);
++            // Replacement packs may use any supported RT64 texture hash version.
++            for (uint32_t v = 1; !replaced && v < TMEMHasher::CurrentHashVersion; ++v)
++                replaced = textureCache->hasReplacement(TMEMHasher::hash(TMEM, loadTile, width, height, tlut, v));
++            if (!replaced) {
++                const uint64_t key[] = {0x524F434B534B5931ULL, hash, uint64_t(level)};
++                const uint64_t filteredHash = XXH3_64bits(key, sizeof(key));
++                if (hashSet.find(filteredHash) != hashSet.end()) {
++                    if (trace) std::fprintf(stderr, "[rocket-sky-filter] cached native texture\n");
++                    return filteredHash;
++                }
++                auto rgba = rocketFilterSkyCI8(TMEM, RDP_TMEM_BYTES, width, height,
++                    unsigned(loadTile.tmem) << 3, unsigned(loadTile.line) << 3, level);
++                if (!rgba.empty()) {
++                    if (trace) std::fprintf(stderr, "[rocket-sky-filter] native texture upload: %zu bytes\n", rgba.size());
++                    hashSet.insert(filteredHash);
++                    textureCache->queueGPUUploadRGBA(filteredHash, creationFrame, std::move(rgba), width, height);
++                    return filteredHash;
++                }
++            }
++        }
+         if (hashSet.find(hash) == hashSet.end()) {
+             hashSet.insert(hash);
+             textureCache->queueGPUUploadTMEM(hash, creationFrame, TMEM, RDP_TMEM_BYTES, width, height, tlut, loadTile, true);
+--- a/src/render/rt64_texture_cache.h
++++ b/src/render/rt64_texture_cache.h
+@@ -44,6 +44,7 @@
+         LoadTile loadTile;
+         std::vector<uint8_t> bytesTMEM;
+         bool decodeTMEM;
++        bool uploadRGBA = false;
+     };
+ 
+     struct LowMipCacheTexture {
+@@ -234,6 +235,7 @@
+         ~TextureCache();
+         void uploadThreadLoop();
+         void queueGPUUploadTMEM(uint64_t hash, uint64_t creationFrame, const uint8_t *bytes, int bytesCount, int width, int height, uint32_t tlut, const LoadTile &loadTile, bool decodeTMEM);
++        void queueGPUUploadRGBA(uint64_t hash, uint64_t creationFrame, std::vector<uint8_t> bytes, uint32_t width, uint32_t height);
+         void waitForGPUUploads();
+         void addResolvedPaths(uint64_t hash, uint32_t width, uint32_t height, uint32_t tlut, const LoadTile &loadTile, const std::vector<uint8_t> &bytesTMEM, bool decodeTMEM, std::vector<ReplacementResolvedPath> &resolvedPaths, uint64_t exclusiveDbHash = 0);
+         bool useTexture(uint64_t hash, uint64_t submissionFrame, uint32_t &textureIndex, interop::float2 &textureScale, interop::float3 &textureDimensions, bool &textureReplaced, bool &hasMipmaps, bool &shiftedByHalf);
+--- a/src/render/rt64_texture_cache.cpp
++++ b/src/render/rt64_texture_cache.cpp
+@@ -1066,6 +1066,14 @@
+                     Texture *newTexture = new Texture();
+                     newTexture->creationFrame = upload.creationFrame;
+                     textureMapAdditions.emplace_back(TextureMapAddition{ upload.hash, newTexture });
++                    if (upload.uploadRGBA) {
++                        replacementUploadResources.emplace_back();
++                        setRGBA32(newTexture, copyWorker->device, copyWorker->commandList.get(),
++                            upload.bytesTMEM.data(), upload.bytesTMEM.size(), upload.width, upload.height,
++                            upload.width * 4, replacementUploadResources.back());
++                        afterDecodeBarriers.emplace_back(newTexture->texture.get(), RenderTextureLayout::SHADER_READ);
++                        continue;
++                    }
+ 
+                     newTexture->format = RenderFormat::R8_UINT;
+                     newTexture->width = upload.width;
+@@ -1090,6 +1098,7 @@
+ 
+                 for (size_t i = 0; i < queueSize; i++) {
+                     const TextureUpload &upload = queueCopy[i];
++                    if (upload.uploadRGBA) continue;
+                     const uint32_t byteCount = uint32_t(upload.bytesTMEM.size());
+                     Texture *dstTexture = textureMapAdditions[i].texture;
+                     if (byteCount > 0) {
+@@ -1279,6 +1288,22 @@
+         uploadQueueChanged.notify_all();
+     }
+ 
++    void TextureCache::queueGPUUploadRGBA(uint64_t hash, uint64_t creationFrame, std::vector<uint8_t> bytes, uint32_t width, uint32_t height) {
++        assert(width > 0 && height > 0 && bytes.size() == size_t(width) * height * 4);
++        TextureUpload upload{};
++        upload.hash = hash;
++        upload.creationFrame = creationFrame;
++        upload.width = width;
++        upload.height = height;
++        upload.bytesTMEM = std::move(bytes);
++        upload.uploadRGBA = true;
++        {
++            std::unique_lock queueLock(uploadQueueMutex);
++            uploadQueue.emplace_back(std::move(upload));
++        }
++        uploadQueueChanged.notify_all();
++    }
++
+     void TextureCache::waitForGPUUploads() {
+         std::unique_lock queueLock(uploadQueueMutex);
+         uploadQueueFinished.wait(queueLock, [this]() {

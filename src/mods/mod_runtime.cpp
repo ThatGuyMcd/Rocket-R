@@ -1,5 +1,6 @@
 #include "mod_runtime.hpp"
 #include "mod_library.hpp"
+#include "sdk_runtime.hpp"
 #include "platform.hpp"
 #include "runtime_input.hpp"
 #include "librecomp/mods.hpp"
@@ -159,6 +160,7 @@ void rocket::mods::register_api() {
     recomp::overlays::register_base_export("rocket_enable_mouse_look", claim_mouse);
     recomp::overlays::register_base_export("rocket_enable_first_person_look", claim_first_person);
     recomp::overlays::register_base_export("rocket_set_camera_smoothing", set_camera_smoothing);
+    sdk::register_exports();
     for (auto address : rocket::generated::kModProtectedFunctions)
         recomp::mods::protect_game_function(address);
 }
@@ -182,10 +184,12 @@ void rocket::mods::prepare_runtime(bool without_mods) {
     recomp::mods::configure_profile_paths(
         std::filesystem::u8path(active.at("runtime").get<std::string>()), lib.active_save_path());
     register_api();
+    sdk::prepare();
     std::fprintf(stderr, "[mods] profile: %s; packages: %zu\n",
         active.at("name").get<std::string>().c_str(), active.at("packages").size());
 }
 void rocket::mods::game_ready(std::uint8_t* rdram, recomp_context* ctx) {
+    sdk::ready(rdram);
     recomp_trigger_event(rdram, ctx, 0);
     library().set_live_option_handler([](const OptionUpdate& update) {
         // The runtime synchronizes config storage and saves its session copy
@@ -193,9 +197,15 @@ void rocket::mods::game_ready(std::uint8_t* rdram, recomp_context* ctx) {
         std::visit([&](const auto& value) {
             recomp::mods::set_mod_config_value(update.mod_id,update.option_id,value);
         },update.value);
+        sdk::settings_changed(update.mod_id);
     });
     library().set_live_toggle_handler([](const std::string& id,bool enabled) {
         if(id=="rocket_modern_camera") request_camera_enabled(enabled);
+        else sdk::request_enabled(id,enabled);
+    });
+    library().set_live_action_handler([](const std::string& owner,const std::string& action,const std::string& device,int source){
+        if(device=="n64")rocket::input::set_mod_action_touch(owner,action,static_cast<std::uint16_t>(source));
+        else rocket::input::set_mod_action_binding(owner,action,device=="keyboard",source);
     });
     std::fprintf(stderr, "[mods] game-ready callbacks completed\n");
 }

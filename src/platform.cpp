@@ -2,6 +2,7 @@
 #include "runtime_ui.hpp"
 #include "runtime_input.hpp"
 #include "widescreen_culling.hpp"
+#include "mods/sdk_audio.hpp"
 
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
@@ -37,6 +38,7 @@ bool g_game_input_active = false; // SDL owner thread; the launcher never captur
 #if defined(__ANDROID__)
 void* g_android_native_window = nullptr;
 std::atomic<int> g_android_display_rate{60};
+std::atomic<int> g_android_presentation_rate{30};
 std::mutex g_touch_mutex;
 rocket::input::State g_touch_state{};
 rocket::platform::CameraInput g_touch_camera{};
@@ -403,7 +405,7 @@ void rocket::platform::shutdown() {
     SDL_Quit();
 }
 
-ultramodern::renderer::WindowHandle rocket::platform::create_window() {
+ultramodern::renderer::WindowHandle rocket::platform::create_window(bool for_game) {
     if (g_window == nullptr) {
         Uint32 flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
 #if defined(__ANDROID__)
@@ -411,8 +413,12 @@ ultramodern::renderer::WindowHandle rocket::platform::create_window() {
 #endif
 #if defined(__APPLE__)
         flags |= SDL_WINDOW_METAL;
-#elif defined(__linux__) || defined(__ANDROID__)
+#elif defined(__ANDROID__)
         flags |= SDL_WINDOW_VULKAN;
+#elif defined(__linux__)
+        // SDL's accelerated launcher uses OpenGL. Release that window/context
+        // before creating the Vulkan window in prepare_window_for_game().
+        if (for_game) flags |= SDL_WINDOW_VULKAN;
 #endif
         g_window = SDL_CreateWindow("Rocket-R - Rocket: Robot on Wheels Recompiled",
                                     SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
@@ -474,8 +480,8 @@ ultramodern::renderer::WindowHandle rocket::platform::create_window() {
 
 // === ROCKET-R PLATFORM LAUNCH REPAIR V19 BEGIN ===
 // DKR-R-proven launcher -> Vulkan handoff, isolated to desktop Linux.
-// The software launcher can succeed even when Vulkan cannot. Validate the same
-// SDL window after launcher teardown and recreate it only if required.
+// Validate an existing Vulkan window, or recreate the accelerated launcher's
+// OpenGL window after SDL has released its renderer and context.
 ultramodern::renderer::WindowHandle rocket::platform::prepare_window_for_game() {
 #if defined(__linux__) && !defined(__ANDROID__)
     auto vulkan_ready = [](SDL_Window* window) -> bool {
@@ -626,6 +632,7 @@ void rocket::platform::sample_input() {
             g_touch_state = {};
         }
     }
+    rocket::input::sample_mod_n64(state.buttons,!focused || rocket::ui::overlay_visible() || testing || rocket::ui::input_capture_active());
 #endif
     std::lock_guard lock(g_input_mutex);
     const auto camera = rocket::input::poll_camera(g_controller, include_keyboard, include_controller,
@@ -653,7 +660,7 @@ void rocket::platform::sample_input() {
     g_stick_y = state.stick_y;
 }
 
-void rocket::platform::pump_runtime_events() {
+void rocket::platform::pump_runtime_events(int wait_ms) {
     g_game_input_active = true;
 #if defined(__ANDROID__)
     if (g_touch_overlay_request.exchange(false, std::memory_order_acq_rel)) {
@@ -661,7 +668,12 @@ void rocket::platform::pump_runtime_events() {
     }
 #endif
     SDL_Event event{};
-    while (SDL_PollEvent(&event)) {
+    bool pending = wait_ms > 0 && SDL_WaitEventTimeout(&event, wait_ms) > 0;
+    const auto next_event = [&]() {
+        if (pending) { pending = false; return true; }
+        return SDL_PollEvent(&event) != 0;
+    };
+    while (next_event()) {
         rocket::input::mouse_event(event);
         if (event.type == SDL_MOUSEMOTION && event.motion.which != SDL_TOUCH_MOUSEID)
             g_camera_mouse_present = true;
@@ -869,6 +881,7 @@ void rocket::platform::queue_samples(std::int16_t* samples, std::size_t sample_c
         g_audio_swap[i + 1] = scale(samples[i]);
     }
 
+    rocket::mods::sdk::audio().mix(g_audio_swap, g_audio_frequency, gain);
     const auto byte_count = static_cast<Uint32>(
         g_audio_swap.size() * sizeof(std::int16_t));
     const void* output_data = g_audio_swap.data();
@@ -997,6 +1010,15 @@ rocket::platform::get_connected_device_info(int controller_num) {
 #if defined(__ANDROID__)
 // Java UI callbacks publish data only. SDL and ImGui remain on their owner
 // threads; holding a touch never blocks the game or opens an audio device.
+void rocket::platform::set_android_presentation_rate(int rate) {
+    g_android_presentation_rate.store(std::clamp(rate, 30, 500), std::memory_order_relaxed);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_rocketret_rocketr_RocketActivity_nativePresentationRate(JNIEnv*, jclass) {
+    return g_android_presentation_rate.load(std::memory_order_relaxed);
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_rocketret_rocketr_RocketActivity_nativeTouchState(JNIEnv*, jclass, jint buttons, jfloat x, jfloat y) {
     std::lock_guard lock(g_touch_mutex);

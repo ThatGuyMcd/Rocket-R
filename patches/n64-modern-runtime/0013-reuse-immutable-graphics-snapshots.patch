@@ -1,0 +1,99 @@
+--- /dev/null
++++ b/ultramodern/include/ultramodern/snapshot_pool.hpp
+@@ -0,0 +1,67 @@
++#pragma once
++#include <cstddef>
++#include <cstdint>
++#include <memory>
++#include <mutex>
++#include <vector>
++
++namespace ultramodern {
++    // Task leases remain immutable and never return to the pool until parsing ends.
++    class RdramSnapshotPool {
++        struct State {
++            std::mutex mutex;
++            std::vector<std::unique_ptr<uint8_t[]>> available;
++            const size_t bytes;
++            const size_t retained;
++            uint64_t allocations = 0, reuses = 0;
++            size_t active = 0, peak = 0;
++            State(size_t bytes, size_t retained) : bytes(bytes), retained(retained) {
++                available.reserve(retained);
++            }
++        };
++        struct ReturnBuffer {
++            std::shared_ptr<State> state;
++            void operator()(uint8_t* buffer) const noexcept {
++                if (!buffer) return;
++                std::unique_ptr<uint8_t[]> owned(buffer);
++                std::lock_guard<std::mutex> lock(state->mutex);
++                --state->active;
++                if (state->available.size() < state->retained)
++                    state->available.push_back(std::move(owned));
++            }
++        };
++        std::shared_ptr<State> state;
++    public:
++        using Snapshot = std::unique_ptr<uint8_t[], ReturnBuffer>;
++        struct Statistics { uint64_t allocations, reuses; size_t active, peak, cached; };
++        explicit RdramSnapshotPool(size_t bytes = 0x800000, size_t retained = 2)
++            : state(std::make_shared<State>(bytes, retained)) {}
++        Snapshot acquire() {
++            std::unique_ptr<uint8_t[]> buffer;
++            {
++                std::lock_guard<std::mutex> lock(state->mutex);
++                if (!state->available.empty()) {
++                    buffer = std::move(state->available.back());
++                    state->available.pop_back();
++                    ++state->reuses;
++                }
++            }
++            if (!buffer) {
++                // Every byte is overwritten by the submission memcpy.
++                buffer.reset(new uint8_t[state->bytes]);
++                std::lock_guard<std::mutex> lock(state->mutex);
++                ++state->allocations;
++            }
++            {
++                std::lock_guard<std::mutex> lock(state->mutex);
++                ++state->active;
++                if (state->active > state->peak) state->peak = state->active;
++            }
++            return Snapshot(buffer.release(), ReturnBuffer{state});
++        }
++        Statistics statistics() const {
++            std::lock_guard<std::mutex> lock(state->mutex);
++            return {state->allocations, state->reuses, state->active, state->peak, state->available.size()};
++        }
++    };
++}
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -18,6 +18,7 @@
+ 
+ #include "ultramodern/rsp.hpp"
+ #include "ultramodern/renderer_context.hpp"
++#include "ultramodern/snapshot_pool.hpp"
+ 
+ static ultramodern::events::callbacks_t events_callbacks{};
+ static std::atomic_bool screen_update_action_pending = false;
+@@ -28,7 +29,7 @@
+ 
+ struct SpTaskAction {
+     OSTask task;
+-    std::unique_ptr<uint8_t[]> rdram_snapshot;
++    ultramodern::RdramSnapshotPool::Snapshot rdram_snapshot;
+ };
+ 
+ struct ScreenUpdateAction {
+@@ -572,7 +573,8 @@
+     // Send gfx tasks to the graphics action queue
+     if (task->t.type == M_GFXTASK) {
+         constexpr size_t RDRAMSnapshotSize = 0x800000;
+-        auto rdram_snapshot = std::make_unique<uint8_t[]>(RDRAMSnapshotSize);
++        static ultramodern::RdramSnapshotPool snapshot_pool(RDRAMSnapshotSize);
++        auto rdram_snapshot = snapshot_pool.acquire();
+         std::memcpy(rdram_snapshot.get(), rdram, RDRAMSnapshotSize);
+         events_context.action_queue.enqueue(SpTaskAction{ *task, std::move(rdram_snapshot) });
+     }

@@ -1,0 +1,129 @@
+--- /dev/null
++++ b/src/contrib/plume/plume_resource_policy.h
+@@ -0,0 +1,36 @@
++// CPU/GPU memory ranges and queue families shared by Vulkan resource creation.
++#pragma once
++#include <algorithm>
++#include <array>
++#include <cstdint>
++
++namespace plume {
++    struct MappedMemoryRange {
++        uint64_t offset = 0;
++        uint64_t size = 0;
++    };
++
++    inline MappedMemoryRange mappedMemoryRange(uint64_t bufferSize, bool explicitRange,
++                                               uint64_t begin = 0, uint64_t end = 0) {
++        if (!explicitRange) return {0, bufferSize};
++        const uint64_t offset = std::min(begin, bufferSize);
++        const uint64_t limit = std::min(end, bufferSize);
++        return {offset, limit > offset ? limit - offset : 0};
++    }
++
++    struct ResourceQueueFamilies {
++        std::array<uint32_t, 3> indices{};
++        uint32_t count = 0;
++    };
++
++    inline ResourceQueueFamilies resourceQueueFamilies(const uint32_t (&families)[3]) {
++        ResourceQueueFamilies result;
++        for (uint32_t family : families) {
++            if (std::find(result.indices.begin(), result.indices.begin() + result.count, family)
++                    == result.indices.begin() + result.count) {
++                result.indices[result.count++] = family;
++            }
++        }
++        return result;
++    }
++}
+--- a/src/contrib/plume/plume_vulkan.cpp
++++ b/src/contrib/plume/plume_vulkan.cpp
+@@ -9,6 +9,8 @@
+ #define VOLK_IMPLEMENTATION 
+ 
+ #include "plume_vulkan.h"
++#include "plume_resource_policy.h"
++#include <atomic>
+ 
+ #include <algorithm>
+ #include <cmath>
+@@ -839,7 +841,12 @@
+         VkBufferCreateInfo bufferInfo = {};
+         bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+         bufferInfo.size = desc.size;
+-        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++        // The abstraction submits transfers and draws on different queue families,
++        // and its barriers do not perform exclusive ownership transfers.
++        const auto families = resourceQueueFamilies(device->queueFamilyIndices);
++        bufferInfo.sharingMode = families.count > 1 ? VK_SHARING_MODE_CONCURRENT : VK_SHARING_MODE_EXCLUSIVE;
++        bufferInfo.queueFamilyIndexCount = families.count > 1 ? families.count : 0;
++        bufferInfo.pQueueFamilyIndices = families.count > 1 ? families.indices.data() : nullptr;
+         bufferInfo.usage |= (desc.flags & RenderBufferFlag::VERTEX) ? VK_BUFFER_USAGE_VERTEX_BUFFER_BIT : 0;
+         bufferInfo.usage |= (desc.flags & RenderBufferFlag::INDEX) ? VK_BUFFER_USAGE_INDEX_BUFFER_BIT : 0;
+         bufferInfo.usage |= (desc.flags & RenderBufferFlag::STORAGE) ? VK_BUFFER_USAGE_STORAGE_BUFFER_BIT : 0;
+@@ -909,6 +916,18 @@
+             fprintf(stderr, "vmaCreateBuffer failed with error code 0x%X.\n", res);
+             return;
+         }
++#if defined(__ANDROID__)
++        // Report each heap type once, without logging every upload.
++        static std::atomic<uint32_t> reportedHeaps{0};
++        const uint32_t bit = 1U << static_cast<uint32_t>(desc.heapType);
++        if ((reportedHeaps.fetch_or(bit) & bit) == 0) {
++            VkMemoryPropertyFlags properties = 0;
++            vmaGetAllocationMemoryProperties(device->allocator, allocation, &properties);
++            fprintf(stderr, "[vulkan][memory] heap=%u flags=0x%X coherent=%d families=%u\n",
++                static_cast<unsigned>(desc.heapType), properties,
++                (properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0, families.count);
++        }
++#endif
+     }
+ 
+     VulkanBuffer::~VulkanBuffer() {
+@@ -925,10 +944,33 @@
+             return nullptr;
+         }
+ 
++        // An omitted range means the whole buffer for readback. Upload mappings
++        // are write-only unless the caller explicitly asks to read a range.
++        if (readRange != nullptr || desc.heapType == RenderHeapType::READBACK) {
++            const auto range = mappedMemoryRange(desc.size, readRange != nullptr,
++                readRange != nullptr ? readRange->begin : 0, readRange != nullptr ? readRange->end : 0);
++            if (range.size != 0) {
++                res = vmaInvalidateAllocation(device->allocator, allocation, range.offset, range.size);
++                if (res != VK_SUCCESS) {
++                    fprintf(stderr, "vmaInvalidateAllocation failed: 0x%X\n", res);
++                    vmaUnmapMemory(device->allocator, allocation);
++                    return nullptr;
++                }
++            }
++        }
+         return data;
+     }
+ 
+     void VulkanBuffer::unmap(uint32_t subresource, const RenderRange *writtenRange) {
++        if (writtenRange != nullptr || desc.heapType != RenderHeapType::READBACK) {
++            const auto range = mappedMemoryRange(desc.size, writtenRange != nullptr,
++                writtenRange != nullptr ? writtenRange->begin : 0, writtenRange != nullptr ? writtenRange->end : 0);
++            if (range.size != 0) {
++                // VMA aligns non-coherent ranges and does nothing for coherent memory.
++                const VkResult res = vmaFlushAllocation(device->allocator, allocation, range.offset, range.size);
++                if (res != VK_SUCCESS) fprintf(stderr, "vmaFlushAllocation failed: 0x%X\n", res);
++            }
++        }
+         vmaUnmapMemory(device->allocator, allocation);
+     }
+ 
+@@ -999,7 +1041,10 @@
+         imageInfo.samples = VkSampleCountFlagBits(desc.multisampling.sampleCount);
+         imageInfo.tiling = toVk(desc.textureArrangement);
+         imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+-        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++        const auto families = resourceQueueFamilies(device->queueFamilyIndices);
++        imageInfo.sharingMode = families.count > 1 ? VK_SHARING_MODE_CONCURRENT : VK_SHARING_MODE_EXCLUSIVE;
++        imageInfo.queueFamilyIndexCount = families.count > 1 ? families.count : 0;
++        imageInfo.pQueueFamilyIndices = families.count > 1 ? families.indices.data() : nullptr;
+         imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+         imageInfo.usage |= (desc.flags & RenderTextureFlag::RENDER_TARGET) ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : 0;
+         imageInfo.usage |= (desc.flags & RenderTextureFlag::DEPTH_TARGET) ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : 0;

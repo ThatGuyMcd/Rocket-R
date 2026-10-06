@@ -1,0 +1,10 @@
+{
+  "version": "0.4.0",
+  "also_recognizes": "0.3.0",
+  "package_sha256": "75ed6ee4b7967d69ab03303a0342532f3457a5edcb3bc997ab54942ddb8aa99b",
+  "signature_bytes": 11520,
+  "signature_sha256": "628cd26979f249efc70914a6fdcbfc8e33208a63e68054ca8f741847e3eee070",
+  "diagnostics_offset": 11572,
+  "diagnostics_words": 32,
+  "windows_runtime_tested": false
+}

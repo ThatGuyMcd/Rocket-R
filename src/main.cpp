@@ -175,10 +175,20 @@ int rocket_main(int argc, char** argv) {
         std::fprintf(stderr, "[mods] %s\n", e.what());
         return 6;
     }
+    if (const char* output = std::getenv("ROCKET_UI_LAYOUT_CHECK"); output && *output) {
+        rocket::ui::configure(options.config);
+        return rocket::ui::write_layout_previews(std::filesystem::u8path(output)) ? 0 : 5;
+    }
     if (!rocket::platform::initialise()) return 5;
     rocket::ui::configure(options.config);
 
-    auto window_handle = rocket::platform::create_window();
+    auto window_handle = rocket::platform::create_window(
+#if defined(__ANDROID__)
+        true
+#else
+        options.launch
+#endif
+    );
     if (!valid_window_handle(window_handle)) {
         rocket::platform::shutdown();
         return 5;
@@ -219,8 +229,7 @@ int rocket_main(int argc, char** argv) {
         return startup.exit_requested ? 0 : 5;
     }
 #if defined(__linux__) && !defined(__ANDROID__)
-    // v19: validate the launcher-owned SDL window for Vulkan only after
-    // the software ImGui renderer has released it.
+    // Release the launcher's graphics context before creating a Vulkan window.
     window_handle = rocket::platform::prepare_window_for_game();
     if (!valid_window_handle(window_handle)) {
         std::fprintf(stderr,
@@ -311,8 +320,14 @@ int rocket_main(int argc, char** argv) {
     });
 
     while (!runtime_done.load(std::memory_order_acquire)) {
+#if defined(__ANDROID__)
+        // SDL input wakes the loop immediately. JNI touch state is sampled at
+        // least every 8 ms, without waking this thread a thousand times a second.
+        rocket::platform::pump_runtime_events(8);
+#else
         rocket::platform::pump_runtime_events();
         ultramodern::sleep_milliseconds(1);
+#endif
     }
     runtime_thread.join();
 

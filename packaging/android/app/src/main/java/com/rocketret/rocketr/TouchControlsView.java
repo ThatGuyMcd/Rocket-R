@@ -28,6 +28,8 @@ public final class TouchControlsView extends View {
     private final Runnable refresh = new Runnable() {
         @Override public void run() {
             boolean next = RocketActivity.nativeOverlayVisible();
+            if (getContext() instanceof RocketActivity)
+                ((RocketActivity)getContext()).updateGameFrameRate(next);
             boolean nextCamera = RocketActivity.nativeCameraActive();
             if (nextCamera != cameraActive) { cameraActive=nextCamera; layoutControls(); }
             if (overlay != next) {

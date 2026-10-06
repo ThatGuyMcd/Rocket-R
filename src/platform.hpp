@@ -16,15 +16,16 @@ namespace rocket::platform {
 
 bool initialise();
 void shutdown();
-ultramodern::renderer::WindowHandle create_window();
+ultramodern::renderer::WindowHandle create_window(bool for_game = true);
 // Platform-only launcher -> renderer handoff. Windows stays unchanged.
 ultramodern::renderer::WindowHandle prepare_window_for_game();
 SDL_Window* sdl_window();
 #if defined(__ANDROID__)
 void* android_native_window();
 int android_display_refresh_rate();
+void set_android_presentation_rate(int rate);
 #endif
-void pump_runtime_events();
+void pump_runtime_events(int wait_ms = 0);
 void sample_input();
 struct CameraInput { float x=0, y=0; bool recenter=false; float mouse_yaw=0, mouse_pitch=0; };
 CameraInput camera_input();

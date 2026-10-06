@@ -70,6 +70,11 @@
           "path": "patches/n64-modern-runtime/0013-profile-mod-paths-and-protected-hooks.patch",
           "purpose": "Separate mod profiles and saves from ROM storage; protect built-in game fixes against hooks and forced replacements; synchronize patched instruction caches.",
           "sha256": "6fd549a889dd3598c31a693bf0803cb3516562f6d2b8a170a2a8e4e1a192d534"
+        },
+        {
+          "path": "patches/n64-modern-runtime/0013-reuse-immutable-graphics-snapshots.patch",
+          "purpose": "Reuse immutable 8 MiB task snapshot leases without redundant initialization, retaining SP/DP ordering and bounding idle cached buffers.",
+          "sha256": "32b651380f861b3f8f4655a0af61459861a33965c80e9edca856891a6b43bd15"
         }
       ]
     },
@@ -219,6 +224,31 @@
           "path": "patches/rt64/0026-rocket-full-width-sky-gradient-filter.patch",
           "purpose": "Average the entire eight-column sky gradient so full dithering reduction is independent of texture sampling phase.",
           "sha256": "91b2c0969d9f96859df3af63fb3866b2ffb15b55cb0a108a5119119b58d14aaf"
+        },
+        {
+          "path": "patches/rt64/0027-rocket-cached-native-sky-filter.patch",
+          "purpose": "Filter the verified narrow sky in a cached native-size RGBA texture; remove sixteen per-pixel filter samples while preserving fractional scrolling and replacement packs.",
+          "sha256": "28ae4b991f362c2a827e9760bd20f27a2c972237d17bcfb140a94b2771207b58"
+        },
+        {
+          "path": "patches/rt64/0028-rocket-sky-upload-routing.patch",
+          "purpose": "Route Rocket's raw 1024-row sky declaration through the cached 256-row native filter while preserving physical TMEM wrapping and replacement packs.",
+          "sha256": "b5da2cdfdef844810be26d30b31348ff5c0a685bface06f90325c0a51947a555"
+        },
+        {
+          "path": "patches/rt64/0029-vulkan-mapped-memory-and-queue-ownership.patch",
+          "purpose": "Flush CPU uploads and invalidate readbacks for non-coherent Vulkan memory; share resources across distinct queue families and report Android memory capabilities.",
+          "sha256": "72a2d13ced8b7f239b73782a77243b13f35e827e5d8da3a884b95be43f89c4bf"
+        },
+        {
+          "path": "patches/rt64/0030-android-background-shader-priority.patch",
+          "purpose": "Give Android shader compilation threads a real background nice priority without changing foreground rendering or audio scheduling.",
+          "sha256": "98dd66bcc2684a26d0f87cc8838cc98a3d8e48f988e1ce1b58095c91ebeed7f2"
+        },
+        {
+          "path": "patches/rt64/0031-android-vulkan-device-diagnostics.patch",
+          "purpose": "Record Android Vulkan device, driver and API versions once at startup for device-specific graphics reports.",
+          "sha256": "62c63c24da43455d2acb1e4e3d0a6fbb712d1602fa06674b809d2220a60f205b"
         }
       ]
     }

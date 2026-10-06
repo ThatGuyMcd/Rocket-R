@@ -319,10 +319,14 @@ void rocket::graphics::set_settings(const Settings& value, bool mark_custom) {
 }
 
 void rocket::graphics::reset_settings() {
+#if defined(__ANDROID__)
+    set_settings(preset_settings(GraphicsPreset::LowPower), false);
+#else
     set_settings(Settings{}, false);
+#endif
 }
 
-void rocket::graphics::apply_preset(GraphicsPreset preset) {
+rocket::graphics::Settings rocket::graphics::preset_settings(GraphicsPreset preset) {
     Settings s{};
     s.preset = preset;
     switch (preset) {
@@ -355,13 +359,14 @@ void rocket::graphics::apply_preset(GraphicsPreset preset) {
         s.z_fighting = ZFightingMode::Consistent;
         break;
     case GraphicsPreset::Performance:
-        s.aspect = AspectPreset::FitWindow;
+        s.aspect = AspectPreset::Original4x3;
         s.texture_filtering = TextureFiltering::Linear;
         s.three_point_filtering = true;
         s.framebuffer_precision = FramebufferPrecision::Original;
         s.display_buffering = DisplayBuffering::Double;
-        s.hardware_resolve = HardwareResolve::On;
-        s.anisotropy = 4;
+        s.hardware_resolve = HardwareResolve::Automatic;
+        s.anisotropy = 1;
+        s.mip_lod_bias = 0.0F;
         s.draw_distance_multiplier = 1.0F;
         s.vi_filter = ViFilterMode::Clean;
         s.post_process = PostProcessMode::Off;
@@ -370,8 +375,19 @@ void rocket::graphics::apply_preset(GraphicsPreset preset) {
         s = settings();
         s.preset = GraphicsPreset::Custom;
         break;
+    case GraphicsPreset::LowPower:
+        s.texture_filtering = TextureFiltering::Nearest;
+        s.framebuffer_precision = FramebufferPrecision::Original;
+        s.display_buffering = DisplayBuffering::Double;
+        s.anisotropy = 1;
+        s.mip_lod_bias = 0.0F;
+        break;
     }
-    set_settings(s, false);
+    return s;
+}
+
+void rocket::graphics::apply_preset(GraphicsPreset preset) {
+    set_settings(preset_settings(preset), false);
 }
 
 std::uint64_t rocket::graphics::revision() {
