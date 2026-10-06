@@ -12,7 +12,7 @@ Recompilation project by **ThatGuyMcd**.
 
 To keep up to date with news, Join the Discord!
 <p align="center">
-  <a href="https://discord.com/invite/AMWfXdBjNP">
+  <a href="https://discord.gg/39aGEGqsX3">
     <img src="https://img.shields.io/badge/JOIN%20OUR%20DISCORD-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join our Discord">
   </a>
 </p>
